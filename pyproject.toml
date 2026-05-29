@@ -1,0 +1,58 @@
+[project]
+name = "theaterdb"
+version = "0.1.0"
+description = "German Theatre Play Database"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+	"sqlmodel>=0.0.24",
+	"sqlalchemy>=2.0.47",
+	"streamlit>=1.54.0",
+	"authlib>=1.7.2",
+]
+
+[dependency-groups]
+dev = [
+    "prek>=0.4.3",
+    "ruff>=0.15.15",
+]
+
+[tool.ruff]
+fix = true
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+extend-select = [
+  "ANN",  # flake8-annotations
+  "B",    # flake8-bugbear
+  "C4",   # flake8-comprehensions
+  "C90",  # mccabe
+  "D",    # pydocstyle
+  "FURB", # refurb
+  "I",    # isort
+  "N",    # pep8-naming
+  "PERF", # Perflint
+  "PL",   # pylint
+  "RUF",  # Ruff-specific rules
+  "S",    # flake8-bandit
+  "SIM",  # flake8-simplify
+  "UP",   # pyupgrade
+  "W",    # pycodestyle (warning)
+]
+ignore = [
+  "D100",   # Missing docstring in public module
+  "D104",   # Missing docstring in public package
+  "PLR",    # pylint refactor
+]
+preview = true
+
+[tool.ruff.lint.per-file-ignores]
+
+"tests/*" = [
+  "PLC2701", # Private name import from external module
+  "S101", # Use of assert detected
+  "ANN",
+]
+[tool.ruff.lint.pydocstyle]
+convention = "google"
