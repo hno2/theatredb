@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "theaterdb"
 version = "0.1.0"
@@ -9,18 +13,21 @@ dependencies = [
 	"sqlalchemy>=2.0.47",
 	"streamlit>=1.54.0",
 	"authlib>=1.7.2",
+	"psycopg[binary]>=3.3.4",
+
 ]
 
 [dependency-groups]
 dev = [
     "prek>=0.4.3",
     "ruff>=0.15.15",
+    "pyrefly>=1.0.0",
 ]
 
 [tool.ruff]
 fix = true
 line-length = 120
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 extend-select = [
@@ -56,3 +63,9 @@ preview = true
 ]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.setuptools]
+py-modules = []
+
+[tool.setuptools.packages.find]
+include = ["backend*", "frontend*", "old_do_not_use*"]

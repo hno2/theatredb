@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:18.4
+    restart: always
+    # set shared memory limit when using docker compose
+    shm_size: 128mb
+    ports:
+      - 5432:5432
+    volumes:
+      - ./db_data:/var/lib/postgresql/
+    env_file:
+      - ./.env
+
+  app:
+    build: .
+    restart: always
+    ports:
+      - 80:8501
+    depends_on:
+      - db
+    env_file:
+      - ./.env
