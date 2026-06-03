@@ -58,13 +58,15 @@ def _serialize_entity_graph(
 
 
 def _resolve_order_by[ModelT: SQLModel](
-    model_cls: type[ModelT], order_by: str | None = None
+    model_cls: type[ModelT], order_by: str | InstrumentedAttribute | None = None
 ) -> InstrumentedAttribute | None:
     """Resolve `order_by` into a SQLModel column/expression.
 
     Accepts either a SQLAlchemy column/expression or a field name string.
     Falls back to `name`, then `title`, then `id` when field is missing.
     """
+    if order_by is not None and not isinstance(order_by, str):
+        return cast(InstrumentedAttribute[Any], order_by)
     candidates = ([order_by] if order_by is not None else []) + ["name", "title", "id"]
     for field in candidates:
         value = getattr(model_cls, field, None)
@@ -98,6 +100,20 @@ def list_entities_where[ModelT: SQLModel](
         if order_expr is not None:
             stmt = stmt.order_by(order_expr)
         return list(session.exec(stmt).all())
+
+
+def get_unique_field_values[ModelT: SQLModel](model_cls: type[ModelT], field_name: str) -> list[Any]:
+    """Get a list of unique values for a specified field across all entities of the given type."""
+    with get_session() as session:
+        col = getattr(model_cls, field_name)
+        values = session.exec(select(col).where(col.isnot(None))).all()
+        unique: set[Any] = set()
+    for value in values:
+        if isinstance(value, list):
+            unique.update(v for v in value if v is not None)
+        else:
+            unique.add(value)
+    return sorted(unique, key=str)
 
 
 def get_entity_graph[ModelT: SQLModel](
