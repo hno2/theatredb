@@ -237,9 +237,9 @@ def _render_datetime(field: _FieldUI, d: dt.datetime | dt.date | None) -> FormVa
     elif isinstance(d, dt.date):
         date = d
     else:
-        date = dt.datetime.now(tz=dt.UTC).date()
+        date = None
     picked = st.date_input(field.label, value=date, format="DD.MM.YYYY", min_value=dt.date(100, 1, 1))
-    return dt.datetime.combine(picked, dt.time.min)
+    return picked or None
 
 
 def _render_multiselect(field: _FieldUI, d: str, key: str, accept_new: bool = True) -> FormValue:
