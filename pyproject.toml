@@ -26,7 +26,7 @@ dev = [
 ]
 ingest=[
 	"tqdm>=4.67.3",
-	"aiohttp>=3.14.0",
+	"aiohttp>=3.14.1",
 	"selectolax>=0.4.10",
 ]
 
