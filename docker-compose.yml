@@ -15,8 +15,21 @@ services:
     build: .
     restart: always
     ports:
-      - 80:8501
+      - 8501:8501
     depends_on:
       - db
     env_file:
       - ./.env
+    networks:
+      - web
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.theater.rule=Host(`theater.simonklug.de`)"
+      - "traefik.http.routers.theater.entrypoints=websecure"
+      - "traefik.http.routers.theater.tls.certresolver=letsencrypt"
+      - "traefik.http.services.theater.loadbalancer.server.port=8501"
+
+networks:
+  web:
+    external: true

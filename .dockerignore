@@ -221,3 +221,4 @@ db_data/
 skills-lock.json
 .agents/*
 old_do_not_use/*
+data/
