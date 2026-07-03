@@ -1,4 +1,4 @@
-from backend.models import Person, Production, ProductionMembership, Text, Organization
+from backend.models import Organization, Person, Production, ProductionMembership, Text
 from backend.user_management import init_db
 from frontend.management.uifactory import render_sqlmodel_crud
 

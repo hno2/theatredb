@@ -11,7 +11,7 @@ from sqlmodel import SQLModel
 from streamlit import session_state, user
 
 from backend.entity_management import create_entity, delete_entity, list_entities, list_entities_where, update_entity
-from backend.models import Person, TextContribution
+from backend.models import EntitySource, Person, Source, TextContribution
 
 FormValue = str | int | float | bool | dt.datetime | list[str] | dict | None
 
@@ -643,6 +643,41 @@ def _render_add_form(model_cls: type[SQLModel], fields: list[_FieldUI], actor: s
             st.rerun()
 
 
+def _render_sources_for_selected(model_cls: type[SQLModel], sel_row: dict) -> None:
+    entity_id = str(sel_row.get("id", "")).strip()
+    entity_type = getattr(model_cls, "_entity_type", None)
+    if not entity_id or entity_type is None:
+        return
+
+    source_name_by_id = {
+        str(s.model_dump(mode="python").get("id")): str(getattr(s, "name", "")) for s in list_entities(Source)
+    }
+    source_rows = []
+    for es in list_entities(EntitySource, order_by=EntitySource.sourced_at):
+        data = es.model_dump(mode="python")
+        if str(data.get("entity_id")) != entity_id:
+            continue
+        if str(data.get("entity_type")) != str(entity_type):
+            continue
+        source_id = str(data.get("source_id") or "")
+        source_rows.append(
+            {
+                "source": source_name_by_id.get(source_id, source_id),
+                "external_url": data.get("external_url"),
+                "external_id": data.get("external_id"),
+                "title": data.get("title"),
+                "sourced_at": data.get("sourced_at"),
+                "reviewed": data.get("reviewed"),
+            }
+        )
+
+    if not source_rows:
+        return
+
+    st.subheader(":material/link: Sources")
+    st.dataframe(pd.DataFrame(source_rows), hide_index=True)
+
+
 def render_sqlmodel_crud(
     *,
     model_cls: type[SQLModel],
@@ -674,6 +709,7 @@ def render_sqlmodel_crud(
     sel_row = _render_table(df, fields, model_cls.__name__)
     if sel_row:
         _render_edit_form(model_cls, fields, sel_row, actor)
+        _render_sources_for_selected(model_cls, sel_row)
         if inline_relations:
             _render_inline_relations(str(sel_row.get("id")), inline_relations, actor)
     else:
