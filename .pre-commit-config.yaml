@@ -32,10 +32,12 @@ repos:
         name: Ruff format
         entry: ruff format
         language: system
+        types_or: [python, pyi]
       - id: ruff
         name: Ruff check
         entry: ruff check --unsafe-fixes
         language: system
+        types_or: [python, pyi]
       - id: pyrefly-check
         name: Pyrefly (type checking)
         entry: pyrefly check

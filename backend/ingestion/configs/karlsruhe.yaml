@@ -1,0 +1,65 @@
+source_id: staatstheater-karlsruhe.de
+organization_name: Badisches Staatstheater Karlsruhe
+base_url: https://www.staatstheater-karlsruhe.de/
+request_delay: 1
+listing:
+  urls:
+    - https://www.staatstheater-karlsruhe.de/programm/schauspiel/
+  selector: h3.recife a[href]
+  include: /programm/info/\d+/$
+production:
+  title:
+    selector: h1.h2
+    required: true
+  description:
+    selector: div.col-md-12.col-lg-8 > p
+    stop_tag: hr
+    min_length: 60
+    exclude: '^(Deutsch von|Ab\s+\d+\s+Jahren|Dauer:|Premiere|Karlsruher Premiere|Inhaltliche Hinweise|Übernahme vom)\b'
+    join: "\n\n"
+  premiere:
+    selector: div.col-md-12.col-lg-8 p
+    match: Premiere.*\d{1,2}\.\d{1,2}\.\d{4}
+    format: date_de
+  duration:
+    selector: div.col-md-12.col-lg-8 p
+    match: 'Dauer:\s*\d'
+    format: duration
+  age_rating:
+    selector: div.col-md-12.col-lg-8 p
+    extract: Ab\s+(\d+)\s+Jahren
+    format: integer
+  author:
+    selector: div.col-md-12.col-lg-8 h2.h4
+    match: \b(von|nach)\b
+    format: author
+credits:
+  - selector: '#besetzung + div table tr'
+    name:
+      selector: 'td:nth-child(2) a, td:nth-child(2):not(:has(a))'
+      many: true
+      required: true
+    role:
+      selector: th:first-child, td:first-child
+    url:
+      selector: td:nth-child(2) a[href*="ensemble/id/"]
+      attribute: href
+      format: url
+      many: true
+    carry_role: true
+    actor_labels: [Mit]
+role_types:
+  Bühne: set_designer
+  Licht: light_designer
+  Übersetz: translator
+  Bearbeitung|Fassung: adapter
+person:
+  name:
+    selector: h1
+    required: true
+  description:
+    selector: main div.col-sm-12.col-md-7 > p
+    min_length: 80
+    strip: Möchten Sie sich auf die Warteliste setzen lassen\?.*$
+    join: "\n\n"
+    required: true

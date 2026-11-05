@@ -1,5 +1,5 @@
-## Install 
-### Docker 
+## Install
+### Docker
 ### Local Usage
 The app loads database settings from the project-root `.env` file, regardless of
 the working directory. Existing environment variables are not overwritten.
@@ -11,6 +11,12 @@ Keep credentials in `.env`, not in the `.venv` Python environment directory.
 
 ## Quick Start
 ### Data Ingestion
+
+See the separate [ingestion guide](backend/ingestion/README.md) for the staging
+JSON Schema, configurable Karlsruhe/Stuttgart scrapers, safe single-page tests,
+scrape diffs and persistent page-change checks. Scraping does not write to the
+database; imports still require review.
+
 #### Review-first reconciliation
 
 Open **Verwaltung → Datenabgleich & Duplikate**:
@@ -151,6 +157,6 @@ long lists scroll within the production tab, while sources have their own tab.
 - Start db via docker compose up db -d
 
 ## Planned Features
-- [ ] 
+- [ ]
 - [ ] Actual Dates of performances
-- [ ] Crawl all Staatstheater/Stadttheater for new info weekly 
+- [ ] Crawl all Staatstheater/Stadttheater for new info weekly

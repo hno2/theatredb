@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from sqlmodel import select
 
+from backend.ingestion.staging import validate_records
 from backend.models import EntityType, Source
 from backend.reconciliation import canonical_role, canonical_url, propose_record
 from backend.user_management import get_session, init_db
@@ -31,29 +32,18 @@ def _premiere(value: object) -> str | None:
     return dt.datetime.fromisoformat(value).isoformat()
 
 
-def _validate_records(records: list[dict]) -> None:
-    if not isinstance(records, list) or not records:
-        raise ValueError("Expected a non-empty JSON array")
-    for index, record in enumerate(records):
-        if not isinstance(record, dict) or not _clean(record.get("title")) or not _clean(record.get("url")):
-            raise ValueError(f"Record {index + 1}: title and URL are required")
-        canonical_url(record["url"])
-        _premiere(record.get("premiere"))
-        memberships = record.get("memberships", [])
-        if not isinstance(memberships, list):
-            raise TypeError(f"Record {index + 1}: memberships must be an array")
-        for member in memberships:
-            if not isinstance(member, dict) or not _clean(member.get("name")):
-                raise ValueError(f"Record {index + 1}: every membership needs a name")
-
-
 def _stage_person(member: dict, record: dict, organization_name: str, common: dict) -> tuple[str, str, dict]:
     name, raw_role = member["name"].strip(), _clean(member.get("role"))
-    person_type = canonical_role(_clean(member.get("type")) or raw_role or "actor")
+    raw_types = member.get("type") or raw_role or "actor"
+    person_types = list(
+        dict.fromkeys(canonical_role(kind) for kind in (raw_types if isinstance(raw_types, list) else [raw_types]))
+    )
+    person_type = person_types[0]
     if person_type is None:
         raise ValueError("A person type is required")
     role = canonical_role(raw_role) or person_type
-    if person_type == "actor" or role not in {
+    if role not in {
+        "actor",
         "director",
         "dramaturg",
         "set_designer",
@@ -67,14 +57,16 @@ def _stage_person(member: dict, record: dict, organization_name: str, common: di
         "adapter",
     }:
         role = person_type
-    person_url = _clean(member.get("url"))
+    person_urls = list(dict.fromkeys([*([member["url"]] if member.get("url") else []), *member.get("urls", [])]))
+    person_url = person_urls[0] if person_urls else None
     person = propose_record(
         EntityType.PERSON,
         {
             "name": name,
-            "type": [person_type],
-            "urls": [person_url] if person_url else [],
+            "type": person_types,
+            "urls": person_urls,
             "description": _clean(member.get("description")),
+            **{field: member.get(field) for field in ("born", "died", "nationality")},
         },
         external_url=person_url,
         # A source assertion, not a globally unique human.
@@ -88,7 +80,7 @@ def _stage_person(member: dict, record: dict, organization_name: str, common: di
         {
             "case_id": str(person.id),
             "role": role,
-            "character": raw_role if person_type == "actor" else None,
+            "character": (_clean(member.get("character")) or raw_role) if role == "actor" else None,
             "source_role": raw_role,
         },
     )
@@ -110,7 +102,7 @@ def stage_records(
     """
     if not source_name.strip() or not organization_name.strip():
         raise ValueError("Source and organization names are required")
-    _validate_records(records)
+    records = validate_records(records)
     if source_base_url:
         source_base_url = canonical_url(source_base_url)
     else:
@@ -179,6 +171,8 @@ def stage_records(
                 "duration": record.get("duration"),
                 "age_rating": record.get("age_rating"),
                 "url": record["url"],
+                "tags": record["tags"],
+                "critics": record["critics"],
             },
             external_url=record["url"],
             context={

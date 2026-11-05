@@ -1,4 +1,4 @@
-"""backend/ingestion/base_scraper.py
+"""backend/ingestion/base_scraper.py.
 
 Abstract base class for all theater scrapers.
 
@@ -31,7 +31,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 import aiohttp
-from selectolax.parser import HTMLParser, Node
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
+from selectolax.lexbor import LexborNode as Node
 from tqdm.asyncio import tqdm
 
 DATE = dt.datetime.now(dt.UTC).strftime("%Y%m%d")
@@ -79,6 +80,8 @@ def parse_date_dmy(text: str) -> str | None:
 
 def parse_duration_minutes(text: str) -> int | None:
     """Extract duration in minutes from strings like: 'Dauer: 1 Std. 45 Min.' or 'Dauer: 1h 45' or 'Dauer: ca. 1h 45'."""
+    if match := re.search(r"(\d+)\s*:\s*([0-5]\d)\s*(?:Std\.?|h)", text, re.IGNORECASE):
+        return int(match[1]) * 60 + int(match[2])
     hours = 0
     minutes = 0
     if m := re.search(r"(\d+)\s*(?:Std\.?|h)\b", text):
@@ -131,7 +134,7 @@ def extract_author_info(line: str) -> tuple[str | None, str]:
     if not line:
         return None, "author"
     # strip leading role phrase "X von " or "X: "
-    name = re.sub(r"^[^:]+:\s*|^.*?\bvon\b\s*", "", line, flags=re.IGNORECASE).strip()
+    name = re.sub(r"^[^:]+:\s*|^.*?\b(?:von|nach)\b\s*", "", line, flags=re.IGNORECASE).strip()
     kind = infer_person_type(line)
     return (name or None), kind
 

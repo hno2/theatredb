@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "HttpURL": {
+      "format": "uri",
+      "minLength": 1,
+      "pattern": "^https?://[^\\s/?#]+[^\\s]*$",
+      "type": "string"
+    },
+    "NonEmptyText": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "NonNegativeInt": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "StagedMembership": {
+      "additionalProperties": false,
+      "description": "Person fields from Person, plus the source's production credit.\n\nA scalar type remains accepted for existing Karlsruhe snapshots; new\nproducers may use Person.type's list form. IDs and database links are\ndeliberately excluded: reconciliation resolves them after review.",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/NonEmptyText"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Type"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpURL"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "urls": {
+          "items": {
+            "$ref": "#/$defs/HttpURL"
+          },
+          "title": "Urls",
+          "type": "array"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "born": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Born"
+        },
+        "died": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Died"
+        },
+        "nationality": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nationality"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "character": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Character"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "StagedMembership",
+      "type": "object"
+    },
+    "StagedProduction": {
+      "additionalProperties": false,
+      "description": "Source-facing Production fields; title maps to Production.name and Text.title.",
+      "properties": {
+        "title": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "url": {
+          "$ref": "#/$defs/HttpURL"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "premiere": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Premiere"
+        },
+        "duration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "age_rating": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tags": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Tags",
+          "type": "array"
+        },
+        "critics": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Critics",
+          "type": "array"
+        },
+        "author": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author"
+        },
+        "memberships": {
+          "items": {
+            "$ref": "#/$defs/StagedMembership"
+          },
+          "title": "Memberships",
+          "type": "array"
+        }
+      },
+      "required": [
+        "title",
+        "url"
+      ],
+      "title": "StagedProduction",
+      "type": "object"
+    }
+  },
+  "description": "Non-empty production array accepted by the staging importer.",
+  "items": {
+    "$ref": "#/$defs/StagedProduction"
+  },
+  "minItems": 1,
+  "title": "StagedProductions",
+  "type": "array"
+}

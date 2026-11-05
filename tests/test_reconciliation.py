@@ -126,6 +126,78 @@ def test_staging_only_creates_cases_and_is_idempotent(db, source):
     assert not list_cases()
 
 
+def test_staging_current_person_and_production_fields_survive_review(db, source):
+    cases = stage_records(
+        [
+            {
+                "title": "Current fields",
+                "url": "https://theatre.example/p/current",
+                "tags": ["drama"],
+                "critics": ["https://reviews.example/current"],
+                "memberships": [
+                    {
+                        "name": "Multi-role Person",
+                        "type": ["actor", "director"],
+                        "role": "Regie",
+                        "url": "https://theatre.example/people/1",
+                        "urls": ["https://profile.example/1"],
+                        "born": "1980-01-02",
+                        "died": "2025-03-04",
+                        "nationality": "Example",
+                    },
+                    {"name": "Actor", "type": "actor", "role": "source label", "character": "Hamlet"},
+                ],
+            }
+        ],
+        source_name=source.name,
+        organization_name="Theatre",
+        actor_id="test",
+    )
+    for kind in ("organization", "person", "text", "production"):
+        for case_id in cases[kind]:
+            preview = preview_case(case_id)
+            approve_case(case_id, revision=preview["revision"], actor_id="test", allow_create=True)
+    with Session(db) as session:
+        person = session.exec(select(Person).where(Person.name == "Multi-role Person")).one()
+        assert person.type == ["actor", "director"]
+        assert person.born == dt.date(1980, 1, 2)
+        assert person.died == dt.date(2025, 3, 4)
+        assert person.nationality == "Example"
+        assert person.urls == ["https://theatre.example/people/1", "https://profile.example/1"]
+        production = session.exec(select(Production)).one()
+        assert production.tags == ["drama"]
+        assert production.critics == ["https://reviews.example/current"]
+        assert (
+            session.exec(select(ProductionMembership).where(ProductionMembership.person_id == person.id)).one().role
+            == "director"
+        )
+        assert (
+            session.exec(select(ProductionMembership).where(ProductionMembership.role == "actor")).one().character
+            == "Hamlet"
+        )
+
+
+def test_staging_validates_every_record_before_creating_source_or_cases(db):
+    with pytest.raises(ValueError):
+        stage_records(
+            [
+                {"title": "Valid", "url": "https://theatre.example/1"},
+                {
+                    "title": "Invalid",
+                    "url": "https://theatre.example/2",
+                    "memberships": [
+                        {"name": "Person", "url": "javascript:alert(1)"},
+                    ],
+                },
+            ],
+            source_name="new-source",
+            organization_name="Theatre",
+            actor_id="test",
+        )
+    assert count(db, Source) == 0
+    assert count(db, ReconciliationCase) == 0
+
+
 def test_production_matching_requires_org_and_directors(db):
     org, other_org, director, wrong_director = save(
         db,

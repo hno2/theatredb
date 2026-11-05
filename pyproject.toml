@@ -24,11 +24,14 @@ dev = [
     "ruff>=0.15.18",
     "pyrefly>=1.0.0",
     "pytest>=9.0.3",
+    "jsonschema>=4.26.0",
+    "rfc3339-validator>=0.1.4",
 ]
 ingest=[
 	"tqdm>=4.67.3",
 	"aiohttp>=3.14.1",
 	"selectolax>=0.4.10",
+	"pyyaml>=6.0.3",
 ]
 
 [tool.ruff]
@@ -77,6 +80,9 @@ py-modules = []
 
 [tool.setuptools.packages.find]
 include = ["backend*", "frontend*", "old_do_not_use*"]
+
+[tool.setuptools.package-data]
+"backend.ingestion" = ["configs/*.yaml", "staging.schema.json"]
 
 [tool.pyrefly]
 project-includes = [
