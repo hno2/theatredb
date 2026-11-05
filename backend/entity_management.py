@@ -6,6 +6,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlmodel import Session, SQLModel, func, select
 
+from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
 
@@ -25,33 +26,46 @@ def _entity_identity(entity: SQLModel) -> tuple[str, str]:
     return (entity.__class__.__name__, str(data.get("id", id(entity))))
 
 
+_TERMINAL_TYPES: frozenset[str] = frozenset(
+    {
+        "Person",
+        "Venue",
+    }
+)
+
+
 def _serialize_entity_graph(
     entity: SQLModel,
     *,
     seen: set[tuple[str, str]] | None = None,
     max_depth: int = 3,
+    root_type: str | None = None,
 ) -> dict[str, Any]:
     """Serialize entity plus attached relationships into JSON-safe nested dict."""
     seen = seen or set()
     ident = _entity_identity(entity)
     data = entity.model_dump(mode="json")
-    if ident in seen or max_depth <= 0:
+    if ident in seen or max_depth <= 0 or type(entity).__name__ in _TERMINAL_TYPES:
         return data
-
     seen.add(ident)
+    root_type = root_type or type(entity).__name__
     mapper = sa_inspect(entity.__class__)
     for rel in mapper.relationships:
+        # skip relations that point back to the root entity type
+        related_type = rel.mapper.class_.__name__
+        if related_type == root_type:
+            continue
         rel_value = getattr(entity, rel.key)
         if rel_value is None:
             data[rel.key] = None
             continue
         if rel.uselist:
             data[rel.key] = [
-                _serialize_entity_graph(child, seen=seen.copy(), max_depth=max_depth - 1) for child in rel_value
+                _serialize_entity_graph(child, seen=seen, max_depth=max_depth - 1, root_type=root_type)
+                for child in rel_value
             ]
             continue
-        data[rel.key] = _serialize_entity_graph(rel_value, seen=seen.copy(), max_depth=max_depth - 1)
-
+        data[rel.key] = _serialize_entity_graph(rel_value, seen=seen, max_depth=max_depth - 1, root_type=root_type)
     if hasattr(entity, "sources"):
         data["sources"] = [_snapshot(source) for source in entity.sources]
     return data
@@ -89,7 +103,7 @@ def list_entities_where[ModelT: SQLModel](
     model_cls: type[ModelT],
     *,
     filter_field: str,
-    filter_value: Any,  # noqa: ANN401
+    filter_value: Any,  # ruff: ignore[any-type]
     order_by: str | None = "id",
 ) -> list[ModelT]:
     """List entities of the given type filtered by a field value, optionally ordered."""
@@ -121,7 +135,10 @@ def get_entity_graph[ModelT: SQLModel](
 ) -> dict[str, Any]:
     """Fetch one entity by id with nested relationship data."""
     with get_session() as session:
-        entity = session.get(model_cls, entity_id)
+        resolved_id = (
+            resolve_id(session, model_cls._entity_type, entity_id) if hasattr(model_cls, "_entity_type") else entity_id
+        )
+        entity = session.get(model_cls, resolved_id)
         if entity is None:
             raise ValueError(f"{model_cls.__name__} not found")
         return _serialize_entity_graph(entity, max_depth=max_depth)
@@ -187,6 +204,10 @@ def _attach_missing_sources[ModelT: SQLModel](
 ) -> None:
     """Attach source links that don't already exist on the entity."""
     for link in source_links or []:
+        link_external_id = link.get("external_id")
+        link_external_url = link.get("external_url")
+        link_title = link.get("title") or link.get("external_title")
+
         already_exists = session.exec(
             select(EntitySource).where(
                 EntitySource.entity_type == model_cls._entity_type,
@@ -196,6 +217,18 @@ def _attach_missing_sources[ModelT: SQLModel](
         ).first()
 
         if already_exists:
+            changed = False
+            if not already_exists.external_id and link_external_id:
+                already_exists.external_id = link_external_id
+                changed = True
+            if not already_exists.external_url and link_external_url:
+                already_exists.external_url = link_external_url
+                changed = True
+            if not already_exists.title and link_title:
+                already_exists.title = link_title
+                changed = True
+            if changed:
+                session.add(already_exists)
             continue
 
         session.add(
@@ -203,9 +236,9 @@ def _attach_missing_sources[ModelT: SQLModel](
                 source_id=link["source_id"],
                 entity_type=model_cls._entity_type,
                 entity_id=entity_id,
-                external_id=link.get("external_id"),
-                external_url=link.get("external_url"),
-                external_title=link.get("external_title"),
+                external_id=link_external_id,
+                external_url=link_external_url,
+                title=link_title,
             )
         )
 

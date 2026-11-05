@@ -11,7 +11,7 @@ from sqlmodel import Field, Session, SQLModel, select
 class SCD2History(SQLModel, table=True):
     """Table for recording SCD2 history of entities."""
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     entity_name: str = Field(index=True)
     entity_id: str = Field(index=True)
     operation: str

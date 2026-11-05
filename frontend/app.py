@@ -2,6 +2,13 @@ from types import SimpleNamespace
 
 import streamlit as st
 
+from backend.user_management import init_db
+
+
+@st.cache_resource
+def _initialize_database() -> None:
+    init_db()
+
 
 def _get_effective_user() -> SimpleNamespace:
     real_user = st.user
@@ -19,6 +26,7 @@ def _get_effective_user() -> SimpleNamespace:
 
 
 st.set_page_config(page_title="TheaterDB", layout="wide")
+_initialize_database()
 
 user = _get_effective_user()
 st.sidebar.write(f"User: {user.name} ({user.email})")
@@ -29,12 +37,15 @@ pages = {
     "Entdecken": [
         st.Page("views/overview.py", title="Startseite", icon=":material/map:", default=True),
         st.Page("views/detail.py", title="Details", icon=":material/visibility:", url_path="detail"),
+        # st.Page("view.py", title="Production Detail", icon=":material/theater_comedy:"),
+        # st.Page("views/organization.py", title="Organization View", icon=":material/event_seat:"),
         # st.Page("views/people.py", title="People", icon=":material/person:"),
-        # st.Page("views/productions.py", title="Productions", icon=":material/local_activity:"),
+        # st.Page("views/production.py", title="Productions", icon=":material/local_activity:"),
         # st.Page("views/texts.py", title="Texts", icon=":material/menu_book:"),
         # st.Page("views/awards.py", title="Awards", icon=":material/trophy:"),
     ],
     "Verwaltung": [
+        st.Page("management/reconciliation.py", title="Datenabgleich & Duplikate", icon=":material/merge:"),
         st.Page("management/organizations.py", title="Organisationen", icon=":material/event_seat:"),
         st.Page("management/persons.py", title="Personen", icon=":material/person:"),
         st.Page("management/productions.py", title="Produktionen", icon=":material/local_activity:"),

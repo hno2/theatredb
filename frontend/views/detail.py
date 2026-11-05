@@ -4,8 +4,8 @@ import streamlit as st
 from backend.entity_management import get_entity_graph, list_entities
 from backend.models import Organization, Person, Production
 from frontend.views.organization import render_organization
-from frontend.views.production import render_production
 from frontend.views.person import render_person
+from frontend.views.production import render_production
 
 KIND_CONFIG = {
     "production": ("Produktion", Production, render_production),

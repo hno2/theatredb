@@ -1,9 +1,8 @@
 # components/production_detail.py
-import streamlit as st
-from backend.entity_management import get_entity_graph, list_entities
-from backend.models import Organization, Person, Production
-from backend.models import Production
 from datetime import date
+
+import streamlit as st
+
 from frontend.views.helpers import entity_link
 
 
@@ -44,8 +43,8 @@ def render_production(data: dict) -> None:
             caption_parts = [x for x in [role, character] if x]
             caption = " · ".join(caption_parts) if caption_parts else "—"
 
-            col_name, col_role = st.columns([2, 3])
-            col_name = entity_link(label, "person", person.get("id", ""))
+            _col_name, col_role = st.columns([2, 3])
+            entity_link(label, "person", person.get("id", ""))
             col_role.caption(caption)
 
     # ── Organization ──────────────────────────────────────────────────────────
