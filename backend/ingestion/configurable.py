@@ -13,10 +13,13 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 import aiohttp
 import yaml
+from bs4 import BeautifulSoup, NavigableString
+from markdownify import MarkdownConverter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from selectolax.lexbor import LexborNode as Node
 from selectolax.lexbor import SelectolaxError
+from tqdm import tqdm
 
 from backend.ingestion.base_scraper import (
     extract_author_info,
@@ -69,7 +72,7 @@ class FieldRule(ConfigModel):
     limit: PositiveInt | None = None
     stop_tag: str | None = None
     required: bool = False
-    format: Literal["text", "date_de", "duration", "integer", "author", "url"] = "text"
+    format: Literal["text", "markdown", "date_de", "duration", "integer", "author", "url"] = "text"
 
     @model_validator(mode="after")
     def validate_expressions(self) -> FieldRule:
@@ -149,7 +152,7 @@ def load_config(path_or_name: str | Path) -> ScraperConfig:
     """Load a checked JSON/YAML file or one of the bundled venue names."""
     path = Path(path_or_name)
     if not path.exists() and not path.suffix:
-        path = CONFIG_DIR / f"{path.name}.yaml"
+        path = CONFIG_DIR / f"{path.name.casefold()}.yaml"
     text = path.read_text(encoding="utf-8")
     data = json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
     return ScraperConfig.model_validate(data)
@@ -191,9 +194,34 @@ def _past_stop(node: Node, tag: str | None) -> bool:
     return False
 
 
-def _extract_text(node: Node, rule: FieldRule) -> str | None:
-    value = (node.attributes.get(rule.attribute) or "") if rule.attribute else node.text(separator=" ", strip=True)
-    value = " ".join(value.split())
+def _clean_text(text: str) -> str:
+    return text.translate(str.maketrans({"\u00ad": None, "\u200b": None, "\ufeff": None, "\u00a0": " "}))
+
+
+def _markdown(node: Node, base_url: str) -> str:
+    if node.html is None:
+        raise ValueError("Cannot convert a node without HTML to Markdown")
+    soup = BeautifulSoup(node.html, "html.parser")
+    for element in soup.select("script, style, noscript, template"):
+        element.decompose()
+    for text in list(soup.strings):
+        if isinstance(text, NavigableString):
+            text.replace_with(_clean_text(str(text)))
+    for heading in soup.select("h1, h2, h3, h4, h5, h6"):
+        heading.name = "p"
+    for link in soup.select("a[href]"):
+        href = link.get("href")
+        if isinstance(href, str):
+            link["href"] = urljoin(base_url, _clean_text(href))
+    return MarkdownConverter(bullets="-", autolinks=False).convert_soup(soup).strip()
+
+
+def _extract_text(node: Node, rule: FieldRule, base_url: str) -> str | None:
+    if rule.format == "markdown" and not rule.attribute:
+        value = _markdown(node, base_url)
+    else:
+        value = (node.attributes.get(rule.attribute) or "") if rule.attribute else node.text(separator=" ", strip=True)
+        value = " ".join(_clean_text(value).split())
     if rule.match and not re.search(rule.match, value, re.IGNORECASE):
         return None
     if rule.exclude and re.search(rule.exclude, value, re.IGNORECASE):
@@ -204,7 +232,8 @@ def _extract_text(node: Node, rule: FieldRule) -> str | None:
             return None
         value = match[1] if match.lastindex else match[0]
     if rule.strip:
-        value = re.sub(rule.strip, "", value, flags=re.IGNORECASE).strip()
+        flags = re.IGNORECASE | (re.DOTALL if rule.format == "markdown" else 0)
+        value = re.sub(rule.strip, "", value, flags=flags).strip()
     return value if value and len(value) >= rule.min_length else None
 
 
@@ -234,7 +263,7 @@ def extract_field(root: HTMLParser | Node, rule: FieldRule, base_url: str) -> st
     for node in root.css(rule.selector):
         if _past_stop(node, rule.stop_tag):
             break
-        value = _extract_text(node, rule)
+        value = _extract_text(node, rule, base_url)
         if value:
             values.extend(re.split(rule.split, value) if rule.split else [value])
         first_only = rule.join is None and not rule.many
@@ -320,6 +349,8 @@ class ConfigurableScraper:
         for group in self.config.credits:
             previous_role = ""
             for row in tree.css(group.selector):
+                if not _clean_text(row.text(separator=" ", strip=True)).strip():
+                    continue
                 role = extract_field(row, group.role, base)
                 if role is not None and not isinstance(role, str):
                     raise ValueError("A credit role must be text")
@@ -379,19 +410,22 @@ class ConfigurableScraper:
             headers={"User-Agent": self.config.user_agent},
         )
 
-    async def scrape(self, *, limit: int | None = 1, enrich_people: bool = True) -> list[dict]:
+    async def scrape(self, *, limit: int | None = None, enrich_people: bool = True) -> list[dict]:
         """Collect a bounded production set and optionally enrich its linked people once each."""
         if limit is not None and limit < 1:
-            raise ValueError("limit must be positive, or None for an explicit full scrape")
+            raise ValueError("limit must be positive, or None for all productions")
         async with self.session() as session:
             urls = await self._discover(session, limit)
             if not urls:
                 raise ValueError("No production links found; check listing selectors")
-            records = [self.parse_page(await self.fetch(session, url), url, "production") for url in urls]
+            with tqdm(urls, desc="Productions", unit="page") as progress:
+                records = [self.parse_page(await self.fetch(session, url), url, "production") for url in progress]
             if enrich_people:
                 profiles = {}
-                for url in sorted({m["url"] for r in records for m in r["memberships"] if m["url"]}):
-                    profiles[url] = self.parse_page(await self.fetch(session, url), url, "person")
+                person_urls = sorted({m["url"] for r in records for m in r["memberships"] if m["url"]})
+                with tqdm(person_urls, desc="People", unit="page") as progress:
+                    for url in progress:
+                        profiles[url] = self.parse_page(await self.fetch(session, url), url, "person")
                 for record in records:
                     for member in record["memberships"]:
                         profile = profiles.get(member["url"])
@@ -401,6 +435,15 @@ class ConfigurableScraper:
             return validate_records(records)
 
     async def _discover(self, session: aiohttp.ClientSession, limit: int | None) -> list[str]:
+        with tqdm(desc="Listing pages", unit="page") as progress:
+            return await self._discover_pages(session, limit, progress)
+
+    async def _discover_pages(
+        self,
+        session: aiohttp.ClientSession,
+        limit: int | None,
+        progress: tqdm,
+    ) -> list[str]:
         urls: list[str] = []
         seen: set[str] = set()
         for seed in self.config.listing.urls:
@@ -410,6 +453,7 @@ class ConfigurableScraper:
                     break
                 seen.add(url)
                 html = await self.fetch(session, url)
+                progress.update()
                 urls = list(dict.fromkeys([*urls, *self.parse_list(html, url)]))
                 if limit is not None and len(urls) >= limit:
                     return urls[:limit]

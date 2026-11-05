@@ -14,6 +14,7 @@ production:
     required: true
   description:
     selector: div.richtext.richtext--twocol-and-firstletter
+    format: markdown
     min_length: 40
     join: "\n\n"
   author:
@@ -70,6 +71,7 @@ person:
     required: true
   description:
     selector: main div.richtext
+    format: markdown
     min_length: 40
     join: "\n\n"
     required: true

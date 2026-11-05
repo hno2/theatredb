@@ -10,12 +10,12 @@ import aiohttp
 import yaml
 
 from backend.ingestion.configurable import ConfigurableScraper, load_config
-from backend.ingestion.snapshots import check_page, save_scrape, scrape_diff, write_json
+from backend.ingestion.snapshots import check_page, save_scrape, scrape_diff, without_null_fields, write_json
 from backend.ingestion.staging import validate_records, write_schema
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Build the public ingestion CLI; a full scrape always requires --all."""
+    """Build the ingestion CLI, scraping all productions unless --limit is given."""
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
     schema = subcommands.add_parser("schema", help="Generate the staging JSON Schema")
@@ -30,8 +30,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         sub.add_argument("--config", required=True, help="Bundled venue name or YAML/JSON config path")
         if command == "scrape":
             scope = sub.add_mutually_exclusive_group()
-            scope.add_argument("--limit", type=int, default=1, help="Maximum productions (default: 1)")
-            scope.add_argument("--all", action="store_true", help="Explicitly request all configured listing pages")
+            scope.add_argument("--limit", type=int, default=None, help="Maximum productions (default: all)")
+            scope.add_argument("--all", action="store_true", help="Scrape all productions (the default)")
             sub.add_argument("--no-people", action="store_true", help="Do not fetch linked biographies")
             sub.add_argument("--output-dir", type=Path, default=Path("data/staged"))
         else:
@@ -70,7 +70,7 @@ async def _run(args: argparse.Namespace) -> int:
             write_json(args.output, data)
             print(f"Saved {args.kind} to {args.output}")
         else:
-            print(json.dumps(data, ensure_ascii=False, indent=2))
+            print(json.dumps(without_null_fields(data), ensure_ascii=False, indent=2))
         return 0
     code, report = check_page(
         html,

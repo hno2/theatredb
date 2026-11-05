@@ -20,6 +20,15 @@ def digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def without_null_fields(data: object) -> object:
+    """Omit null and empty-array object fields recursively, retaining other values."""
+    if isinstance(data, dict):
+        return {key: without_null_fields(value) for key, value in data.items() if value is not None and value != []}
+    if isinstance(data, list):
+        return [without_null_fields(value) for value in data]
+    return data
+
+
 def write_json(path: Path, data: object) -> None:
     """Write JSON atomically so an interrupted check cannot corrupt its baseline."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,7 +43,7 @@ def write_json(path: Path, data: object) -> None:
             delete=False,
         ) as handle:
             temporary = Path(handle.name)
-            handle.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+            handle.write(json.dumps(without_null_fields(data), ensure_ascii=False, indent=2) + "\n")
         temporary.replace(path)
     finally:
         if temporary is not None:

@@ -21,9 +21,8 @@ from backend.ingestion.configurable import (
     load_config,
     parse_date_de,
 )
-from backend.ingestion.orgs.karlsruhe import KarlsruheScraper
 from backend.ingestion.scrape import main, parse_args
-from backend.ingestion.snapshots import check_page, save_scrape, scrape_diff
+from backend.ingestion.snapshots import check_page, save_scrape, scrape_diff, without_null_fields, write_json
 from backend.ingestion.staging import StagedMembership, StagedProduction, staging_schema, validate_records
 from backend.models import Person, Production
 
@@ -199,6 +198,45 @@ def test_karlsruhe_selectors_and_continuation_roles() -> None:
     assert members[8]["url"].endswith("/ensemble/id/5/")
 
 
+def test_bundled_config_names_are_case_insensitive() -> None:
+    assert load_config("Karlsruhe") == load_config("karlsruhe")
+    assert load_config("STUTTGART") == load_config("stuttgart")
+
+
+@pytest.mark.parametrize(
+    "spacer",
+    [
+        '<tr><th scope="row"><b></b></th><td>&nbsp;</td></tr>',
+        "<tr><td> \n </td><td><br></td></tr>",
+    ],
+)
+def test_blank_credit_spacers_preserve_continuation_roles(spacer: str) -> None:
+    scraper = ConfigurableScraper(load_config("karlsruhe"))
+    html = KARLSRUHE_HTML.replace(
+        '<tr><th></th><td><a href="ensemble/id/2/">Second Actor</a></td></tr>',
+        spacer + '<tr><th></th><td><a href="ensemble/id/2/">Second Actor</a></td></tr>',
+    )
+    expected = scraper.parse_page(KARLSRUHE_HTML, KARLSRUHE_URL, "production")
+    assert scraper.parse_page(html, KARLSRUHE_URL, "production") == expected
+    html = KARLSRUHE_HTML.replace(
+        "<tr><th>Bühne</th><td>Example Designer</td></tr>",
+        spacer + "<tr><th></th><td>Example Designer</td></tr>",
+    )
+    members = scraper.parse_page(html, KARLSRUHE_URL, "production")["memberships"]
+    assert members[3]["role"] == "Regie"
+    assert members[3]["type"] == "director"
+
+
+def test_nonempty_credit_row_without_person_still_fails() -> None:
+    scraper = ConfigurableScraper(load_config("karlsruhe"))
+    html = KARLSRUHE_HTML.replace(
+        '<tr><th>Regie</th><td><a href="ensemble/id/3/">Example Director</a></td></tr>',
+        "<tr><th>Regie</th><td>&nbsp;</td></tr>",
+    )
+    with pytest.raises(ValueError, match="Required selector"):
+        scraper.parse_page(html, KARLSRUHE_URL, "production")
+
+
 def test_stuttgart_selectors_short_dates_durations_and_multiple_people() -> None:
     scraper = ConfigurableScraper(load_config("stuttgart"))
     record = scraper.parse_page(STUTTGART_HTML, STUTTGART_URL, "production")
@@ -250,6 +288,87 @@ def test_person_rules_do_not_use_modal_or_footer_text(site: str, html: str, url:
     assert person["name"] == "Person"
     assert "Biography" in person["description"]
     assert "Unrelated" not in person["description"]
+
+
+@pytest.mark.parametrize(
+    ("site", "html", "url"),
+    [("karlsruhe", KARLSRUHE_HTML, KARLSRUHE_URL), ("stuttgart", STUTTGART_HTML, STUTTGART_URL)],
+)
+@pytest.mark.parametrize("noise", ["\u00ad", "&shy;", "&#173;", "\u200b", "\ufeff"])
+def test_text_cleanup_covers_all_production_and_credit_fields(site: str, html: str, url: str, noise: str) -> None:
+    scraper = ConfigurableScraper(load_config(site))
+    expected = scraper.parse_page(html, url, "production")
+    noisy_html = html.replace("Example", f"Exam{noise}ple").replace("synthetic", f"syn{noise}thetic")
+    assert scraper.parse_page(noisy_html, url, "production") == expected
+
+
+@pytest.mark.parametrize("site", ["karlsruhe", "stuttgart"])
+def test_biographies_are_clean_markdown_without_headings(site: str) -> None:
+    content = (
+        "<strong>Example</strong> <em>biography</em> with enough words to pass minimum length "
+        'and <a href="/people/other/">another person</a>. Second&nbsp;sentence with soft&shy;hyphens.'
+    )
+    body = (
+        f'<div class="col-sm-12 col-md-7"><p>{content}</p></div>'
+        if site == "karlsruhe"
+        else f'<div class="richtext"><h2>Biography heading</h2><p>{content}</p></div>'
+    )
+    scraper = ConfigurableScraper(load_config(site))
+    url = scraper.config.base_url + "people/example/"
+    person = scraper.parse_page(f"<main><h1>Exam&shy;ple Person*</h1>{body}</main>", url, "person")
+    assert person["name"] == ("Example Person*" if site == "karlsruhe" else "Example Person")
+    assert "**Example** *biography*" in person["description"]
+    assert f"[another person]({scraper.config.base_url}people/other/)" in person["description"]
+    assert "Second sentence with softhyphens." in person["description"]
+    if site == "stuttgart":
+        assert person["description"].startswith("Biography heading\n\n")
+    assert "<" not in person["description"]
+    assert "#" not in person["description"]
+
+
+def test_stuttgart_production_description_retains_markdown_structure() -> None:
+    html = STUTTGART_HTML.replace(
+        "This synthetic production description is long enough to represent the content area.",
+        "<h1>Main heading</h1><h2>Section heading</h2>"
+        "<p>A soft&shy;hyphenated <strong>bold <em>and italic</em></strong> description."
+        '<br>Next line with <a href="/info/#details" title="More info">a link</a>.</p>'
+        "<ul><li>First item</li><li>Second item</li></ul>"
+        "<script>not content</script><style>not content</style>"
+        "<noscript>not content</noscript><template>not content</template><!-- not content -->",
+    )
+    record = ConfigurableScraper(load_config("stuttgart")).parse_page(html, STUTTGART_URL, "production")
+    assert record["description"] == (
+        "Main heading\n\nSection heading\n\n"
+        "A softhyphenated **bold *and italic*** description.  \n"
+        'Next line with [a link](https://www.schauspiel-stuttgart.de/info/#details "More info").\n\n'
+        "- First item\n- Second item"
+    )
+
+
+def test_markdown_links_honor_html_base_and_preserve_inline_spacing() -> None:
+    html = STUTTGART_HTML.replace(
+        "This synthetic production description is long enough to represent the content area.",
+        "<p>Long description with hy&shy;phenated and <em>empha</em>sized words, "
+        '<a href="info/">details</a> and <a href="mailto:info@example.test">email</a>.</p>',
+    )
+    html = '<base href="https://www.schauspiel-stuttgart.de/other/">' + html
+    record = ConfigurableScraper(load_config("stuttgart")).parse_page(html, STUTTGART_URL, "production")
+    assert record["description"] == (
+        "Long description with hyphenated and *empha*sized words, "
+        "[details](https://www.schauspiel-stuttgart.de/other/info/) and [email](mailto:info@example.test)."
+    )
+
+
+def test_markdown_strip_removes_multiline_biography_boilerplate() -> None:
+    biography = "This synthetic biography is deliberately long enough to pass the configured minimum length."
+    html = (
+        f'<main><h1>Person</h1><div class="col-sm-12 col-md-7"><p>{biography}'
+        "<br>Möchten Sie sich auf die Warteliste setzen lassen?<br>Unwanted contact information.</p></div></main>"
+    )
+    person = ConfigurableScraper(load_config("karlsruhe")).parse_page(
+        html, "https://www.staatstheater-karlsruhe.de/ensemble/id/1/", "person"
+    )
+    assert person["description"] == biography
 
 
 def test_listing_filters_overviews_profiles_and_duplicates() -> None:
@@ -349,6 +468,34 @@ def test_snapshots_never_overwrite_and_scopes_do_not_mix(record: dict, tmp_path:
     assert "No previous scrape" in report
 
 
+def test_generated_json_omits_null_and_empty_array_fields(record: dict, tmp_path: Path) -> None:
+    record.update(description=None, age_rating=0, author="", tags=[])
+    record["memberships"][0].update(description=None, born=None)
+    expected = without_null_fields(validate_records([record]))
+    path, _ = save_scrape([record], load_config("karlsruhe"), tmp_path, limit=None, enrich_people=False)
+    output = json.loads(path.read_text())
+    assert output == expected
+    assert "description" not in output[0]
+    assert "born" not in output[0]["memberships"][0]
+    assert output[0]["age_rating"] == 0
+    assert "author" in output[0] and not output[0]["author"]
+    assert "tags" not in output[0]
+    assert "critics" not in output[0]
+    assert "urls" not in output[0]["memberships"][0]
+    assert validate_records(output) == validate_records([record])
+    person = {"name": "Person", "url": None, "description": None, "urls": []}
+    path = tmp_path / "person.json"
+    write_json(path, person)
+    assert json.loads(path.read_text()) == {"name": "Person"}
+
+
+def test_output_cleanup_preserves_false_zero_and_array_structure() -> None:
+    data = {"nested": [{"empty": [], "null": None, "zero": 0, "false": False, "text": "", "object": {}}]}
+    assert without_null_fields(data) == {"nested": [{"zero": 0, "false": False, "text": "", "object": {}}]}
+    assert without_null_fields([]) == []
+    assert without_null_fields([[], {"empty": []}]) == [[], {}]
+
+
 def test_page_check_persists_and_only_accept_advances_baseline(record: dict, tmp_path: Path) -> None:
     config = load_config("karlsruhe")
     code, report = check_page("old", record, KARLSRUHE_URL, "production", config, tmp_path)
@@ -380,19 +527,11 @@ def test_corrupt_previous_snapshot_and_check_fail_explicitly(record: dict, tmp_p
         check_page("html", record, KARLSRUHE_URL, "production", config, tmp_path)
 
 
-def test_legacy_karlsruhe_entry_uses_shared_config_and_safe_default() -> None:
-    scraper = KarlsruheScraper()
-    assert scraper.max_productions == 1
-    assert scraper.parse_detail(KARLSRUHE_HTML, {"url": KARLSRUHE_URL})["duration"] == 90
-    first = {"url": KARLSRUHE_URL, "title": "first"}
-    assert scraper.deduplicate([first, {"url": "other"}, {"url": KARLSRUHE_URL}]) == [first]
-    with pytest.raises(ValueError):
-        KarlsruheScraper(max_productions=0)
-
-
-def test_cli_safe_defaults_and_offline_commands(tmp_path: Path, record: dict, capsys: pytest.CaptureFixture) -> None:
-    assert parse_args(["scrape", "--config", "karlsruhe"]).limit == 1
+def test_cli_defaults_and_offline_commands(tmp_path: Path, record: dict, capsys: pytest.CaptureFixture) -> None:
+    assert parse_args(["scrape", "--config", "karlsruhe"]).limit is None
     assert not parse_args(["scrape", "--config", "karlsruhe"]).all
+    assert parse_args(["scrape", "--config", "karlsruhe", "--limit", "3"]).limit == 3
+    assert parse_args(["scrape", "--config", "karlsruhe", "--all"]).all
     path = tmp_path / "snapshot.json"
     path.write_text(json.dumps([record]))
     assert main(["validate", str(path)]) == 0
@@ -462,16 +601,20 @@ async def _local_venue() -> AsyncGenerator[tuple[str, dict, list[str]]]:
         await runner.cleanup()
 
 
-def test_http_pipeline_is_bounded_enriches_once_and_reports_errors() -> None:
+def test_http_pipeline_is_bounded_enriches_once_and_reports_errors(capsys: pytest.CaptureFixture) -> None:
     async def exercise() -> None:
         async with _local_venue() as (origin, config, requests):
             scraper = ConfigurableScraper(ScraperConfig.model_validate(config))
             records = await scraper.scrape(limit=1)
             assert requests == ["/list", "/programm/info/1/", "/ensemble/id/1/"]
             assert all("Biography" in m["description"] for m in records[0]["memberships"])
+            progress = capsys.readouterr().err
+            assert all(label in progress for label in ("Listing pages", "Productions", "People"))
+            assert "100%" in progress and "1/1" in progress
             requests.clear()
             await scraper.scrape(limit=1, enrich_people=False)
             assert requests == ["/list", "/programm/info/1/"]
+            assert "People" not in capsys.readouterr().err
             requests.clear()
             async with scraper.session() as session:
                 html = await scraper.fetch(session, origin + "redirect")
@@ -489,7 +632,7 @@ def test_http_pipeline_is_bounded_enriches_once_and_reports_errors() -> None:
     asyncio.run(exercise())
 
 
-def test_cli_page_and_check_fetch_exactly_one_page(tmp_path: Path) -> None:
+def test_cli_page_and_check_fetch_exactly_one_page(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     async def exercise() -> None:
         async with _local_venue() as (origin, config, requests):
             config_path = tmp_path / "local.json"
@@ -512,6 +655,28 @@ def test_cli_page_and_check_fetch_exactly_one_page(tmp_path: Path) -> None:
             )
             assert requests == ["/programm/info/1/"]
             assert len(json.loads(output_path.read_text())) == 1
+            output = json.loads(output_path.read_text())
+            assert "description" not in output[0]
+            assert "born" not in output[0]["memberships"][0]
+            capsys.readouterr()
+            assert (
+                await asyncio.to_thread(
+                    main,
+                    [
+                        "page",
+                        "--config",
+                        str(config_path),
+                        "--url",
+                        origin + "ensemble/id/1/",
+                        "--kind",
+                        "person",
+                    ],
+                )
+                == 0
+            )
+            person = json.loads(capsys.readouterr().out)
+            assert "born" not in person and "role" not in person
+            assert "Biography" in person["description"]
             requests.clear()
             check_args = [
                 "check",
@@ -527,6 +692,38 @@ def test_cli_page_and_check_fetch_exactly_one_page(tmp_path: Path) -> None:
             assert await asyncio.to_thread(main, check_args) == 0
             assert await asyncio.to_thread(main, check_args) == 0
             assert requests == ["/ensemble/id/1/", "/ensemble/id/1/"]
+
+    asyncio.run(exercise())
+
+
+def test_cli_scrapes_all_by_default_on_local_fixture(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    async def exercise() -> None:
+        async with _local_venue() as (_origin, config, requests):
+            config_path = tmp_path / "venue.json"
+            config_path.write_text(json.dumps(config))
+            assert (
+                await asyncio.to_thread(
+                    main,
+                    [
+                        "scrape",
+                        "--config",
+                        str(config_path),
+                        "--output-dir",
+                        str(tmp_path / "output"),
+                    ],
+                )
+                == 0
+            )
+            assert requests == ["/list", "/programm/info/1/", "/programm/info/2/", "/ensemble/id/1/"]
+            snapshot = next((tmp_path / "output").rglob("*productions.json"))
+            records = json.loads(snapshot.read_text())
+            assert len(records) == 2
+            assert "premiere" not in records[0]
+            assert "born" not in records[0]["memberships"][0]
+            output = capsys.readouterr()
+            assert "Productions" in output.err and "2/2" in output.err
+            assert "People" in output.err and "1/1" in output.err
+            assert "Saved 2 productions" in output.out
 
     asyncio.run(exercise())
 

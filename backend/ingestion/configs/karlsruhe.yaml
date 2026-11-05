@@ -13,6 +13,7 @@ production:
     required: true
   description:
     selector: div.col-md-12.col-lg-8 > p
+    format: markdown
     stop_tag: hr
     min_length: 60
     exclude: '^(Deutsch von|Ab\s+\d+\s+Jahren|Dauer:|Premiere|Karlsruher Premiere|Inhaltliche Hinweise|Übernahme vom)\b'
@@ -59,6 +60,7 @@ person:
     required: true
   description:
     selector: main div.col-sm-12.col-md-7 > p
+    format: markdown
     min_length: 80
     strip: Möchten Sie sich auf die Warteliste setzen lassen\?.*$
     join: "\n\n"

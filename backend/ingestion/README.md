@@ -15,7 +15,8 @@ uv run python -m backend.ingestion.scrape --help
 
 Bundled configs: [Karlsruhe](configs/karlsruhe.yaml) and
 [Stuttgart](configs/stuttgart.yaml). `--config` accepts either venue name or a
-path to a YAML/JSON file. YAML is loaded with `safe_load`; configuration is data,
+path to a YAML/JSON file. Bundled venue names are case-insensitive (`Karlsruhe`
+and `karlsruhe` are equivalent). YAML is loaded with `safe_load`; configuration is data,
 not executable Python.
 
 ## Staging JSON contract
@@ -52,9 +53,7 @@ snapshots' shape:
         "role": "Hamlet",
         "character": "Hamlet",
         "description": "A source biography.",
-        "born": "1980-01-02",
-        "died": null,
-        "nationality": null
+        "born": "1980-01-02"
       }
     ]
   }
@@ -68,6 +67,21 @@ may be omitted; nullable fields may be `null`. Person `type` accepts the current
 `Person.type` list (non-empty), or a legacy scalar such as `"director"`.
 An omitted/null type retains the importer's role-derived type (or `actor` when
 both type and role are absent).
+Generated scrape snapshots, page output (files and stdout), and page-check
+baselines omit null-valued and empty-array fields recursively, including nested
+memberships. Empty strings, empty objects, numeric zero and false are preserved;
+input files with explicit nulls or empty arrays remain accepted. Array elements
+and top-level arrays are not removed.
+
+Extracted text removes discretionary soft hyphens (`U+00AD`, including HTML
+`&shy;`), zero-width spaces and byte-order marks. Non-breaking spaces become
+ordinary spaces. Titles, names, roles and other scalar text remain plain text.
+Both bundled configs convert production descriptions and biographies to Markdown:
+paragraphs, line breaks, emphasis, bold text, lists and links are retained.
+Headings become ordinary paragraphs, never Markdown headings. Relative links
+resolve against the page URL (or its HTML `<base>`); scripts and styles are
+discarded. This cleanup applies to `scrape`, `page` and `check` extraction alike;
+existing snapshots are not rewritten.
 
 Mapping to current [domain models](../models.py):
 
@@ -145,7 +159,7 @@ Baseline files contain extracted source text and hashes, not complete HTML.
 ## Bounded scraping and history
 
 ```bash
-# Default: one listing and at most one production, then its linked profiles.
+# Default: all configured productions and their linked profiles.
 uv run python -m backend.ingestion.scrape scrape --config karlsruhe
 
 # Test without following any people (listing + one production only).
@@ -161,10 +175,15 @@ multiple credits. Only the configured origin is allowed, including redirects.
 Honor the venue's robots policy/terms and choose a suitable delay/user agent.
 There is no automatic retry storm, external-domain crawl or database upsert.
 
-Full scraping is opt-in via `scrape --all`; do not use it to test selectors.
+Scraping defaults to all productions; `--all` remains an explicit alias.
+Use `--limit 1` or `page` to test selectors instead.
 Pagination follows only the configured `next_selector` and fails if `max_pages`
 would truncate a snapshot. Failures abort without saving partial data or
 advancing scrape history.
+
+Progress bars on stderr show listing pages fetched, production pages completed
+out of the discovered total, and unique person pages completed out of their
+total. `--no-people` omits the people stage. JSON printed by `page` stays on stdout.
 
 Successful scrapes save timestamped, same-day-safe arrays below
 `data/staged/<source>/`. A readable summary reports added/removed/changed
@@ -179,11 +198,10 @@ Compare any two production snapshots offline:
 uv run python -m backend.ingestion.scrape diff before.json after.json
 ```
 
-The former `python -m backend.ingestion.orgs.karlsruhe` entry point now delegates
-to the shared config, supports `--section`, `--max`, `--no-people` and `--all`, and
-**defaults to one production**, unlike the old unbounded default. The Python
-`KarlsruheScraper` API remains available; `max_productions=None` explicitly means
-all configured productions.
+The venue-specific Karlsruhe Python wrapper has been removed. Use
+`python -m backend.ingestion.scrape scrape --config karlsruhe` instead, with
+`--limit 1` for a bounded sample. To scrape a different Karlsruhe section, copy
+the bundled YAML and change `listing.urls`.
 
 ## Configure another venue
 
@@ -202,6 +220,8 @@ Copy a bundled YAML file, or express the same object as JSON.
   `role_types` adds regex ->
   canonical person-type overrides; known crew types otherwise use shared helpers.
   Multiple profile links and names must match one-to-one; ambiguous rows fail.
+  Text-empty credit rows (including non-breaking-space spacers) are ignored
+  without resetting continuation roles. Non-empty rows missing names still fail.
 - `person`: membership person-field extraction rules; `name` is required. Set
   biography `required: true` when absent content signals a broken selector.
 
@@ -213,14 +233,14 @@ Field rules:
 | `attribute` | Read an attribute instead of text, e.g. `href` |
 | `match` / `exclude` | Case-insensitive regex filters |
 | `extract` | First capture group (or full match) |
-| `strip` | Remove regex matches, e.g. Stuttgart's trailing `*` |
+| `strip` | Remove regex matches, e.g. Stuttgart's trailing `*`; spans line breaks in Markdown fields |
 | `join` | Join text blocks, e.g. `"\n\n"` for descriptions; otherwise first match |
 | `many` | Return all matching text/URL values as an array, e.g. `tags` or `urls` |
 | `split` | Split selected text by regex into an array, e.g. comma-separated extras |
 | `min_length`, `limit` | Filter short text / cap matching blocks |
 | `stop_tag` | Ignore sibling nodes after this tag, e.g. description after `hr` |
 | `required` | Error if no value was extracted |
-| `format` | `text`, `date_de`, `duration`, `integer`, `author`, `url` |
+| `format` | `text`, `markdown` (rich text without headings), `date_de`, `duration`, `integer`, `author`, `url` |
 
 `many`/`split` cannot combine with `join` or scalar numeric/date formats. Use
 `many: true` on corresponding name/URL rules for multi-link credits.
