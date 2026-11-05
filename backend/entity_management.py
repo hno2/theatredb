@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from typing import Any, TypeVar, cast
+from uuid import UUID
 
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.orm import InstrumentedAttribute
-from sqlmodel import Session, SQLModel, func, select
+from sqlalchemy.orm import InstrumentedAttribute, Mapper, selectinload
+from sqlmodel import Session, SQLModel, col, func, select
 
 from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
 
-from .models import EntitySource
+from .models import EntitySource, EntityType, Production, ProductionMembership
 
 ModelT = TypeVar("ModelT", bound=SQLModel)
 
@@ -26,12 +27,8 @@ def _entity_identity(entity: SQLModel) -> tuple[str, str]:
     return (entity.__class__.__name__, str(data.get("id", id(entity))))
 
 
-_TERMINAL_TYPES: frozenset[str] = frozenset(
-    {
-        "Person",
-        "Venue",
-    }
-)
+def _entity_id(entity: SQLModel) -> str:
+    return str(entity.model_dump(mode="python")["id"])
 
 
 def _serialize_entity_graph(
@@ -39,48 +36,43 @@ def _serialize_entity_graph(
     *,
     seen: set[tuple[str, str]] | None = None,
     max_depth: int = 3,
-    root_type: str | None = None,
 ) -> dict[str, Any]:
     """Serialize entity plus attached relationships into JSON-safe nested dict."""
     seen = seen or set()
     ident = _entity_identity(entity)
     data = entity.model_dump(mode="json")
-    if ident in seen or max_depth <= 0 or type(entity).__name__ in _TERMINAL_TYPES:
+    if ident in seen or max_depth <= 0:
         return data
+
     seen.add(ident)
-    root_type = root_type or type(entity).__name__
-    mapper = sa_inspect(entity.__class__)
+    mapper = cast(Mapper[Any], sa_inspect(entity.__class__))
     for rel in mapper.relationships:
-        # skip relations that point back to the root entity type
-        related_type = rel.mapper.class_.__name__
-        if related_type == root_type:
-            continue
         rel_value = getattr(entity, rel.key)
         if rel_value is None:
             data[rel.key] = None
             continue
         if rel.uselist:
             data[rel.key] = [
-                _serialize_entity_graph(child, seen=seen, max_depth=max_depth - 1, root_type=root_type)
-                for child in rel_value
+                _serialize_entity_graph(child, seen=seen.copy(), max_depth=max_depth - 1) for child in rel_value
             ]
             continue
-        data[rel.key] = _serialize_entity_graph(rel_value, seen=seen, max_depth=max_depth - 1, root_type=root_type)
+        data[rel.key] = _serialize_entity_graph(rel_value, seen=seen.copy(), max_depth=max_depth - 1)
+
     if hasattr(entity, "sources"):
         data["sources"] = [_snapshot(source) for source in entity.sources]
     return data
 
 
 def _resolve_order_by[ModelT: SQLModel](
-    model_cls: type[ModelT], order_by: str | InstrumentedAttribute | None = None
-) -> InstrumentedAttribute | None:
+    model_cls: type[ModelT], order_by: str | InstrumentedAttribute[Any] | None = None
+) -> InstrumentedAttribute[Any] | None:
     """Resolve `order_by` into a SQLModel column/expression.
 
     Accepts either a SQLAlchemy column/expression or a field name string.
     Falls back to `name`, then `title`, then `id` when field is missing.
     """
     if order_by is not None and not isinstance(order_by, str):
-        return cast(InstrumentedAttribute[Any], order_by)
+        return order_by
     candidates = ([order_by] if order_by is not None else []) + ["name", "title", "id"]
     for field in candidates:
         value = getattr(model_cls, field, None)
@@ -89,7 +81,9 @@ def _resolve_order_by[ModelT: SQLModel](
     return None
 
 
-def list_entities[ModelT: SQLModel](model_cls: type[ModelT], order_by: str | None = None) -> list[ModelT]:
+def list_entities[ModelT: SQLModel](
+    model_cls: type[ModelT], order_by: str | InstrumentedAttribute[Any] | None = None
+) -> list[ModelT]:
     """List all entities of the given type, optionally ordered by a specified field."""
     with get_session() as session:
         stmt = select(model_cls)
@@ -135,13 +129,44 @@ def get_entity_graph[ModelT: SQLModel](
 ) -> dict[str, Any]:
     """Fetch one entity by id with nested relationship data."""
     with get_session() as session:
-        resolved_id = (
-            resolve_id(session, model_cls._entity_type, entity_id) if hasattr(model_cls, "_entity_type") else entity_id
-        )
+        resolved_id = UUID(entity_id)
+        if hasattr(model_cls, "_entity_type"):
+            resolved_id = resolve_id(session, model_cls._entity_type, resolved_id)
         entity = session.get(model_cls, resolved_id)
         if entity is None:
             raise ValueError(f"{model_cls.__name__} not found")
         return _serialize_entity_graph(entity, max_depth=max_depth)
+
+
+def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
+    """Fetch distinct productions and credits for people, without recursive graphs."""
+    if not person_ids:
+        return []
+    ids = [UUID(person_id) for person_id in person_ids]
+    with get_session() as session:
+        matching = select(ProductionMembership.production_id).where(col(ProductionMembership.person_id).in_(ids))
+        productions = session.exec(
+            select(Production)
+            .where(col(Production.id).in_(matching))
+            .options(
+                selectinload(cast(InstrumentedAttribute, Production.organization)),
+                selectinload(cast(InstrumentedAttribute, Production.memberships)).selectinload(
+                    cast(InstrumentedAttribute, ProductionMembership.person)
+                ),
+            )
+            .order_by(col(Production.name), col(Production.id))
+        ).all()
+        return [
+            {
+                **_snapshot(production),
+                "organization": _snapshot(production.organization) if production.organization else None,
+                "memberships": [
+                    {**_snapshot(membership), "person": _snapshot(membership.person)}
+                    for membership in production.memberships
+                ],
+            }
+            for production in productions
+        ]
 
 
 def create_entity[ModelT: SQLModel](
@@ -172,7 +197,7 @@ def create_entity[ModelT: SQLModel](
                 stmt = stmt.where(getattr(model_cls, key) == value)
             existing = session.exec(stmt.limit(1)).first()
             if existing is not None:
-                _attach_missing_sources(session, model_cls, existing.id, source_links)
+                _attach_missing_sources(session, model_cls, _entity_id(existing), source_links)
                 session.commit()
                 session.refresh(existing)
                 return existing
@@ -181,12 +206,13 @@ def create_entity[ModelT: SQLModel](
         session.add(entity)
         session.flush()
 
-        _attach_missing_sources(session, model_cls, entity.id, source_links)
+        entity_id = _entity_id(entity)
+        _attach_missing_sources(session, model_cls, entity_id, source_links)
 
         add_scd2_event(
             session,
             entity_name=model_cls.__name__.lower(),
-            entity_id=str(entity.id),
+            entity_id=entity_id,
             operation="insert",
             snapshot=_snapshot(entity),
             actor_id=actor_id,
@@ -204,41 +230,29 @@ def _attach_missing_sources[ModelT: SQLModel](
 ) -> None:
     """Attach source links that don't already exist on the entity."""
     for link in source_links or []:
-        link_external_id = link.get("external_id")
-        link_external_url = link.get("external_url")
-        link_title = link.get("title") or link.get("external_title")
+        entity_type = getattr(model_cls, "_entity_type", None)
+        if not isinstance(entity_type, EntityType):
+            raise TypeError(f"{model_cls.__name__} cannot have sources attached")
 
         already_exists = session.exec(
             select(EntitySource).where(
-                EntitySource.entity_type == model_cls._entity_type,
+                EntitySource.entity_type == entity_type,
                 EntitySource.entity_id == entity_id,
                 EntitySource.source_id == link["source_id"],
             )
         ).first()
 
         if already_exists:
-            changed = False
-            if not already_exists.external_id and link_external_id:
-                already_exists.external_id = link_external_id
-                changed = True
-            if not already_exists.external_url and link_external_url:
-                already_exists.external_url = link_external_url
-                changed = True
-            if not already_exists.title and link_title:
-                already_exists.title = link_title
-                changed = True
-            if changed:
-                session.add(already_exists)
             continue
 
         session.add(
             EntitySource(
                 source_id=link["source_id"],
-                entity_type=model_cls._entity_type,
+                entity_type=entity_type,
                 entity_id=entity_id,
-                external_id=link_external_id,
-                external_url=link_external_url,
-                title=link_title,
+                external_id=link.get("external_id"),
+                external_url=link.get("external_url"),
+                external_title=link.get("external_title"),
             )
         )
 
@@ -263,7 +277,7 @@ def update_entity[ModelT: SQLModel](
         add_scd2_event(
             session,
             entity_name=model_cls.__name__.lower(),
-            entity_id=str(entity.id),
+            entity_id=_entity_id(entity),
             operation="update",
             snapshot=_snapshot(entity),
             actor_id=actor_id,
@@ -288,7 +302,7 @@ def delete_entity[ModelT: SQLModel](
         add_scd2_event(
             session,
             entity_name=model_cls.__name__.lower(),
-            entity_id=str(entity.id),
+            entity_id=_entity_id(entity),
             operation="delete",
             snapshot=_snapshot(entity),
             actor_id=actor_id,

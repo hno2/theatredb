@@ -27,7 +27,9 @@ if params.get("id"):
                 data = get_entity_graph(KIND_CONFIG[kind][1], params["id"])
             except ValueError:
                 st.error("Not found")
-            render_fn(data)
+                st.stop()
+            else:
+                render_fn(data)
 else:
     kind = st.selectbox(
         "Typ",
@@ -41,5 +43,5 @@ else:
         format_func=lambda x: x.name,
     )
     if entity and st.button("Öffnen"):
-        st.query_params.update({"kind": kind, "id": entity.id})
+        st.query_params.update({"kind": kind, "id": str(entity.id)})
         st.rerun()

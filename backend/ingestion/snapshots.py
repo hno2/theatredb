@@ -106,8 +106,10 @@ def scrape_diff(before: list[dict], after: list[dict]) -> str:
     common = old.keys() & new.keys()
     changed = {url for url in common if _normalize(old[url]) != _normalize(new[url])}
     lines = [
-        f"Productions: +{len(added)} added, -{len(removed)} removed, "
-        f"~{len(changed)} changed, ={len(common) - len(changed)} unchanged"
+        (
+            f"Productions: +{len(added)} added, -{len(removed)} removed, "
+            f"~{len(changed)} changed, ={len(common) - len(changed)} unchanged"
+        )
     ]
     lines.extend(f"+ {_label(new[url])} -- {url}" for url in sorted(added))
     lines.extend(f"- {_label(old[url])} -- {url}" for url in sorted(removed))

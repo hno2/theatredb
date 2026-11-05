@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
 import streamlit as st
+from streamlit.user_info import UserInfoProxy
+
+from backend.user_management import init_db
 
 from backend.user_management import init_db
 
@@ -10,7 +13,12 @@ def _initialize_database() -> None:
     init_db()
 
 
-def _get_effective_user() -> SimpleNamespace:
+@st.cache_resource
+def _initialize_database() -> None:
+    init_db()
+
+
+def _get_effective_user() -> UserInfoProxy | SimpleNamespace:
     real_user = st.user
     if getattr(real_user, "is_logged_in", False):
         return real_user
@@ -37,10 +45,8 @@ pages = {
     "Entdecken": [
         st.Page("views/overview.py", title="Startseite", icon=":material/map:", default=True),
         st.Page("views/detail.py", title="Details", icon=":material/visibility:", url_path="detail"),
-        # st.Page("view.py", title="Production Detail", icon=":material/theater_comedy:"),
-        # st.Page("views/organization.py", title="Organization View", icon=":material/event_seat:"),
         # st.Page("views/people.py", title="People", icon=":material/person:"),
-        # st.Page("views/production.py", title="Productions", icon=":material/local_activity:"),
+        # st.Page("views/productions.py", title="Productions", icon=":material/local_activity:"),
         # st.Page("views/texts.py", title="Texts", icon=":material/menu_book:"),
         # st.Page("views/awards.py", title="Awards", icon=":material/trophy:"),
     ],

@@ -7,7 +7,7 @@ import streamlit as st
 
 from backend.entity_management import list_entities
 from backend.models import Source
-from frontend.views.helpers import has_coordinates
+from frontend.views.helpers import entity_link, has_coordinates
 
 
 def parse_date(value: str | None) -> date | None:
@@ -84,12 +84,7 @@ def render_production_card(production: dict) -> None:
     """Keep production links and details available within the timeline."""
     with st.container(border=True):
         st.text(production["name"])
-        st.page_link(
-            "views/detail.py",
-            label="Produktion ansehen",
-            icon=":material/arrow_forward:",
-            query_params={"kind": "production", "id": str(production["id"])},
-        )
+        entity_link("Produktion ansehen", "production", str(production["id"]))
         details = []
         if production.get("duration") is not None:
             details.append(f"{production['duration']} Minuten")
@@ -143,7 +138,7 @@ def render_timeline(productions: list[dict], organization_id: str) -> None:
 def render_sources(sources: list[dict]) -> None:
     """Show provenance as readable citations instead of serialized source records."""
     st.subheader("Quellen & Nachweise")
-    st.caption("Externe Belege zu diesem Theater. „Geprüft“ bezeichnet die Prüfung des verknüpften Quelldatensatzes.")
+    st.caption("Externe Belege zu diesem Eintrag. „Geprüft“ bezeichnet die Prüfung des verknüpften Quelldatensatzes.")
     if not sources:
         st.info("Für dieses Theater sind noch keine Quellen hinterlegt.")
         return

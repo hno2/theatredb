@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -71,7 +72,7 @@ This synthetic production description is long enough to represent the content ar
 
 
 @pytest.fixture
-def record():
+def record() -> dict:
     return {
         "title": "Example Play",
         "url": KARLSRUHE_URL,
@@ -82,7 +83,7 @@ def record():
     }
 
 
-def test_published_schema_matches_models_and_current_domain_fields(record):
+def test_published_schema_matches_models_and_current_domain_fields(record: dict) -> None:
     schema_file = Path(__file__).resolve().parents[1] / "backend/ingestion/staging.schema.json"
     schema = staging_schema()
     assert json.loads(schema_file.read_text()) == schema
@@ -97,7 +98,7 @@ def test_published_schema_matches_models_and_current_domain_fields(record):
 
 
 @pytest.mark.parametrize("value", [[], {}, [{"url": KARLSRUHE_URL}], [{"title": "  ", "url": KARLSRUHE_URL}]])
-def test_reject_invalid_snapshot_shape(value):
+def test_reject_invalid_snapshot_shape(value: object) -> None:
     with pytest.raises(ValidationError):
         validate_records(value)
     assert list(Draft202012Validator(staging_schema()).iter_errors(value))
@@ -118,14 +119,14 @@ def test_reject_invalid_snapshot_shape(value):
         ("typo", "unknown"),
     ],
 )
-def test_schema_and_runtime_reject_invalid_fields(record, field, value):
+def test_schema_and_runtime_reject_invalid_fields(record: dict, field: str, value: object) -> None:
     record[field] = value
     with pytest.raises(ValidationError):
         validate_records([record])
     assert list(Draft202012Validator(staging_schema(), format_checker=FormatChecker()).iter_errors([record]))
 
 
-def test_legacy_and_current_person_fields(record):
+def test_legacy_and_current_person_fields(record: dict) -> None:
     record["premiere"] = "2026-10-03"
     member = record["memberships"][0]
     member.update(type=["actor", "director"], born="1980-01-02", nationality="Example", urls=[KARLSRUHE_URL])
@@ -138,7 +139,7 @@ def test_legacy_and_current_person_fields(record):
         validate_records([record])
 
 
-def test_datetime_timezone_and_person_dates_match_schema(record):
+def test_datetime_timezone_and_person_dates_match_schema(record: dict) -> None:
     record["premiere"] = "2026-10-16T19:00:00+02:00"
     validated = validate_records([record])
     Draft202012Validator(staging_schema(), format_checker=FormatChecker()).validate(validated)
@@ -148,7 +149,7 @@ def test_datetime_timezone_and_person_dates_match_schema(record):
             validate_records([record])
 
 
-def test_yaml_and_json_configs_are_equivalent(tmp_path):
+def test_yaml_and_json_configs_are_equivalent(tmp_path: Path) -> None:
     config = load_config("karlsruhe")
     path = tmp_path / "venue.json"
     path.write_text(json.dumps(config.model_dump(mode="json")))
@@ -169,14 +170,14 @@ def test_yaml_and_json_configs_are_equivalent(tmp_path):
         lambda data: data.update(source_id="../unsafe"),
     ],
 )
-def test_config_errors_fail_before_network(mutation):
+def test_config_errors_fail_before_network(mutation: Callable[[dict], None]) -> None:
     data = load_config("karlsruhe").model_dump(mode="json")
     mutation(data)
     with pytest.raises(ValueError):
         ScraperConfig.model_validate(data)
 
 
-def test_karlsruhe_selectors_and_continuation_roles():
+def test_karlsruhe_selectors_and_continuation_roles() -> None:
     scraper = ConfigurableScraper(load_config("karlsruhe"))
     record = scraper.parse_page(KARLSRUHE_HTML, KARLSRUHE_URL, "production")
     assert record["title"] == "Example Play"
@@ -198,7 +199,7 @@ def test_karlsruhe_selectors_and_continuation_roles():
     assert members[8]["url"].endswith("/ensemble/id/5/")
 
 
-def test_stuttgart_selectors_short_dates_durations_and_multiple_people():
+def test_stuttgart_selectors_short_dates_durations_and_multiple_people() -> None:
     scraper = ConfigurableScraper(load_config("stuttgart"))
     record = scraper.parse_page(STUTTGART_HTML, STUTTGART_URL, "production")
     assert record["premiere"] == "2026-10-16"
@@ -243,7 +244,7 @@ def test_stuttgart_selectors_short_dates_durations_and_multiple_people():
         ),
     ],
 )
-def test_person_rules_do_not_use_modal_or_footer_text(site, html, url):
+def test_person_rules_do_not_use_modal_or_footer_text(site: str, html: str, url: str) -> None:
     html = "<div class='modal-body'><p>" + "Unrelated text. " * 20 + "</p></div>" + html
     person = ConfigurableScraper(load_config(site)).parse_page(html, url, "person")
     assert person["name"] == "Person"
@@ -251,7 +252,7 @@ def test_person_rules_do_not_use_modal_or_footer_text(site, html, url):
     assert "Unrelated" not in person["description"]
 
 
-def test_listing_filters_overviews_profiles_and_duplicates():
+def test_listing_filters_overviews_profiles_and_duplicates() -> None:
     scraper = ConfigurableScraper(load_config("stuttgart"))
     html = """
     <a href="/spielplan/premieren/">Overview</a>
@@ -270,7 +271,7 @@ def test_listing_filters_overviews_profiles_and_duplicates():
 
 
 @pytest.mark.parametrize("html", ["<html></html>", "<h1>Access denied</h1>"])
-def test_missing_required_production_selector_is_an_error(html):
+def test_missing_required_production_selector_is_an_error(html: str) -> None:
     with pytest.raises(ValueError, match="Required selector"):
         ConfigurableScraper(load_config("karlsruhe")).parse_page(html, KARLSRUHE_URL, "production")
 
@@ -284,7 +285,7 @@ def test_missing_required_production_selector_is_an_error(html):
         "https://user:password@www.staatstheater-karlsruhe.de/",
     ],
 )
-def test_scraper_rejects_outside_origins(url):
+def test_scraper_rejects_outside_origins(url: str) -> None:
     with pytest.raises(ValueError, match="outside configured origin"):
         ConfigurableScraper(load_config("karlsruhe")).check_url(url)
 
@@ -298,11 +299,11 @@ def test_scraper_rejects_outside_origins(url):
         ("no announced premiere", None),
     ],
 )
-def test_german_dates(text, expected):
+def test_german_dates(text: str, expected: str | None) -> None:
     assert parse_date_de(text) == expected
 
 
-def test_extract_list_fields():
+def test_extract_list_fields() -> None:
     tree = LexborHTMLParser('<a href="/first">Tag One</a><a href="/second">Tag Two</a>')
     assert extract_field(tree, FieldRule(selector="a", many=True), KARLSRUHE_URL) == ["Tag One", "Tag Two"]
     assert extract_field(
@@ -312,7 +313,7 @@ def test_extract_list_fields():
     ) == ["https://example.test/first", "https://example.test/second"]
 
 
-def test_scrape_diff_fields_people_and_order_independence(record):
+def test_scrape_diff_fields_people_and_order_independence(record: dict) -> None:
     before = validate_records([record])
     after = copy.deepcopy(before)
     after[0]["duration"] = 100
@@ -334,7 +335,7 @@ def test_scrape_diff_fields_people_and_order_independence(record):
         scrape_diff(before, [*before, *before])
 
 
-def test_snapshots_never_overwrite_and_scopes_do_not_mix(record, tmp_path):
+def test_snapshots_never_overwrite_and_scopes_do_not_mix(record: dict, tmp_path: Path) -> None:
     config = load_config("karlsruhe")
     first, _ = save_scrape([record], config, tmp_path, limit=1, enrich_people=False)
     second, report = save_scrape([record], config, tmp_path, limit=1, enrich_people=False)
@@ -348,7 +349,7 @@ def test_snapshots_never_overwrite_and_scopes_do_not_mix(record, tmp_path):
     assert "No previous scrape" in report
 
 
-def test_page_check_persists_and_only_accept_advances_baseline(record, tmp_path):
+def test_page_check_persists_and_only_accept_advances_baseline(record: dict, tmp_path: Path) -> None:
     config = load_config("karlsruhe")
     code, report = check_page("old", record, KARLSRUHE_URL, "production", config, tmp_path)
     assert code == 0 and "Baseline created" in report
@@ -366,7 +367,7 @@ def test_page_check_persists_and_only_accept_advances_baseline(record, tmp_path)
     assert check_page("new html", updated, KARLSRUHE_URL, "production", config, tmp_path)[0] == 0
 
 
-def test_corrupt_previous_snapshot_and_check_fail_explicitly(record, tmp_path):
+def test_corrupt_previous_snapshot_and_check_fail_explicitly(record: dict, tmp_path: Path) -> None:
     config = load_config("karlsruhe")
     path, _ = save_scrape([record], config, tmp_path, limit=1, enrich_people=False)
     path.write_text("invalid")
@@ -379,7 +380,7 @@ def test_corrupt_previous_snapshot_and_check_fail_explicitly(record, tmp_path):
         check_page("html", record, KARLSRUHE_URL, "production", config, tmp_path)
 
 
-def test_legacy_karlsruhe_entry_uses_shared_config_and_safe_default():
+def test_legacy_karlsruhe_entry_uses_shared_config_and_safe_default() -> None:
     scraper = KarlsruheScraper()
     assert scraper.max_productions == 1
     assert scraper.parse_detail(KARLSRUHE_HTML, {"url": KARLSRUHE_URL})["duration"] == 90
@@ -389,7 +390,7 @@ def test_legacy_karlsruhe_entry_uses_shared_config_and_safe_default():
         KarlsruheScraper(max_productions=0)
 
 
-def test_cli_safe_defaults_and_offline_commands(tmp_path, record, capsys):
+def test_cli_safe_defaults_and_offline_commands(tmp_path: Path, record: dict, capsys: pytest.CaptureFixture) -> None:
     assert parse_args(["scrape", "--config", "karlsruhe"]).limit == 1
     assert not parse_args(["scrape", "--config", "karlsruhe"]).all
     path = tmp_path / "snapshot.json"
@@ -405,7 +406,7 @@ def test_cli_safe_defaults_and_offline_commands(tmp_path, record, capsys):
 
 
 @asynccontextmanager
-async def _local_venue():
+async def _local_venue() -> AsyncGenerator[tuple[str, dict, list[str]]]:
     requests = []
     production = """
     <h1 class="h2">Synthetic Play</h1><h3 id="besetzung"></h3><div><table>
@@ -425,7 +426,7 @@ async def _local_venue():
         + "</p></div></main>",
     }
 
-    async def handler(request):
+    async def handler(request: web.Request) -> web.Response:
         await request.read()
         requests.append(request.path)
         if request.path in {"/redirect", "/external"}:
@@ -461,8 +462,8 @@ async def _local_venue():
         await runner.cleanup()
 
 
-def test_http_pipeline_is_bounded_enriches_once_and_reports_errors():
-    async def exercise():
+def test_http_pipeline_is_bounded_enriches_once_and_reports_errors() -> None:
+    async def exercise() -> None:
         async with _local_venue() as (origin, config, requests):
             scraper = ConfigurableScraper(ScraperConfig.model_validate(config))
             records = await scraper.scrape(limit=1)
@@ -488,8 +489,8 @@ def test_http_pipeline_is_bounded_enriches_once_and_reports_errors():
     asyncio.run(exercise())
 
 
-def test_cli_page_and_check_fetch_exactly_one_page(tmp_path):
-    async def exercise():
+def test_cli_page_and_check_fetch_exactly_one_page(tmp_path: Path) -> None:
+    async def exercise() -> None:
         async with _local_venue() as (origin, config, requests):
             config_path = tmp_path / "local.json"
             config_path.write_text(json.dumps(config))
@@ -530,8 +531,8 @@ def test_cli_page_and_check_fetch_exactly_one_page(tmp_path):
     asyncio.run(exercise())
 
 
-def test_pagination_is_bounded_and_failures_never_save_partial_scrapes(tmp_path):
-    async def exercise():
+def test_pagination_is_bounded_and_failures_never_save_partial_scrapes(tmp_path: Path) -> None:
+    async def exercise() -> None:
         async with _local_venue() as (origin, config, requests):
             paged_config = copy.deepcopy(config)
             paged_config["listing"].update(urls=[origin + "paged-list"], next_selector="a.next", max_pages=1)

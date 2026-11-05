@@ -48,7 +48,7 @@ def test_loads_credentials_from_root_env(load_config):
     assert url.host == "db.example"
     assert url.port == 5433
     assert url.username == "app"
-    assert url.password == "p@ss:/#word"  # noqa: S105
+    assert url.password == "p@ss:/#word"  # ruff: ignore[hardcoded-password-string]
     assert url.database == "theater"
     assert config["_get_engine"]().url == url
 
@@ -56,7 +56,7 @@ def test_loads_credentials_from_root_env(load_config):
 def test_environment_overrides_dotenv(load_config, monkeypatch):
     monkeypatch.setenv("POSTGRES_PASSWORD", "runtime-password")
     config = load_config("POSTGRES_PASSWORD=file-password\n")
-    assert config["DATABASE_URL"].password == "runtime-password"  # noqa: S105
+    assert config["DATABASE_URL"].password == "runtime-password"  # ruff: ignore[hardcoded-password-string]
 
 
 @pytest.mark.parametrize("scheme", ["postgres", "postgresql", "postgresql+psycopg", "postgresql+psycopg2"])

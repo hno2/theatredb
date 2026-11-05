@@ -60,7 +60,10 @@ def section_after_heading(tree: HTMLParser, tag: str, heading: str) -> Node | No
 
 def br_lines(node: Node) -> list[str]:
     """Split a node's inner HTML on <br> tags and return clean text lines."""
-    lines = [re.sub(r"<.*?>", "", part).strip() for part in node.html.split("<br>")]
+    fragment = node.html
+    if fragment is None:
+        raise ValueError("Cannot extract lines from a node without HTML")
+    lines = [re.sub(r"<.*?>", "", part).strip() for part in fragment.split("<br>")]
     return [l for l in lines if l]
 
 
@@ -129,6 +132,7 @@ def normalize_person_name(name: str) -> str:
 
 def extract_author_info(line: str) -> tuple[str | None, str]:
     """Parse an author line like 'Musik von Hans Werner Henze'.
+
     Returns (name, person_type).
     """
     if not line:
@@ -142,13 +146,13 @@ def extract_author_info(line: str) -> tuple[str | None, str]:
 # ── Dict helpers ──────────────────────────────────────────────────────────────
 
 
-def nested_get(data: dict, *path: str) -> str | None:
+def nested_get(data: object, *path: str) -> str | None:
     """Safely retrieve a value from a nested dict via a sequence of keys."""
     for key in path:
         if not isinstance(data, dict):
             return None
         data = data.get(key)
-    return data
+    return data if isinstance(data, str) else None
 
 
 def merge_prefer_first(*sources: dict) -> dict:
@@ -186,7 +190,7 @@ class TheaterScraper(ABC):
     source_id: str = "unnamed"
 
     #: Seed URLs for the list/overview pages.
-    list_urls: list[str] = []
+    list_urls: tuple[str, ...] | list[str] = ()
 
     #: Max simultaneous open connections.
     concurrency: int = 50
@@ -199,6 +203,7 @@ class TheaterScraper(ABC):
     @abstractmethod
     def parse_list(self, html: str) -> list[dict]:
         """Parse one list/overview page.
+
         Return a list of stub dicts — must include "url" for detail fetching.
         Return an empty list to signal end of pagination.
         """
@@ -206,6 +211,7 @@ class TheaterScraper(ABC):
     @abstractmethod
     def parse_detail(self, html: str, item: dict) -> dict:
         """Parse one detail page.
+
         Receives the raw HTML and the stub dict from parse_list.
         Return a fully populated record dict.
         """
@@ -214,6 +220,7 @@ class TheaterScraper(ABC):
 
     def deduplicate(self, items: list[dict]) -> list[dict]:
         """Override to collapse duplicates before detail fetching.
+
         Default: keep all items as-is.
         """
         return items
@@ -227,6 +234,7 @@ class TheaterScraper(ABC):
         semaphore: asyncio.Semaphore,
     ) -> list[dict]:
         """Collect stubs from all list_urls.
+
         If paginated=True: fetches url, url/2, url/3 … stopping when
           parse_list returns empty OR the raw HTML repeats (site ignores page number).
         If paginated=False: fetches each list_url exactly once.
@@ -259,6 +267,7 @@ class TheaterScraper(ABC):
 
     async def run(self) -> list[dict]:
         """Full pipeline: list → deduplicate → detail → save.
+
         Override to orchestrate multiple datasets.
         """
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
@@ -285,10 +294,9 @@ class TheaterScraper(ABC):
         session: aiohttp.ClientSession,
         semaphore: asyncio.Semaphore,
         url: str,
-        **kwargs: dict,
     ) -> str | None:
         try:
-            async with semaphore, session.get(url, **kwargs) as r:
+            async with semaphore, session.get(url) as r:
                 if r.status == 404:
                     return None
                 r.raise_for_status()

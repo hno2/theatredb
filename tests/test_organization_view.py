@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Any
 from unittest.mock import Mock
 
 import pandas as pd
@@ -13,6 +14,7 @@ import streamlit as st
 from frontend.views.organization import render_organization
 render_organization(st.session_state.profile)
 """
+ProfileFixture = tuple[AppTest, dict[str, Any], Mock]
 
 
 @pytest.mark.parametrize(
@@ -27,7 +29,7 @@ render_organization(st.session_state.profile)
         (None, None),
     ],
 )
-def test_parse_date(raw, expected):
+def test_parse_date(raw: str | None, expected: date | None) -> None:
     assert organization.parse_date(raw) == expected
 
 
@@ -44,16 +46,16 @@ def test_parse_date(raw, expected):
         (None, None),
     ],
 )
-def test_web_url(raw, expected):
+def test_web_url(raw: str | None, expected: str | None) -> None:
     assert organization.web_url(raw) == expected
 
 
 @pytest.fixture
-def profile(monkeypatch):
+def profile(monkeypatch: pytest.MonkeyPatch) -> ProfileFixture:
     source = Source(name="Theaterarchiv")
     monkeypatch.setattr(organization, "list_entities", lambda model: [source])
     links = Mock()
-    monkeypatch.setattr(organization.st, "page_link", links)
+    monkeypatch.setattr(organization, "entity_link", links)
     data = {
         "id": "theater-1",
         "name": "Bühne & Haus",
@@ -96,7 +98,7 @@ def profile(monkeypatch):
     return app, data, links
 
 
-def test_profile_has_map_address_and_readable_sources(profile):
+def test_profile_has_map_address_and_readable_sources(profile: ProfileFixture) -> None:
     app, _, links = profile
     app.run()
     assert not app.exception
@@ -112,18 +114,18 @@ def test_profile_has_map_address_and_readable_sources(profile):
     assert "Geprüft · Erfasst am 05.11.2026" in captions
     assert "90 Minuten · Ab 0 Jahren" in captions
     assert not any("source_id" in value or "external_url" in value for value in text)
-    assert links.call_args_list[0].kwargs["query_params"] == {"kind": "production", "id": "new"}
+    assert links.call_args_list[0].args == ("Produktion ansehen", "production", "new")
 
 
-def test_timeline_order_and_undated_entries(profile):
+def test_timeline_order_and_undated_entries(profile: ProfileFixture) -> None:
     app, _, links = profile
     app.run()
-    assert [call.kwargs["query_params"]["id"] for call in links.call_args_list] == ["new", "old", "invalid", "none"]
+    assert [call.args[2] for call in links.call_args_list] == ["new", "old", "invalid", "none"]
     assert any("Ungültiges Premierendatum" in element.value for element in app.warning)
     links.reset_mock()
     app.radio[0].set_value("Älteste zuerst").run()
     assert not app.exception
-    assert [call.kwargs["query_params"]["id"] for call in links.call_args_list] == ["old", "new", "invalid", "none"]
+    assert [call.args[2] for call in links.call_args_list] == ["old", "new", "invalid", "none"]
     assert [element.value for element in app.markdown if element.value.startswith("####")] == [
         "#### 2022",
         "#### 2025",
@@ -131,7 +133,7 @@ def test_timeline_order_and_undated_entries(profile):
     ]
 
 
-def test_empty_profile_has_honest_missing_data_messages(profile):
+def test_empty_profile_has_honest_missing_data_messages(profile: ProfileFixture) -> None:
     app, _, links = profile
     app.session_state.profile = {"id": "empty", "name": "Leeres Haus"}
     app.run()
@@ -146,7 +148,7 @@ def test_empty_profile_has_honest_missing_data_messages(profile):
     assert any("keine Quellen" in value for value in messages)
 
 
-def test_bad_sources_are_visible_without_unsafe_links(profile):
+def test_bad_sources_are_visible_without_unsafe_links(profile: ProfileFixture) -> None:
     app, data, _ = profile
     data["sources"] = [
         {"external_url": "javascript:alert(1)", "sourced_at": "bad-date"},
@@ -164,7 +166,7 @@ def test_bad_sources_are_visible_without_unsafe_links(profile):
     assert all(not button.proto.url.startswith("javascript:") for button in buttons)
 
 
-def test_zero_coordinates_are_mapped(profile, monkeypatch):
+def test_zero_coordinates_are_mapped(profile: ProfileFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     app, data, _ = profile
     data.update(lat=0, lon=0)
     map_widget = Mock()
@@ -174,7 +176,7 @@ def test_zero_coordinates_are_mapped(profile, monkeypatch):
     pd.testing.assert_frame_equal(map_widget.call_args.args[0], pd.DataFrame([{"lat": 0, "lon": 0}]))
 
 
-def test_invalid_coordinates_are_not_mapped(profile, monkeypatch):
+def test_invalid_coordinates_are_not_mapped(profile: ProfileFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     app, data, _ = profile
     data.update(lat=float("nan"), lon=181)
     map_widget = Mock()
@@ -185,13 +187,13 @@ def test_invalid_coordinates_are_not_mapped(profile, monkeypatch):
     assert any("Standortkoordinaten" in element.value for element in app.info)
 
 
-def test_search_filters_timeline_without_hiding_sources(profile):
+def test_search_filters_timeline_without_hiding_sources(profile: ProfileFixture) -> None:
     app, _, links = profile
     app.run()
     links.reset_mock()
     app.text_input[0].set_value("NEU").run()
     assert not app.exception
-    assert [call.kwargs["query_params"]["id"] for call in links.call_args_list] == ["new"]
+    assert [call.args[2] for call in links.call_args_list] == ["new"]
     assert any(element.value == "1 von 4 Produktionen" for element in app.caption)
     assert any(element.value == "Theaterarchiv" for element in app.text)
     links.reset_mock()

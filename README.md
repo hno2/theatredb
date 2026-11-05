@@ -77,8 +77,16 @@ before large cleanup runs.
 
 The app and `init_db()` add the three new tables (`reconciliationcase`,
 `sourcerecord`, `entityredirect`) without rewriting existing domain tables.
-Legacy Theapolis import scripts still bypass this review workflow: do not use
-them for ongoing reconciliation.
+The person biography field is a required schema prerequisite. For an existing
+PostgreSQL database without that column, apply this additive migration before
+starting the app (fresh databases already include it):
+
+```sql
+ALTER TABLE person ADD COLUMN IF NOT EXISTS description VARCHAR;
+```
+
+Legacy Theapolis import scripts, where available locally, bypass this review
+workflow: do not use them for ongoing reconciliation.
 
 ##### Python integration
 
@@ -152,9 +160,21 @@ capture date. Productions without a valid premiere remain listed separately;
 premiere dates do not represent production run dates. Missing coordinates and
 unusable source links are indicated explicitly. Production titles are searchable;
 long lists scroll within the production tab, while sources have their own tab.
+
+Production profiles use the same style, with premiere, duration, age guidance,
+cast and team credits, sources, and links to other productions at the theatre or
+with the same contributors. Person profiles list productions and shared credits
+with theatres and other people. Counts use distinct recorded productions, not
+roles or inferred similarity; “other” excludes the production currently shown.
+Detail links navigate in the same tab and replace the entity kind and UUID in
+the URL, including links between two entries on the detail page.
 ## Contribution
-- Make sure you run the pre-commits via `uv run prek run`
-- Start db via docker compose up db -d
+
+Pull requests run the **PR checks** workflow with Python 3.14 and locked uv
+dependencies, including all dependency groups. `prek` selects files changed
+between the PR base and head; hooks configured with `pass_filenames: false`
+(including Pyrefly) still run their repository-wide checks. The full pytest suite
+runs even if hooks fail, provided dependency installation succeeded.
 
 ## Planned Features
 - [ ]

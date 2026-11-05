@@ -1,17 +1,19 @@
 import datetime as dt
 import uuid
 from enum import StrEnum
-from typing import ClassVar
+from typing import Any, ClassVar, Protocol, cast
 
 from sqlalchemy import JSON, Column, select
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.orm import InstanceState
+from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
 class User(SQLModel, table=True):
     """Represents a user in the system."""
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     username: str = Field(index=True, sa_column_kwargs={"unique": True})
     display_name: str | None = None
     email: str | None = Field(default=None, index=True, sa_column_kwargs={"unique": True})
@@ -23,7 +25,7 @@ class User(SQLModel, table=True):
 class Source(SQLModel, table=True):
     """Represents a source of information for entities, e.g. a specific website, database, book, etc."""
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str = Field(index=True, unique=True)
     base_url: str | None = None
     url_pattern: str | None = None  # "https://theaterkompass.de/theatre/{source_id}"
@@ -40,10 +42,14 @@ class EntityType(StrEnum):
     AWARD = "award"
 
 
+class _EntityWithId(Protocol):
+    id: uuid.UUID
+
+
 class EntitySource(SQLModel, table=True):
     """Represents a concrete source record tied to a specific entity."""
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     source_id: uuid.UUID = Field(foreign_key="source.id")
     entity_type: EntityType
     entity_id: uuid.UUID  # no FK constraint — points to different tables
@@ -65,13 +71,24 @@ class SourceMixin:
 
     @property
     def sources(self) -> list[EntitySource]:
-        """Get all source links for this entity."""
-        session = sa_inspect(self).session
+        """Source links associated with this entity."""
+        state = cast(InstanceState[Any], sa_inspect(self))
+        session = state.session
         if session is None:
             return []
+        entity_id = cast(_EntityWithId, self).id
+        entity_type = cast(EntityType, type(self)._entity_type)
+        entity_type_filter = cast(
+            ColumnElement[bool],
+            EntitySource.entity_type == entity_type,
+        )
+        entity_id_filter = cast(
+            ColumnElement[bool],
+            EntitySource.entity_id == entity_id,
+        )
         stmt = select(EntitySource).where(
-            EntitySource.entity_id == self.id,
-            EntitySource.entity_type == self.__class__._entity_type,
+            entity_id_filter,
+            entity_type_filter,
         )
         return list(session.scalars(stmt).all())
 
@@ -144,7 +161,7 @@ class Organization(SourceMixin, SQLModel, table=True):
 
     _entity_type: ClassVar[EntityType] = EntityType.ORGANIZATION
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str = Field(index=True)
     type: str | None = None  # e.g. "theater", "opera house", "festival", "venue", "company", etc.
     url: str | None = None
@@ -160,7 +177,7 @@ class Organization(SourceMixin, SQLModel, table=True):
     memberships: list[OrganizationMembership] = Relationship(back_populates="organization")
     founded_year: int | None = None
     closed_year: int | None = None
-    venues: list[dict[str, str]] | None = Field(default=None, sa_column=Column(JSON))  # format {"Name": "Seats"}
+    venues: list[dict[str, str]] = Field(default_factory=list, sa_column=Column(JSON))  # format {"Name": "Seats"}
 
 
 class ProductionRole(StrEnum):
@@ -184,7 +201,7 @@ class Person(SourceMixin, SQLModel, table=True):
 
     _entity_type: ClassVar[EntityType] = EntityType.PERSON
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str = Field(index=True)
     type: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     born: dt.date | None = None
@@ -200,7 +217,7 @@ class Person(SourceMixin, SQLModel, table=True):
 class OrganizationMembership(SQLModel, table=True):
     """Represents the involvement of a person in an organization with a specific role and time period."""
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     organization_id: uuid.UUID = Field(foreign_key="organization.id")
     person_id: uuid.UUID = Field(foreign_key="person.id")
     role: str | None = None  # e.g. "artistic director", "ensemble member", etc.
@@ -216,7 +233,7 @@ class Text(SourceMixin, SQLModel, table=True):
 
     _entity_type: ClassVar[EntityType] = EntityType.TEXT
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     title: str
     language: str | None = None  # ISO 639-1
     published_year: int | None = None
@@ -236,7 +253,7 @@ class Text(SourceMixin, SQLModel, table=True):
 class TextContribution(SQLModel, table=True):
     """Represents the contribution of a person to a text, e.g. that a person is an author, translator, adapter, source author (for lineages), etc. of a text."""
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     text_id: uuid.UUID = Field(foreign_key="text.id")
     person_id: uuid.UUID = Field(foreign_key="person.id")
     role: str | None = None  # e.g. "author", "translator", "adapter", "source author" (for lineages), etc.
@@ -248,7 +265,7 @@ class TextContribution(SQLModel, table=True):
 class TextLineage(SQLModel, table=True):
     """Represents a lineage relationship between two texts, e.g. that one text is an adaptation or translation of another."""
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     source_text_id: uuid.UUID = Field(foreign_key="text.id")  # the Vorlage
     derived_text_id: uuid.UUID = Field(foreign_key="text.id")  # the new text
     relation: str  # e.g. "adaptation", "translation", etc.
@@ -269,7 +286,7 @@ class Production(SourceMixin, SQLModel, table=True):
 
     _entity_type: ClassVar[EntityType] = EntityType.PRODUCTION
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str = Field(index=True)
     description: str | None = None
     premiere: dt.datetime | None = None
@@ -291,7 +308,7 @@ class ProductionMembership(SQLModel, table=True):
     """Represents the involvement of a person in a production with a specific role."""
 
     # person assignment with role name in this specific play (e.g. "Regie")
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     production_id: uuid.UUID = Field(foreign_key="production.id")
     person_id: uuid.UUID = Field(foreign_key="person.id")
     role: str | None = None  # e.g. "Regie", "Schauspieler", "Dramaturgie", etc. # TODO: define somewhere else
@@ -313,7 +330,7 @@ class Award(SourceMixin, SQLModel, table=True):
 
     _entity_type: ClassVar[EntityType] = EntityType.AWARD
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str  # e.g. "Deutscher Theaterpreis Der Faust"
     description: str | None = None
     country: str | None = None
@@ -326,7 +343,7 @@ class Award(SourceMixin, SQLModel, table=True):
 class AwardNomination(SQLModel, table=True):
     """Represents a nomination of a person and/or production for a theater award in a specific category and year."""
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     award_id: uuid.UUID = Field(foreign_key="award.id")
     production_id: uuid.UUID | None = Field(default=None, foreign_key="production.id")  # optional: ties to a production
     person_id: uuid.UUID | None = Field(default=None, foreign_key="person.id")  # optional: ties to a person

@@ -3,8 +3,6 @@ gatherUsageStats=false
 
 [server]
 headless=true
-folderWatchList = ["backend/"]
-runOnSave=true
 
 [theme]
 base = "light"
