@@ -11,6 +11,12 @@ Keep credentials in `.env`, not in the `.venv` Python environment directory.
 
 ## Quick Start
 ### Data Ingestion
+
+See the separate [ingestion guide](backend/ingestion/README.md) for the staging
+JSON Schema, configurable Karlsruhe/Stuttgart scrapers, safe single-page tests,
+scrape diffs and persistent page-change checks. Scraping does not write to the
+database; imports still require review.
+
 #### Review-first reconciliation
 
 Open **Verwaltung → Datenabgleich & Duplikate**:

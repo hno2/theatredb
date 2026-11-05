@@ -1,0 +1,77 @@
+source_id: schauspiel-stuttgart.de
+organization_name: Schauspiel Stuttgart
+base_url: https://www.schauspiel-stuttgart.de/
+request_delay: 1
+listing:
+  urls:
+    - https://www.schauspiel-stuttgart.de/spielplan/premieren/
+  selector: a[href]
+  include: /spielplan/premieren/[^/]+/$
+  exclude: /spielplananalyse-[^/]+/
+production:
+  title:
+    selector: h1.productionheader__title
+    required: true
+  description:
+    selector: div.richtext.richtext--twocol-and-firstletter
+    format: markdown
+    min_length: 40
+    join: "\n\n"
+  author:
+    selector: div.productionheader__author
+    format: author
+  premiere:
+    selector: div.productionheader__premiereinfo
+    match: \d{1,2}\.\s*(\d{1,2}\.|[A-Za-zÄÖÜäöü])
+    format: date_de
+  duration:
+    selector: div.productionheader__duration
+    match: \d
+    format: duration
+  age_rating:
+    selector: div.productionheader__agerecommendation
+    extract: ab\s+(\d+)\s+Jahren?
+    format: integer
+credits:
+  - selector: div.cast__item
+    infer_type: false
+    name:
+      selector: .cast__name
+      strip: '\*'
+      split: '\s*,\s*'
+      required: true
+    role:
+      selector: .cast__role
+    url:
+      selector: a.cast__link[href]
+      attribute: href
+      format: url
+  - selector: div.crew__item
+    name:
+      selector: '.crew__name a, .crew__name:not(:has(a))'
+      many: true
+      required: true
+    role:
+      selector: .crew__role
+    url:
+      selector: .crew__name a[href]
+      attribute: href
+      format: url
+      many: true
+    default_type: other
+role_types:
+  Bühne: set_designer
+  Licht: light_designer
+  Übersetz: translator
+  Bearbeitung|Fassung: adapter
+person:
+  name:
+    selector: main h1
+    strip: '\*'
+    required: true
+  description:
+    selector: main div.richtext
+    format: markdown
+    min_length: 40
+    join: "\n\n"
+    required: true

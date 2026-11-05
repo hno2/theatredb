@@ -1,4 +1,5 @@
 from html.parser import HTMLParser
+from pathlib import Path
 from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
@@ -27,13 +28,13 @@ render_person(st.session_state.profile)
 class LinkParser(HTMLParser):
     """Read the rendered anchor without depending on attribute order."""
 
-    def handle_starttag(self, tag, attrs):
+    def handle_starttag(self, tag, attrs) -> None:
         """Capture link attributes."""
         if tag == "a":
             self.attributes = dict(attrs)
 
 
-def test_entity_link_replaces_query_and_escapes_source_text(monkeypatch):
+def test_entity_link_replaces_query_and_escapes_source_text(monkeypatch) -> None:
     markdown = Mock()
     monkeypatch.setattr("frontend.views.helpers.st.markdown", markdown)
     entity_id = str(UUID(int=1))
@@ -48,10 +49,10 @@ def test_entity_link_replaces_query_and_escapes_source_text(monkeypatch):
 
 
 @pytest.fixture
-def credits(monkeypatch):
+def credits(monkeypatch) -> tuple[dict, dict, dict, Mock]:
     alice = {"id": "alice", "name": "Alex"}
     bob = {"id": "bob", "name": "Alex"}
-    theatre = {"id": "theatre", "name": "Theater"}
+    theatre: dict[str, str | list[dict[str, str]]] = {"id": "theatre", "name": "Theater"}
     current = {
         "id": "current",
         "name": "Heute",
@@ -94,7 +95,7 @@ def credits(monkeypatch):
     return current, other, away, fetch
 
 
-def test_production_profile_preserves_details_and_counts_other_credits(credits):
+def test_production_profile_preserves_details_and_counts_other_credits(credits) -> None:
     current, _, _, fetch = credits
     app = AppTest.from_string(PRODUCTION_SCRIPT)
     app.session_state.profile = current
@@ -114,7 +115,7 @@ def test_production_profile_preserves_details_and_counts_other_credits(credits):
     assert "?kind=person&amp;id=alice" in html
 
 
-def test_empty_production_and_invalid_data_are_explicit(credits):
+def test_empty_production_and_invalid_data_are_explicit(credits) -> None:
     *_, fetch = credits
     fetch.return_value = []
     app = AppTest.from_string(PRODUCTION_SCRIPT)
@@ -134,7 +135,7 @@ def test_empty_production_and_invalid_data_are_explicit(credits):
     assert not app.get("link_button")
 
 
-def test_production_preserves_sources_tags_and_critics(credits):
+def test_production_preserves_sources_tags_and_critics(credits) -> None:
     current, *_ = credits
     current["organization"]["url"] = "https://theatre.example"
     current.update(
@@ -157,7 +158,7 @@ def test_production_preserves_sources_tags_and_critics(credits):
     }
 
 
-def test_collaborations_count_unique_productions_and_people_not_roles(credits):
+def test_collaborations_count_unique_productions_and_people_not_roles(credits) -> None:
     current, other, away, _ = credits
     theatres, collaborators = person.collaboration_groups([current, other, other, away], "alice")
     assert len(theatres["theatre"]["productions"]) == 2
@@ -167,7 +168,7 @@ def test_collaborations_count_unique_productions_and_people_not_roles(credits):
     assert set(production_people(current)) == {"alice", "bob"}
 
 
-def test_person_profile_has_linked_collaborations_and_biography(credits):
+def test_person_profile_has_linked_collaborations_and_biography(credits) -> None:
     app = AppTest.from_string(PERSON_SCRIPT)
     app.session_state.profile = {
         "id": "alice",
@@ -188,7 +189,7 @@ def test_person_profile_has_linked_collaborations_and_biography(credits):
     assert "?kind=production&amp;id=other" in html
 
 
-def test_empty_person_profile(credits):
+def test_empty_person_profile(credits) -> None:
     *_, fetch = credits
     fetch.return_value = []
     app = AppTest.from_string(PERSON_SCRIPT)
@@ -200,7 +201,7 @@ def test_empty_person_profile(credits):
     assert any("Ungültiges Datum" in element.value for element in app.warning)
 
 
-def test_people_productions_query_is_scoped_distinct_and_detached(monkeypatch):
+def test_people_productions_query_is_scoped_distinct_and_detached(monkeypatch) -> None:
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine)
     alice, bob = Person(name="Alex"), Person(name="Alex")
@@ -239,9 +240,9 @@ def test_people_productions_query_is_scoped_distinct_and_detached(monkeypatch):
     engine.dispose()
 
 
-def test_missing_detail_stops_before_render(monkeypatch):
+def test_missing_detail_stops_before_render(monkeypatch) -> None:
     monkeypatch.setattr(entity_management, "get_entity_graph", Mock(side_effect=ValueError("not found")))
-    app = AppTest.from_file("frontend/views/detail.py")
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "frontend" / "views" / "detail.py")
     app.query_params.update(kind="production", id=str(UUID(int=1)))
     app.run()
     assert not app.exception

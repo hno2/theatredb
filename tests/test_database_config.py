@@ -38,7 +38,7 @@ def load_config(monkeypatch, tmp_path):
     return load
 
 
-def test_loads_credentials_from_root_env(load_config):
+def test_loads_credentials_from_root_env(load_config) -> None:
     config = load_config(
         "POSTGRES_HOST=db.example\nPOSTGRES_PORT=5433\nPOSTGRES_USER=app\n"
         "POSTGRES_PASSWORD='p@ss:/#word'\nPOSTGRES_DB=theater\n"
@@ -53,14 +53,14 @@ def test_loads_credentials_from_root_env(load_config):
     assert config["_get_engine"]().url == url
 
 
-def test_environment_overrides_dotenv(load_config, monkeypatch):
+def test_environment_overrides_dotenv(load_config, monkeypatch) -> None:
     monkeypatch.setenv("POSTGRES_PASSWORD", "runtime-password")
     config = load_config("POSTGRES_PASSWORD=file-password\n")
     assert config["DATABASE_URL"].password == "runtime-password"  # ruff: ignore[hardcoded-password-string]
 
 
 @pytest.mark.parametrize("scheme", ["postgres", "postgresql", "postgresql+psycopg", "postgresql+psycopg2"])
-def test_database_url_from_dotenv(load_config, scheme):
+def test_database_url_from_dotenv(load_config, scheme) -> None:
     config = load_config(f"DATABASE_URL={scheme}://app:secret@db.example/theater\n")
     url = config["DATABASE_URL"]
     assert url.drivername == "postgresql+psycopg"
@@ -69,19 +69,19 @@ def test_database_url_from_dotenv(load_config, scheme):
     assert config["_get_engine"]().url == url
 
 
-def test_theaterdb_url_takes_precedence(load_config, monkeypatch):
+def test_theaterdb_url_takes_precedence(load_config, monkeypatch) -> None:
     monkeypatch.setenv("THEATERDB_DATABASE_URL", "sqlite://")
     config = load_config("DATABASE_URL=postgresql://app:secret@db.example/theater\n")
     assert str(config["DATABASE_URL"]) == "sqlite://"
 
 
-def test_runtime_database_url_overrides_dotenv(load_config, monkeypatch):
+def test_runtime_database_url_overrides_dotenv(load_config, monkeypatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "sqlite://")
     config = load_config("DATABASE_URL=postgresql://app:secret@db.example/theater\n")
     assert str(config["DATABASE_URL"]) == "sqlite://"
 
 
-def test_defaults_without_dotenv(load_config):
+def test_defaults_without_dotenv(load_config) -> None:
     config = load_config("")
     url = config["DATABASE_URL"]
     assert url.host == "localhost"
