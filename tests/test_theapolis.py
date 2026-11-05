@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import aiohttp
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
 from multidict import CIMultiDict, CIMultiDictProxy
 from sqlmodel import Session, SQLModel, col, create_engine, select
 from yarl import URL
@@ -14,6 +15,7 @@ from yarl import URL
 from backend import user_management
 from backend.import_status import theatre_status
 from backend.ingestion import theapolis
+from backend.ingestion.staging import staging_schema, validate_records
 from backend.models import EntitySource, Organization, Person, Production, ReconciliationCase, Source, Text
 from backend.reconciliation import approve_case, find_candidates, preview_case
 from frontend.views.organization import filter_productions, premiere_label, production_dates
@@ -85,6 +87,12 @@ def test_export_paginates_parallel_and_preserves_dates(monkeypatch, tmp_path, it
     active, peak = 0, 0
     requested = []
 
+    def reject_database():
+        pytest.fail("JSON export must not connect to the database")
+
+    monkeypatch.setattr(theapolis, "init_db", reject_database)
+    monkeypatch.setattr(theapolis, "get_session", reject_database)
+
     async def fetch(session, url):
         nonlocal active, peak
         page = int(parse_qs(urlsplit(url).query)["page"][0])
@@ -104,16 +112,24 @@ def test_export_paginates_parallel_and_preserves_dates(monkeypatch, tmp_path, it
     path = tmp_path / "export.json"
     asyncio.run(theapolis.download(path, concurrency=2))
     data = json.loads(path.read_text())
+    source = json.loads(path.with_suffix(".source.json").read_text())
     assert requested == [1, 2, 3]
     assert peak == 2
-    assert data["partial"] is False
-    assert dt.datetime.fromisoformat(data["captured_at"]).tzinfo
-    assert data["items"][1]["premiere"] is None
-    assert data["items"][1]["premiere_year"] == 2026
+    assert isinstance(data, list)
+    assert validate_records(data) == data
+    Draft202012Validator(staging_schema(), format_checker=FormatChecker()).validate(data)
+    assert source["partial"] is False
+    assert dt.datetime.fromisoformat(source["captured_at"]).tzinfo
+    assert data[0]["title"] == "Hamlet"
+    assert "id" not in data[0]
+    assert "organization" not in data[0]
+    assert data[0]["memberships"][0]["role"] == "director"
+    assert data[1]["premiere"] is None
+    assert data[1]["premiere_year"] == 2026
     requested.clear()
     asyncio.run(theapolis.download(path, max_pages=1))
     assert requested == [1]
-    assert json.loads(path.read_text())["partial"] is True
+    assert json.loads(path.with_suffix(".source.json").read_text())["partial"] is True
 
 
 def test_export_error_preserves_previous_file(monkeypatch, tmp_path):
@@ -178,6 +194,38 @@ def test_legacy_api_envelope_accepted(db, tmp_path, item):
     path = tmp_path / "legacy.json"
     path.write_text(json.dumps({"data": {"items": [item]}}))
     assert len(theapolis.import_all(path)["production"]) == 1
+
+
+def test_staged_export_reimports_using_source_ids(db, tmp_path, item):
+    path = tmp_path / "productions.json"
+    path.write_text(json.dumps(theapolis.staged_records([item])))
+    path.with_suffix(".source.json").write_text(json.dumps({"items": [item]}))
+    result = theapolis.import_all(path)
+    assert len(result["production"]) == 1
+    with Session(db) as session:
+        case = session.get(ReconciliationCase, uuid.UUID(result["production"][0]))
+        assert case is not None
+        assert case.context["external_id"] == str(item["id"])
+        assert "url" not in case.incoming
+
+
+def test_staged_import_rejects_missing_or_mismatched_metadata_before_writes(db, tmp_path, item):
+    path = tmp_path / "productions.json"
+    records = theapolis.staged_records([item])
+    path.write_text(json.dumps(records))
+    with pytest.raises(ValueError, match="requires source metadata"):
+        theapolis.import_all(path)
+    path.with_suffix(".source.json").write_text(json.dumps({"items": [item]}))
+    records[0]["title"] = "Changed"
+    path.write_text(json.dumps(records))
+    with pytest.raises(ValueError, match="differs"):
+        theapolis.import_all(path)
+    with Session(db) as session:
+        assert not session.exec(select(Source)).all()
+
+
+def test_default_export_uses_staged_theapolis_directory():
+    assert str(theapolis.DEFAULT_EXPORT) == "data/staged/theapolis.de/productions.json"
 
 
 def test_year_matching_and_display_do_not_invent_date(db):

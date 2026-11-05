@@ -180,6 +180,20 @@
           "default": null,
           "title": "Premiere"
         },
+        "premiere_year": {
+          "anyOf": [
+            {
+              "maximum": 9999,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Premiere Year"
+        },
         "duration": {
           "anyOf": [
             {

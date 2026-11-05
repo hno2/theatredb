@@ -39,6 +39,14 @@ CAPTURE = dt.datetime(2026, 6, 7, tzinfo=dt.UTC)
 REVIEW_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "reconciliation.py"
 
 
+def test_shared_staging_year_survives_upload(db, theatre) -> None:
+    record = {"title": "Year only", "url": "https://theatre.example/year-only", "premiere_year": 2026}
+    upload(theatre, record)
+    production = rows(db, Production)[0]
+    assert production.premiere is None
+    assert production.premiere_year == 2026
+
+
 @pytest.fixture
 def db(monkeypatch, tmp_path) -> Iterator[Engine]:
     engine = create_engine(f"sqlite:///{tmp_path / 'import.db'}")

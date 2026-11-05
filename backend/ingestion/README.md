@@ -21,10 +21,12 @@ not executable Python.
 
 ## Theapolis: separate directory import
 
-Theapolis has one independent entry point, `backend.ingestion.theapolis`. It does
-not use the venue configs, venue staging schema, theatre uploads or their
-automatic matching/import rules. API export and image downloads do not connect
-to the database. Import queues generic reconciliation cases only.
+Theapolis has one independent entry point, `backend.ingestion.theapolis`. It
+uses the **same staging JSON schema** as all venue scrapers: a root array of
+productions with `title`, `url`, `premiere`, and `memberships`. It does not use
+venue configs, theatre uploads or their automatic matching/import rules.
+API export and image downloads do not connect to the database. The separate
+Theapolis import queues generic reconciliation cases only.
 
 For an existing PostgreSQL database, back it up and apply this additive schema
 change **before starting the updated app or importing** (fresh databases already
@@ -43,9 +45,19 @@ uv run python -m backend.ingestion.theapolis images --concurrency 10
 uv run python -m backend.ingestion.theapolis import
 ```
 
-Defaults: API snapshot `data/theapolis/productions.json`; image manifest
+To **create JSON only**, without downloading images or writing to the database:
+
+```bash
+uv run --group ingest python -m backend.ingestion.theapolis download --concurrency 10
+```
+
+Default staged JSON: `data/staged/theapolis.de/productions.json`; image manifest
 `data/theapolis/images/manifest.json`. `--json PATH` selects another export/import
-file; `images --output DIRECTORY` selects another image directory. Existing flat
+file. A sibling `productions.source.json` keeps raw IDs, organization metadata,
+capture time and partial-export status outside the shared staging records.
+Keep both files together for the separate Theapolis review import; it checks
+that staged JSON matches its source metadata before writing any cases.
+`images --output DIRECTORY` selects another image directory. Existing flat
 `{"items": [...]}` exports (including `productions_new.json` and
 `theapolis_export.json`) and API `{"data": {"items": [...]}}` envelopes are accepted.
 For example:
@@ -54,8 +66,11 @@ For example:
 uv run python -m backend.ingestion.theapolis import --json productions_new.json
 ```
 
-Exports retain raw API IDs, dates, logos and attribution, plus normalized
-`premiere`/`premiere_year` and a timezone-aware capture timestamp.
+Staged records use normalized `premiere`/`premiere_year`; raw API IDs, dates,
+logos, attribution and the timezone-aware capture timestamp stay in the sidecar.
+The shared schema accepts optional integer `premiere_year` (1–9999) for every
+scraper, and the shared importer preserves it. This keeps year-only dates valid
+without adding Theapolis-specific keys to the staging contract.
 `premierDate` accepts ISO date/datetime, German `DD.MM.YYYY`, or a four-digit year;
 `premierYear` (or detail API `year`) supplies year-only premieres.
 Known full dates go into `Production.premiere`; year-only values go into
@@ -94,12 +109,12 @@ downloading does not grant a licence. Neither images nor snapshots are committed
 Bounded checks (do not run a full job for validation):
 
 ```bash
-uv run python -m backend.ingestion.theapolis download --max-pages 1 --json data/theapolis/smoke.json
+uv run python -m backend.ingestion.theapolis download --max-pages 1 --json data/staged/theapolis.de/smoke.json
 uv run python -m backend.ingestion.theapolis images --limit 2 --output data/theapolis/smoke-images
 uv run pytest -q tests/test_theapolis.py
 ```
 
-`--max-pages` marks the export as `partial`; it never pretends to be a full
+`--max-pages` marks the source sidecar as `partial`; it never pretends to be a full
 snapshot. `--limit` caps image profiles and reads only the first sitemap per kind.
 
 ## Staging JSON contract

@@ -115,6 +115,10 @@ def test_reject_invalid_snapshot_shape(value: object) -> None:
         ("premiere", "2026-10-16T19:00:00"),
         ("premiere", "123"),
         ("premiere", 123),
+        ("premiere_year", 0),
+        ("premiere_year", 10000),
+        ("premiere_year", True),
+        ("premiere_year", "2026"),
         ("typo", "unknown"),
     ],
 )

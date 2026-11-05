@@ -17,12 +17,13 @@ import aiohttp
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from sqlmodel import select
 
+from backend.ingestion.staging import validate_records
 from backend.models import EntityType, Source
 from backend.reconciliation import propose_record, validate_payload
 from backend.user_management import get_session, init_db
 
 SITE = "https://www.theapolis.de"
-DEFAULT_EXPORT = Path("data/theapolis/productions.json")
+DEFAULT_EXPORT = Path("data/staged/theapolis.de/productions.json")
 DEFAULT_IMAGES = Path("data/theapolis/images")
 ACTOR = "theapolis-ingestion"
 LOG = logging.getLogger(__name__)
@@ -119,8 +120,33 @@ def premiere_fields(item: dict) -> dict:
     return {"premiere": premiere.isoformat() if premiere else None, "premiere_year": year}
 
 
+def staged_records(items: list[dict]) -> list[dict]:
+    """Use the same validated production-array contract as venue scrapers."""
+    records = []
+    for item in items:
+        members = [
+            {"name": _name(person), "type": role, "role": role}
+            for group, role in (("directors", "director"), ("creators", "author"))
+            for person in item.get(group) or []
+        ]
+        fields = premiere_fields(item)
+        records.append(
+            {
+                "title": _name(item),
+                "url": f"https://www2.theapolis.de/de/produktionen/{quote(_identity(item), safe='')}",
+                **fields,
+                "memberships": members,
+            }
+        )
+    return validate_records(records)
+
+
+def _source_path(path: Path) -> Path:
+    return path.with_suffix(".source.json")
+
+
 async def download(output: Path = DEFAULT_EXPORT, *, concurrency: int = 10, max_pages: int | None = None) -> None:
-    """Export all API productions in parallel; max_pages bounds smoke tests."""
+    """Export shared-schema staged JSON and source metadata, without database writes."""
     if max_pages is not None and max_pages < 1:
         raise ValueError("max_pages must be positive")
     async with _session(concurrency) as session:
@@ -139,10 +165,9 @@ async def download(output: Path = DEFAULT_EXPORT, *, concurrency: int = 10, max_
         items = list(first["items"])
         for result in await _parallel(range(2, pages + 1), page, concurrency):
             items.extend(result["items"])
-        for item in items:
-            item.update(premiere_fields(item))
+        records = staged_records(items)
         _write_json(
-            output,
+            _source_path(output),
             {
                 "success": True,
                 "captured_at": dt.datetime.now(dt.UTC).isoformat(),
@@ -150,6 +175,7 @@ async def download(output: Path = DEFAULT_EXPORT, *, concurrency: int = 10, max_
                 "items": items,
             },
         )
+        _write_json(output, records)
     LOG.info("Exported %s productions to %s", len(items), output)
 
 
@@ -346,7 +372,16 @@ def _prepare_import(snapshot: dict) -> tuple[dict, dict, list, dt.datetime | Non
 
 def import_all(json_path: Path = DEFAULT_EXPORT) -> dict[str, list[str]]:
     """Validate a whole export, then queue generic review cases, never venue uploads."""
-    organizations, people, productions, captured_at = _prepare_import(json.loads(json_path.read_text(encoding="utf-8")))
+    snapshot = json.loads(json_path.read_text(encoding="utf-8"))
+    if isinstance(snapshot, list):
+        source_path = _source_path(json_path)
+        if not source_path.exists():
+            raise ValueError(f"Theapolis review import requires source metadata: {source_path}")
+        source = json.loads(source_path.read_text(encoding="utf-8"))
+        if validate_records(snapshot) != staged_records(source["items"]):
+            raise ValueError("Staged JSON differs from its Theapolis source metadata; re-export both files")
+        snapshot = source
+    organizations, people, productions, captured_at = _prepare_import(snapshot)
     init_db()
     with get_session() as session:
         source = session.exec(select(Source).where(Source.name == "theapolis.de")).first()
