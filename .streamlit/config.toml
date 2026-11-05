@@ -3,3 +3,13 @@ gatherUsageStats=false
 
 [server]
 headless=true
+
+[theme]
+base = "light"
+primaryColor = "#8b3a32"
+backgroundColor = "#faf9f6"
+secondaryBackgroundColor = "#f0eee8"
+textColor = "#292825"
+font = "sans-serif"
+headingFont = "serif"
+chartCategoricalColors = ["#8b3a32", "#64756b", "#aa8755", "#6a7886"]
