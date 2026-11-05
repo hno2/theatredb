@@ -5,13 +5,13 @@ from uuid import UUID
 
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstrumentedAttribute, Mapper, selectinload
-from sqlmodel import Session, SQLModel, col, func, select
+from sqlmodel import Session, SQLModel, col, func, or_, select
 
 from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
 
-from .models import EntitySource, EntityType, Production, ProductionMembership
+from .models import EntitySource, EntityType, Organization, Person, Production, ProductionMembership
 
 ModelT = TypeVar("ModelT", bound=SQLModel)
 
@@ -167,6 +167,48 @@ def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
             }
             for production in productions
         ]
+
+
+def browse_entities(
+    model_cls: type[Organization | Production | Person],
+    query: str = "",
+    *,
+    limit: int = 12,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Fetch a bounded discovery page with theatre context and a matching count."""
+    if not 1 <= limit <= 100 or offset < 0:
+        raise ValueError("Invalid discovery page bounds")
+    stmt = select(model_cls)
+    if model_cls is Production:
+        stmt = stmt.outerjoin(Organization)
+    query = query.strip()
+    if query:
+        filters = [col(model_cls.name).icontains(query, autoescape=True)]
+        if model_cls is Organization:
+            filters.extend(
+                field.icontains(query, autoescape=True) for field in (col(Organization.city), col(Organization.country))
+            )
+        elif model_cls is Production:
+            filters.extend(
+                field.icontains(query, autoescape=True)
+                for field in (col(Organization.name), col(Organization.city), col(Organization.country))
+            )
+        stmt = stmt.where(or_(*filters))
+    with get_session() as session:
+        total = session.exec(select(func.count()).select_from(stmt.subquery())).one()
+        if model_cls is Production:
+            stmt = stmt.options(selectinload(cast(InstrumentedAttribute, Production.organization))).order_by(
+                col(Production.premiere).desc().nulls_last()
+            )
+        rows = session.exec(stmt.order_by(col(model_cls.name), col(model_cls.id)).offset(offset).limit(limit)).all()
+        entries = []
+        for row in rows:
+            entry = _snapshot(row)
+            if isinstance(row, Production):
+                entry["organization"] = _snapshot(row.organization) if row.organization else None
+            entries.append(entry)
+        return entries, total
 
 
 def create_entity[ModelT: SQLModel](

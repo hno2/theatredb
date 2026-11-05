@@ -154,17 +154,32 @@ The interface uses native Streamlit components and a theme in
 mode should extract UI strings into language catalogs and use one shared language
 selection across pages, leaving theatre names and source data unchanged.
 
+**Theater & Produktionen** opens a searchable directory with direct detail links,
+not an entity-selection form. Theatre search includes city and country;
+production search also includes the producing theatre and its location. Results
+are paginated in groups of 12, with productions ordered by newest recorded
+premiere first and undated entries last. Native `st.pagination` controls appear
+above and below results and stay synchronized. Streamlit handles numbered pages,
+previous/next arrows and responsive truncation. People remain discoverable as well.
+Each profile links back to the directory; existing UUID detail URLs still work.
+
 Theatre detail pages show an address and location map, a premiere timeline
 (newest or oldest first), and readable source citations with review status and
 capture date. Productions without a valid premiere remain listed separately;
 premiere dates do not represent production run dates. Missing coordinates and
 unusable source links are indicated explicitly. Production titles are searchable;
 long lists scroll within the production tab, while sources have their own tab.
+Production cards show premiere dates and recorded credits. **Spielstätten &
+Menschen** lists stored venues, seating capacities and linked theatre memberships
+with their recorded dates; it does not claim to be a current ensemble roster.
 
 Production profiles use the same style, with premiere, duration, age guidance,
 cast and team credits, sources, and links to other productions at the theatre or
-with the same contributors. Person profiles list productions and shared credits
-with theatres and other people. Counts use distinct recorded productions, not
+with the same contributors. Production text foundations show the recorded
+title, language, publication year and linked authors/translators where available.
+Known canonical credit roles display German labels; source-specific roles remain
+unchanged. Person profiles list productions and shared credits with theatres and
+other people. Counts use distinct recorded productions, not
 roles or inferred similarity; “other” excludes the production currently shown.
 Detail links navigate in the same tab and replace the entity kind and UUID in
 the URL, including links between two entries on the detail page.
