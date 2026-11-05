@@ -9,7 +9,7 @@ from sqlmodel import Session, SQLModel, create_engine
 from streamlit.testing.v1 import AppTest
 
 from backend import entity_management
-from backend.models import Organization, Person, Production, ProductionMembership
+from backend.models import Organization, Person, Production, ProductionMembership, Text, TextContribution
 from frontend.views import organization, person, production
 from frontend.views.helpers import entity_link, production_people
 
@@ -248,3 +248,46 @@ def test_missing_detail_stops_before_render(monkeypatch) -> None:
     assert not app.exception
     assert app.error[0].value == "Not found"
     assert not app.title
+
+
+def test_production_shows_text_contributors_and_translated_roles(credits) -> None:
+    current, *_ = credits
+    current["memberships"][0]["role"] = "director"
+    current["text"] = {
+        "title": "Die Vorlage",
+        "language": "de",
+        "published_year": 1920,
+        "contributions": [
+            {"person": {"id": "author", "name": "Autorin"}, "role": "author"},
+            {"person": {"id": "translator", "name": "Übersetzer"}, "role": "translator"},
+            {"person": None, "role": "adapter"},
+        ],
+    }
+    app = AppTest.from_string(PRODUCTION_SCRIPT)
+    app.session_state.profile = current
+    app.run()
+    assert not app.exception
+    assert any(element.value == "Die Vorlage" for element in app.text)
+    assert any(element.value == "Sprache: de · Erschienen: 1920" for element in app.caption)
+    assert any(element.value == "Regie / Schauspiel · Hamlet" for element in app.text)
+    assert "Übersetzung" in [element.value for element in app.caption]
+    html = "\n".join(element.value for element in app.markdown)
+    assert "?kind=person&amp;id=author" in html
+    assert "?kind=person&amp;id=translator" in html
+    assert any("Textbeitrag ohne verknüpfte Person" in element.value for element in app.warning)
+
+
+def test_production_graph_includes_text_contributor_names(monkeypatch) -> None:
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        author = Person(name="Autorin")
+        text = Text(title="Vorlage", contributions=[TextContribution(person=author, role="author")])
+        entry = Production(name="Produktion", text=text)
+        session.add(entry)
+        session.commit()
+        entry_id = str(entry.id)
+    monkeypatch.setattr(entity_management, "get_session", lambda: Session(engine))
+    graph = entity_management.get_entity_graph(Production, entry_id)
+    assert graph["text"]["contributions"][0]["person"]["name"] == "Autorin"
+    engine.dispose()

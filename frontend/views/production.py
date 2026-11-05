@@ -1,7 +1,7 @@
 import streamlit as st
 
 from backend.entity_management import get_people_productions
-from frontend.views.helpers import entity_link, production_people
+from frontend.views.helpers import entity_link, production_people, role_label
 from frontend.views.organization import parse_date, render_production_card, render_sources, render_web_link
 
 
@@ -16,7 +16,7 @@ def render_cast(data: dict, other_productions: list[dict]) -> None:
         with st.container(border=True):
             entity_link(person["name"], "person", person_id)
             credits = [
-                " · ".join(filter(None, (membership.get("role"), membership.get("character"))))
+                " · ".join(filter(None, (role_label(membership.get("role")), membership.get("character"))))
                 for membership in data.get("memberships") or []
                 if str(membership.get("person_id")) == person_id
                 or str((membership.get("person") or {}).get("id")) == person_id
@@ -46,13 +46,32 @@ def render_connections(data: dict, other_productions: list[dict]) -> None:
     if not organization:
         st.info("Noch kein Theater hinterlegt.")
     for related in sorted(theatre_productions.values(), key=lambda production: production["name"].casefold()):
-        render_production_card(related)
+        render_production_card(related, show_organization=False)
     st.subheader("Weitere Produktionen mit diesen Mitwirkenden")
     st.caption(f"Weitere erfasste Produktionen: {len(other_productions)}. Jede Produktion zählt einmal.")
     for related in other_productions:
         shared = production_people(related).keys() & people.keys()
         st.text("Mit " + " · ".join(sorted(people[person_id]["name"] for person_id in shared)))
         render_production_card(related)
+
+
+def render_text(text: dict) -> None:
+    """Show the recorded text and link its authors, translators and adapters."""
+    st.subheader("Textgrundlage")
+    st.text(text["title"])
+    context = [
+        f"Sprache: {text['language']}" if text.get("language") else "",
+        f"Erschienen: {text['published_year']}" if text.get("published_year") is not None else "",
+    ]
+    if any(context):
+        st.caption(" · ".join(filter(None, context)))
+    for contribution in text.get("contributions") or []:
+        person = contribution.get("person") or {}
+        st.caption(role_label(contribution.get("role")) or "Mitwirkung am Text")
+        if person.get("id"):
+            entity_link(person["name"], "person", person["id"])
+        else:
+            st.warning("Textbeitrag ohne verknüpfte Person.")
 
 
 def render_production(data: dict) -> None:
@@ -88,6 +107,9 @@ def render_production(data: dict) -> None:
         st.write(data["description"])
     else:
         st.caption("Noch keine Beschreibung hinterlegt.")
+    text = data.get("text") or {}
+    if text:
+        render_text(text)
 
     people = production_people(data)
     other_productions = [

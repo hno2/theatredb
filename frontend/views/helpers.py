@@ -4,6 +4,29 @@ from urllib.parse import urlencode
 
 import streamlit as st
 
+from backend.reconciliation import canonical_role
+
+ROLE_LABELS = {
+    "director": "Regie",
+    "dramaturg": "Dramaturgie",
+    "set_designer": "Bühnenbild",
+    "actor": "Schauspiel",
+    "composer": "Musik",
+    "light_designer": "Licht",
+    "costume_designer": "Kostüme",
+    "video_designer": "Video",
+    "choreographer": "Choreografie",
+    "author": "Text",
+    "translator": "Übersetzung",
+    "adapter": "Bearbeitung",
+    "other": "Weitere Mitwirkung",
+}
+
+
+def role_label(role: str | None) -> str:
+    """Translate known canonical roles while retaining source-specific labels."""
+    return ROLE_LABELS.get(canonical_role(role) or "", role or "")
+
 
 def has_coordinates(lat: float | None, lon: float | None) -> bool:
     """Accept only finite coordinates within geographic bounds, including zero."""

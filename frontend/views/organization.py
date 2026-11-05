@@ -7,7 +7,7 @@ import streamlit as st
 
 from backend.entity_management import list_entities
 from backend.models import Source
-from frontend.views.helpers import entity_link, has_coordinates
+from frontend.views.helpers import entity_link, has_coordinates, role_label
 
 
 def parse_date(value: str | None) -> date | None:
@@ -80,26 +80,57 @@ def render_location(data: dict) -> None:
         st.write(data["description"])
 
 
-def render_production_card(production: dict) -> None:
+def render_production_card(production: dict, *, compact: bool = False, show_organization: bool = True) -> None:
     """Keep production links and details available within the timeline."""
     with st.container(border=True):
         st.text(production["name"])
         entity_link("Produktion ansehen", "production", str(production["id"]))
-        details = []
-        if production.get("duration") is not None:
-            details.append(f"{production['duration']} Minuten")
-        if production.get("age_rating") is not None:
-            details.append(f"Ab {production['age_rating']} Jahren")
-        if details:
-            st.caption(" · ".join(details))
-        if production.get("tags"):
-            st.text(" · ".join(production["tags"]))
+        organization = production.get("organization") or {}
+        if organization and show_organization:
+            entity_link(organization["name"], "organization", organization["id"])
+            if organization.get("city"):
+                st.caption(organization["city"])
+        render_production_summary(production)
         if production.get("description"):
-            st.write(production["description"])
+            if compact:
+                with st.expander("Beschreibung"):
+                    st.write(production["description"])
+            else:
+                st.write(production["description"])
         if production.get("critics"):
             with st.expander("Kritiken"):
                 for critic in production["critics"]:
                     st.write(critic)
+
+
+def render_production_summary(production: dict) -> None:
+    """Make recorded dates, guidance and credits visible before opening a profile."""
+    premiere = parse_date(production.get("premiere"))
+    if premiere:
+        st.caption(f"Premiere: {premiere:%d.%m.%Y}")
+    elif production.get("premiere"):
+        st.warning(f"Ungültiges Premierendatum: {production['premiere']}")
+    else:
+        st.caption("Premiere nicht hinterlegt")
+    details = []
+    if production.get("duration") is not None:
+        details.append(f"{production['duration']} Minuten")
+    if production.get("age_rating") is not None:
+        details.append(f"Ab {production['age_rating']} Jahren")
+    if details:
+        st.caption(" · ".join(details))
+    if production.get("tags"):
+        st.text(" · ".join(production["tags"]))
+    text = production.get("text") or {}
+    if text.get("title"):
+        st.caption(f"Textgrundlage: {text['title']}")
+    credits = dict.fromkeys(
+        (role_label(membership.get("role")), membership["person"]["name"])
+        for membership in production.get("memberships") or []
+        if (membership.get("person") or {}).get("name") and membership.get("role")
+    )
+    if credits:
+        st.caption(" · ".join(f"{role}: {name}" for role, name in credits))
 
 
 def render_timeline(productions: list[dict], organization_id: str) -> None:
@@ -125,14 +156,12 @@ def render_timeline(productions: list[dict], organization_id: str) -> None:
                 with date_column:
                     st.text(premiere.strftime("%d.%m.%Y"))
                 with production_column:
-                    render_production_card(production)
+                    render_production_card(production, show_organization=False)
     if undated:
         st.markdown("#### Ohne Premierendatum")
         st.caption("Ohne gültiges Premierendatum ist keine zeitliche Einordnung möglich.")
         for production in sorted(undated, key=lambda item: item["name"].casefold()):
-            if production.get("premiere"):
-                st.warning(f"Ungültiges Premierendatum für „{production['name']}“: {production['premiere']}")
-            render_production_card(production)
+            render_production_card(production, show_organization=False)
 
 
 def render_sources(sources: list[dict]) -> None:
@@ -140,7 +169,7 @@ def render_sources(sources: list[dict]) -> None:
     st.subheader("Quellen & Nachweise")
     st.caption("Externe Belege zu diesem Eintrag. „Geprüft“ bezeichnet die Prüfung des verknüpften Quelldatensatzes.")
     if not sources:
-        st.info("Für dieses Theater sind noch keine Quellen hinterlegt.")
+        st.info("Für diesen Eintrag sind noch keine Quellen hinterlegt.")
         return
     names = {str(source.id): source.name for source in list_entities(Source)}
     for source in sources:
@@ -192,7 +221,7 @@ def render_organization(data: dict) -> None:
     st.space("small")
     render_location(data)
     st.divider()
-    production_tab, source_tab = st.tabs(["Produktionen", "Quellen & Nachweise"])
+    production_tab, house_tab, source_tab = st.tabs(["Produktionen", "Spielstätten & Menschen", "Quellen & Nachweise"])
     with production_tab:
         search = st.text_input(
             "Produktionen durchsuchen",
@@ -209,6 +238,50 @@ def render_organization(data: dict) -> None:
                 render_timeline(matching, str(data["id"]))
     with source_tab:
         render_sources(sources)
+    with house_tab:
+        render_house(data)
     with st.expander("Technische Angaben"):
         st.caption("Interne Kennung dieses Eintrags")
         st.code(str(data["id"]), language=None)
+
+
+def render_house(data: dict) -> None:
+    """Show recorded venues and memberships without claiming current employment."""
+    st.subheader("Spielstätten")
+    venues = data.get("venues") or []
+    if not venues:
+        st.info("Noch keine Spielstätten hinterlegt.")
+    for venue in venues:
+        for name, seats in venue.items():
+            with st.container(border=True):
+                st.text(name)
+                st.caption(f"Plätze: {seats}" if seats else "Platzzahl nicht hinterlegt")
+    st.subheader("Menschen am Theater")
+    st.caption("Erfasste Zugehörigkeiten, keine vollständige oder automatisch aktuelle Ensembleliste.")
+    memberships = data.get("memberships") or []
+    if not memberships:
+        st.info("Noch keine Zugehörigkeiten hinterlegt.")
+    for membership in memberships:
+        with st.container(border=True):
+            render_membership(membership)
+
+
+def render_membership(membership: dict) -> None:
+    """Link one recorded theatre membership and retain its documented dates."""
+    person = membership.get("person") or {}
+    if person.get("id"):
+        entity_link(person["name"], "person", person["id"])
+    else:
+        st.warning("Zugehörigkeit ohne verknüpfte Person.")
+    if membership.get("role"):
+        st.text(role_label(membership["role"]))
+    dates = []
+    for field, label in (("start_date", "Beginn"), ("end_date", "Ende")):
+        if membership.get(field):
+            value = parse_date(membership[field])
+            if value:
+                dates.append(f"{label}: {value:%d.%m.%Y}")
+            else:
+                st.warning(f"Ungültiges Datum: {membership[field]}")
+    if dates:
+        st.caption(" · ".join(dates))

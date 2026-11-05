@@ -201,3 +201,35 @@ def test_search_filters_timeline_without_hiding_sources(profile: ProfileFixture)
     assert not app.exception
     links.assert_not_called()
     assert any("Keine Produktionen mit diesem Titel" in element.value for element in app.info)
+
+
+def test_theatre_shows_venues_memberships_and_credit_summary(profile: ProfileFixture) -> None:
+    app, data, links = profile
+    data["venues"] = [{"Großes Haus": "500"}, {"Studio": ""}]
+    data["memberships"] = [
+        {
+            "person": {"id": "director", "name": "Alex"},
+            "role": "director",
+            "start_date": "2020-01-02",
+            "end_date": "2025-03-04",
+        },
+        {"person": None, "start_date": "bad-date"},
+    ]
+    data["productions"][1]["memberships"] = [
+        {"person": {"id": "director", "name": "Alex"}, "role": "director"},
+    ]
+    app.run()
+    assert not app.exception
+    assert "Spielstätten & Menschen" in [tab.label for tab in app.tabs]
+    text = [element.value for element in app.text]
+    assert "Großes Haus" in text
+    assert "Studio" in text
+    assert "Regie" in text
+    captions = [element.value for element in app.caption]
+    assert "Plätze: 500" in captions
+    assert "Platzzahl nicht hinterlegt" in captions
+    assert "Beginn: 02.01.2020 · Ende: 04.03.2025" in captions
+    assert "Regie: Alex" in captions
+    assert any(call.args == ("Alex", "person", "director") for call in links.call_args_list)
+    assert any("ohne verknüpfte Person" in element.value for element in app.warning)
+    assert any("Ungültiges Datum" in element.value for element in app.warning)
