@@ -149,7 +149,7 @@ def _get(session: Session, kind: EntityType, entity_id: uuid.UUID | str) -> Enti
     return entity
 
 
-def search_entities(kind: EntityType | str, query: str = "", *, limit: int = 50) -> list[dict]:
+def search_entities(kind: EntityType | str, query: str = "", *, limit: int = 50, offset: int = 0) -> list[dict]:
     """Search by name/title or UUID, returning IDs to disambiguate namesakes."""
     kind = _kind(kind)
     model = ENTITY_MODELS[kind]
@@ -163,7 +163,42 @@ def search_entities(kind: EntityType | str, query: str = "", *, limit: int = 50)
                 stmt = stmt.where(label.icontains(query.strip(), autoescape=True))
             else:
                 stmt = stmt.where(model.id == resolve_id(session, kind, entity_id))
-        return [entity_snapshot(row) for row in session.exec(stmt.order_by(label, col(model.id)).limit(limit)).all()]
+        return [
+            entity_snapshot(row)
+            for row in session.exec(stmt.order_by(label, col(model.id)).offset(offset).limit(limit)).all()
+        ]
+
+
+def search_people_for_merge(query: str = "", *, limit: int = 100, offset: int = 0) -> list[dict]:
+    """Fetch a people page and batch its production/theatre context without per-person queries."""
+    people = search_entities(EntityType.PERSON, query, limit=limit, offset=offset)
+    if not people:
+        return []
+    by_id = {uuid.UUID(person["id"]): person for person in people}
+    for person in people:
+        person["productions"] = []
+    with get_session() as session:
+        involvement = (
+            select(ProductionMembership.person_id, ProductionMembership.production_id)
+            .where(col(ProductionMembership.person_id).in_(by_id))
+            .union(
+                select(TextContribution.person_id, Production.id)
+                .join(Production, col(Production.text_id) == col(TextContribution.text_id))
+                .where(col(TextContribution.person_id).in_(by_id))
+            )
+            .subquery()
+        )
+        credits = session.exec(
+            select(involvement.c.person_id, Production.name, Organization.name, Organization.city)
+            .join(Production, col(Production.id) == involvement.c.production_id)
+            .outerjoin(Organization, col(Organization.id) == col(Production.organization_id))
+            .distinct()
+            .order_by(Production.name, Organization.name, col(Organization.city))
+        ).all()
+        for person_id, production, theatre, city in credits:
+            location = f"{theatre} ({city})" if theatre and city else theatre or "Theater nicht hinterlegt"
+            by_id[person_id]["productions"].append(f"{production} · {location}")
+    return people
 
 
 def _source_matches(session: Session, kind: EntityType, source_id: uuid.UUID, context: dict) -> set[uuid.UUID]:
@@ -808,6 +843,7 @@ def _archive_source(
     source: EntitySource,
     target_id: uuid.UUID,
     duplicate_id: uuid.UUID,
+    approved_ids: Collection[uuid.UUID] = (),
 ) -> None:
     identities = _source_matches(
         session,
@@ -818,7 +854,8 @@ def _archive_source(
             "external_url": source.external_url,
         },
     )
-    if identities - {source.entity_id, target_id, duplicate_id}:
+    allowed = {source.entity_id, target_id, duplicate_id, *approved_ids}
+    if identities - allowed:
         raise ValueError("Source identity collision with a third entity; resolve it first")
     keys = []
     if source.external_id:
@@ -846,7 +883,7 @@ def _archive_source(
                 payload={"legacy_source": entity_snapshot(source)},
                 captured_at=None,
             )
-        elif record.entity_id not in {source.entity_id, target_id, duplicate_id}:
+        elif record.entity_id not in allowed:
             raise ValueError("Source identity collision with a third entity; resolve it first")
         archived = record.payload.get("merged_sources", [])
         snapshot = entity_snapshot(source)
@@ -893,6 +930,8 @@ def _merge(
     target: Entity,
     duplicate_id: str,
     actor_id: str | None,
+    *,
+    approved_ids: Collection[uuid.UUID] = (),
 ) -> None:
     duplicate = _get(session, case.entity_type, duplicate_id)
     touched = set()
@@ -915,7 +954,7 @@ def _merge(
     ).all()
     by_source = {}
     for link in sorted(links, key=lambda row: row.entity_id != target.id):
-        _archive_source(session, link, target.id, duplicate.id)
+        _archive_source(session, link, target.id, duplicate.id, approved_ids)
         if link.source_id in by_source:
             session.delete(link)
         else:
@@ -942,6 +981,157 @@ def _merge(
     audit_event(session, duplicate, "delete", actor_id)
     session.delete(duplicate)
     session.flush()
+
+
+def _people_merge_preview(
+    session: Session, person_ids: Collection[uuid.UUID | str], target_id: uuid.UUID | str
+) -> dict:
+    ids = [uuid.UUID(str(value)) for value in person_ids]
+    target_id = uuid.UUID(str(target_id))
+    if len(ids) < 2 or len(set(ids)) != len(ids) or target_id not in ids:
+        raise ValueError("Select at least two different people and a survivor from the selection")
+    people = session.exec(
+        select(Person).where(col(Person.id).in_(ids)).order_by(col(Person.id)).with_for_update()
+    ).all()
+    if len(people) != len(ids):
+        raise ValueError("Selected people no longer exist. Refresh and review again.")
+    ordered = sorted(people, key=lambda person: (person.id != target_id, person.id))
+    states = [_state(session, EntityType.PERSON, person) for person in ordered]
+    result = dict(states[0]["record"])
+    fields = []
+    for field in Person.model_fields:
+        if field == "id":
+            continue
+        options = {}
+        for state in states:
+            value = state["record"][field]
+            if value not in EMPTY:
+                options.setdefault(stable_digest(value), {"person_id": state["record"]["id"], "value": value})
+        values = list(options.values())
+        if not values:
+            continue
+        value = values[0]["value"]
+        if isinstance(value, list):
+            value = []
+            for option in values:
+                value = union_values(value, option["value"])
+        result[field] = value
+        fields.append(
+            {
+                "field": field,
+                "value": value,
+                "options": values,
+                "conflict": len(values) > 1 and not isinstance(value, list),
+            }
+        )
+    return {
+        "target_id": str(target_id),
+        "people": states,
+        "fields": fields,
+        "result": result,
+        "revision": stable_digest([str(target_id), states]),
+    }
+
+
+def preview_people_merge(person_ids: Collection[uuid.UUID | str], *, target_id: uuid.UUID | str) -> dict:
+    """Review a whole selection without writes, including all references in the revision."""
+    with get_session() as session:
+        return _people_merge_preview(session, person_ids, target_id)
+
+
+def merge_people(
+    person_ids: Collection[uuid.UUID | str],
+    *,
+    target_id: uuid.UUID | str,
+    revision: str,
+    actor_id: str,
+    choices: dict[str, str] | None = None,
+) -> uuid.UUID:
+    """Approve a reviewed people selection atomically, retaining source identities and history."""
+    with get_session() as session:
+        preview = _people_merge_preview(session, person_ids, target_id)
+        if preview["revision"] != revision:
+            raise ValueError("Data changed since preview. Refresh and review again.")
+        result = dict(preview["result"])
+        conflicts = {field["field"]: field for field in preview["fields"] if field["conflict"]}
+        for field, person_id in (choices or {}).items():
+            options = {option["person_id"]: option["value"] for option in conflicts.get(field, {}).get("options", [])}
+            if person_id not in options:
+                raise ValueError("Selected fields are not in the preview")
+            result[field] = options[person_id]
+        target = session.get(Person, uuid.UUID(preview["target_id"]))
+        if target is None:
+            raise ValueError("Merge target no longer exists")
+        before = entity_snapshot(target)
+        validated = revalidate(target, result)
+        approved_ids = {uuid.UUID(state["record"]["id"]) for state in preview["people"]}
+        aliases = session.exec(
+            select(EntityRedirect.old_id).where(
+                EntityRedirect.entity_type == EntityType.PERSON,
+                col(EntityRedirect.target_id).in_(approved_ids),
+            )
+        ).all()
+        review_ids = approved_ids | set(aliases)
+        related_cases = session.exec(
+            select(ReconciliationCase).where(
+                ReconciliationCase.entity_type == EntityType.PERSON,
+                ReconciliationCase.operation == "merge",
+                ReconciliationCase.status == "pending",
+                col(ReconciliationCase.target_id).in_(review_ids),
+                col(ReconciliationCase.duplicate_id).in_(review_ids),
+            )
+        ).all()
+        for field in result.keys() - {"id"}:
+            setattr(target, field, getattr(validated, field))
+        if entity_snapshot(target) != before:
+            session.add(target)
+            audit_event(session, target, "update", actor_id)
+        for duplicate in preview["people"][1:]:
+            duplicate_id = duplicate["record"]["id"]
+            key = stable_digest(["duplicate", EntityType.PERSON, sorted([str(target.id), duplicate_id])])
+            case = session.exec(select(ReconciliationCase).where(ReconciliationCase.key == key)).first()
+            case = case or ReconciliationCase(
+                key=key,
+                entity_type=EntityType.PERSON,
+                operation="merge",
+                reason="Personenauswahl geprüft",
+                incoming={"name": duplicate["record"]["name"]},
+            )
+            case.target_id = target.id
+            case.duplicate_id = uuid.UUID(duplicate_id)
+            case.status, case.actor_id = "approved", actor_id
+            case.decided_at = dt.datetime.now(dt.UTC)
+            case.decision_note = "Identität und Feldwerte in der Personenauswahl bestätigt."
+            case.context = {
+                **case.context,
+                "decision": {"before": before, "after": entity_snapshot(target), "duplicate": duplicate},
+            }
+            _merge(
+                session,
+                case,
+                target,
+                duplicate_id,
+                actor_id,
+                approved_ids=approved_ids,
+            )
+            session.add(case)
+        for case in related_cases:
+            if case.status == "pending":
+                case.status, case.actor_id = "approved", actor_id
+                case.target_id = target.id
+                case.decided_at = dt.datetime.now(dt.UTC)
+                case.decision_note = "Durch bestätigte Personenauswahl zusammengeführt."
+                case.context = {
+                    **case.context,
+                    "bulk_merge": {
+                        "target_id": str(target.id),
+                        "person_ids": sorted(str(value) for value in approved_ids),
+                        "revision": revision,
+                    },
+                }
+                session.add(case)
+        session.commit()
+        return target.id
 
 
 def ensure_credit(

@@ -44,11 +44,20 @@ Open **Verwaltung → Datenabgleich & Duplikate**:
    or create a new one; for each conflict choose *Bestand behalten* (default) or
    *Upload übernehmen*. Merging people, texts and sources happens in the backend.
 3. **Weitere Prüffälle** keeps older generic review cases.
-4. **Duplikate suchen / melden** searches existing organizations, people, texts,
-   productions and awards. Submit suggested pairs or manually select any two
-   records, even with different names. Submission never merges automatically.
-   Review the pair, choose the surviving record, inspect affected links and approve.
-   Rejected cases can be reopened with a reason.
+4. **Duplikate suchen / melden**: select the area at the top (people, organizations,
+   texts, productions or awards). The people table has leading selection checkboxes
+   and a **Produktionen · Theater** column, fetched with one people query and one
+   joined context query per page (100 people), including productions linked through
+   text contributions. UUID searches additionally follow existing redirects.
+   Search by name or UUID; selection
+   applies to the current page. Select two or more people, choose the surviving
+   record and click **Personen zusammenführen** to preview. Empty fields are filled
+   and lists combined; choose which value to keep for conflicting scalar fields.
+   Confirm identity, then **Zusammenführung speichern** applies the whole selection
+   in one transaction. Previewing never changes the database.
+   Other areas retain the pair-review workflow. Suggested pairs and manual reports
+   (including people under the expander) never merge automatically; inspect and
+   approve them under **Weitere Prüffälle**. Rejected cases can be reopened with a reason.
 
 The same import is available on the command line (theatre by name or ID):
 
