@@ -373,7 +373,7 @@ def _render_member_rows(
             st.rerun()
 
 
-def _render_inline_relation_table_editor(  # noqa: C901
+def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
     *,
     parent_id: str,
     relation: dict,
@@ -559,7 +559,7 @@ def _render_inline_relations(
                     create_entity(child_model, payload=resolved, actor_id=actor)
                     add_errors.clear(add_form_key)
                     _clear_form_widget_state(add_form_key, fields)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # ruff: ignore[blind-except]
                     _FormErrors(*_extract_validation_errors(exc)).save(add_form_key)
                 st.rerun()
 
@@ -614,7 +614,7 @@ def _render_edit_form(model_cls: type[SQLModel], fields: list[_FieldUI], sel_row
                 update_entity(model_cls, entity_id=sel_row.get("id"), payload=resolved, actor_id=actor)
                 st.session_state["_flash"] = "Saved."
                 edit_errors.clear(edit_form_key)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # ruff: ignore[blind-except]
                 _FormErrors(*_extract_validation_errors(exc)).save(edit_form_key)
             st.rerun()
         if delete.form_submit_button("Delete", icon=":material/delete:", width="stretch", type="secondary"):
@@ -638,7 +638,7 @@ def _render_add_form(model_cls: type[SQLModel], fields: list[_FieldUI], actor: s
                 st.session_state["_flash"] = "Added."
                 add_errors.clear(add_form_key)
                 _clear_form_widget_state(add_form_key, fields)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # ruff: ignore[blind-except]
                 _FormErrors(*_extract_validation_errors(exc)).save(add_form_key)
             st.rerun()
 

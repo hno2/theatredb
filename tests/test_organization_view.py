@@ -27,7 +27,7 @@ render_organization(st.session_state.profile)
         (None, None),
     ],
 )
-def test_parse_date(raw, expected):
+def test_parse_date(raw, expected) -> None:
     assert organization.parse_date(raw) == expected
 
 
@@ -44,7 +44,7 @@ def test_parse_date(raw, expected):
         (None, None),
     ],
 )
-def test_web_url(raw, expected):
+def test_web_url(raw, expected) -> None:
     assert organization.web_url(raw) == expected
 
 
@@ -96,7 +96,7 @@ def profile(monkeypatch):
     return app, data, links
 
 
-def test_profile_has_map_address_and_readable_sources(profile):
+def test_profile_has_map_address_and_readable_sources(profile) -> None:
     app, _, links = profile
     app.run()
     assert not app.exception
@@ -115,7 +115,7 @@ def test_profile_has_map_address_and_readable_sources(profile):
     assert links.call_args_list[0].kwargs["query_params"] == {"kind": "production", "id": "new"}
 
 
-def test_timeline_order_and_undated_entries(profile):
+def test_timeline_order_and_undated_entries(profile) -> None:
     app, _, links = profile
     app.run()
     assert [call.kwargs["query_params"]["id"] for call in links.call_args_list] == ["new", "old", "invalid", "none"]
@@ -131,7 +131,7 @@ def test_timeline_order_and_undated_entries(profile):
     ]
 
 
-def test_empty_profile_has_honest_missing_data_messages(profile):
+def test_empty_profile_has_honest_missing_data_messages(profile) -> None:
     app, _, links = profile
     app.session_state.profile = {"id": "empty", "name": "Leeres Haus"}
     app.run()
@@ -146,7 +146,7 @@ def test_empty_profile_has_honest_missing_data_messages(profile):
     assert any("keine Quellen" in value for value in messages)
 
 
-def test_bad_sources_are_visible_without_unsafe_links(profile):
+def test_bad_sources_are_visible_without_unsafe_links(profile) -> None:
     app, data, _ = profile
     data["sources"] = [
         {"external_url": "javascript:alert(1)", "sourced_at": "bad-date"},
@@ -164,7 +164,7 @@ def test_bad_sources_are_visible_without_unsafe_links(profile):
     assert all(not button.proto.url.startswith("javascript:") for button in buttons)
 
 
-def test_zero_coordinates_are_mapped(profile, monkeypatch):
+def test_zero_coordinates_are_mapped(profile, monkeypatch) -> None:
     app, data, _ = profile
     data.update(lat=0, lon=0)
     map_widget = Mock()
@@ -174,7 +174,7 @@ def test_zero_coordinates_are_mapped(profile, monkeypatch):
     pd.testing.assert_frame_equal(map_widget.call_args.args[0], pd.DataFrame([{"lat": 0, "lon": 0}]))
 
 
-def test_invalid_coordinates_are_not_mapped(profile, monkeypatch):
+def test_invalid_coordinates_are_not_mapped(profile, monkeypatch) -> None:
     app, data, _ = profile
     data.update(lat=float("nan"), lon=181)
     map_widget = Mock()
@@ -185,7 +185,7 @@ def test_invalid_coordinates_are_not_mapped(profile, monkeypatch):
     assert any("Standortkoordinaten" in element.value for element in app.info)
 
 
-def test_search_filters_timeline_without_hiding_sources(profile):
+def test_search_filters_timeline_without_hiding_sources(profile) -> None:
     app, _, links = profile
     app.run()
     links.reset_mock()

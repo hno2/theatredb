@@ -1,5 +1,6 @@
-from backend.models import Organization, OrganizationMembership, Person
 from backend.user_management import init_db
+
+from backend.models import Organization, OrganizationMembership, Person
 from frontend.management.uifactory import render_sqlmodel_crud
 
 
@@ -9,8 +10,9 @@ def main() -> None:
     render_sqlmodel_crud(
         model_cls=Organization,
         field_overrides={
-            "lat": {"exclude": True}, #TODO: Should be added by geocoding, but currently is not
-            "lon": {"exclude": True},},
+            "lat": {"exclude": True},  # TODO: Should be added by geocoding, but currently is not
+            "lon": {"exclude": True},
+        },
         inline_relations=[
             {
                 "model": OrganizationMembership,
@@ -33,7 +35,8 @@ def main() -> None:
                     },
                     "role": {"label": "Rolle"},
                 },
-            }]
+            }
+        ],
     )
 
 

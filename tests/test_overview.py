@@ -26,11 +26,11 @@ OVERVIEW_SCRIPT = "from frontend.views.overview import render_overview\nrender_o
         (48, -181, False),
     ],
 )
-def test_coordinate_validation(lat, lon, expected):
+def test_coordinate_validation(lat, lon, expected) -> None:
     assert overview.has_coordinates(lat, lon) is expected
 
 
-def test_directory_preserves_missing_coordinates_and_links():
+def test_directory_preserves_missing_coordinates_and_links() -> None:
     org = Organization(name="Theater & Bühne", city=" Wien ", country=" Österreich ")
     data = overview.organization_data([org])
     assert len(data) == 1
@@ -43,7 +43,7 @@ def test_directory_preserves_missing_coordinates_and_links():
 
 
 @pytest.mark.parametrize("positions", [[(0, 0)], [(48, 16), (48, 16)], [(48, 16), (52, 13)]])
-def test_map_supports_single_shared_and_multiple_locations(positions):
+def test_map_supports_single_shared_and_multiple_locations(positions) -> None:
     data = overview.organization_data(
         [Organization(name=f"Theater {i}", lat=lat, lon=lon) for i, (lat, lon) in enumerate(positions)]
     )
@@ -69,7 +69,7 @@ def homepage(monkeypatch):
     return AppTest.from_string(OVERVIEW_SCRIPT), organizations
 
 
-def test_homepage_metrics_and_literal_search(homepage):
+def test_homepage_metrics_and_literal_search(homepage) -> None:
     app, _ = homepage
     app.run()
     assert not app.exception
@@ -98,7 +98,7 @@ def test_homepage_metrics_and_literal_search(homepage):
     assert any("Keine Theater gefunden" in message.value for message in app.info)
 
 
-def test_selected_marker_has_internal_detail_link(homepage, monkeypatch):
+def test_selected_marker_has_internal_detail_link(homepage, monkeypatch) -> None:
     app, organizations = homepage
     selected_id = str(organizations[0].id)
     chart = Mock(return_value={"selection": {"objects": {"theaters": [{"id": selected_id}]}}})
@@ -120,7 +120,7 @@ def test_selected_marker_has_internal_detail_link(homepage, monkeypatch):
     link.assert_not_called()
 
 
-def test_empty_homepage(monkeypatch):
+def test_empty_homepage(monkeypatch) -> None:
     monkeypatch.setattr(overview, "list_entities", lambda *args, **kwargs: [])
     monkeypatch.setattr(overview, "count_entities", lambda model: 0)
     app = AppTest.from_string(OVERVIEW_SCRIPT).run()
@@ -130,7 +130,7 @@ def test_empty_homepage(monkeypatch):
     assert any("Noch keine Theater erfasst" in message.value for message in app.info)
 
 
-def test_shared_map_position_links_every_theater(homepage, monkeypatch):
+def test_shared_map_position_links_every_theater(homepage, monkeypatch) -> None:
     app, organizations = homepage
     organizations[1].lat = organizations[0].lat
     organizations[1].lon = organizations[0].lon

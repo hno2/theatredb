@@ -89,7 +89,7 @@ def list_entities_where[ModelT: SQLModel](
     model_cls: type[ModelT],
     *,
     filter_field: str,
-    filter_value: Any,  # noqa: ANN401
+    filter_value: Any,  # ruff: ignore[any-type]
     order_by: str | None = "id",
 ) -> list[ModelT]:
     """List entities of the given type filtered by a field value, optionally ordered."""
