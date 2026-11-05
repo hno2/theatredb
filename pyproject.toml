@@ -14,7 +14,7 @@ dependencies = [
 	"streamlit>=1.58.0",
 	"authlib>=1.7.2",
 	"psycopg[binary]>=3.3.4",
-  
+
 ]
 
 [dependency-groups]
@@ -76,3 +76,9 @@ py-modules = []
 
 [tool.setuptools.packages.find]
 include = ["backend*", "frontend*", "old_do_not_use*"]
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+]
+

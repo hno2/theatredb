@@ -14,12 +14,6 @@ repos:
       - id: end-of-file-fixer
       - id: trailing-whitespace
 
-  - repo: https://github.com/astral-sh/uv-pre-commit
-    # uv version.
-    rev: 0.13.6
-    hooks:
-      - id: uv-lock
-
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: 0.39.0
     hooks:
@@ -27,17 +21,23 @@ repos:
       - id: check-github-actions
       - id: check-github-workflows
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.3
+  - repo: local
     hooks:
+      - id: uv-lock
+        name: uv lock check
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
       - id: ruff-format
+        name: Ruff format
+        entry: ruff format
+        language: system
       - id: ruff
-        args: ["--unsafe-fixes"]
-
-  - repo: https://github.com/facebook/pyrefly-pre-commit
-    rev: 1.4.0.dev4  # Note: this is the version of the pre-commit hook, NOT the pyrefly version used for type checking
-    hooks:
+        name: Ruff check
+        entry: ruff check --unsafe-fixes
+        language: system
       - id: pyrefly-check
         name: Pyrefly (type checking)
+        entry: pyrefly check
         pass_filenames: false  # Recommended to do full repo checks. However, you can change this to `true` to only check changed files
         language: system  # Use system-installed pyrefly
