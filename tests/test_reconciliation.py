@@ -1,9 +1,10 @@
 import datetime as dt
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import Engine, event
 from sqlmodel import Session, SQLModel, create_engine, select
 from streamlit.testing.v1 import AppTest
 
@@ -50,11 +51,11 @@ REVIEW_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "
 
 
 @pytest.fixture
-def db(monkeypatch, tmp_path):
+def db(monkeypatch, tmp_path) -> Iterator[Engine]:
     engine = create_engine(f"sqlite:///{tmp_path / 'reconciliation.db'}")
 
     @event.listens_for(engine, "connect")
-    def enable_foreign_keys(connection, _):
+    def enable_foreign_keys(connection, _) -> None:
         connection.execute("PRAGMA foreign_keys=ON")
 
     SQLModel.metadata.create_all(engine)
@@ -63,7 +64,7 @@ def db(monkeypatch, tmp_path):
     engine.dispose()
 
 
-def save(db, *entities):
+def save[*Entities](db, *entities: *Entities) -> tuple[*Entities]:
     with Session(db) as session:
         for entity in entities:
             session.add(entity)
@@ -74,22 +75,35 @@ def save(db, *entities):
     return entities
 
 
-def count(db, model):
+def count(db, model) -> int:
     with Session(db) as session:
         return len(session.exec(select(model)).all())
 
 
-def approve(case, target=None, **kwargs):
+def approve(
+    case: ReconciliationCase,
+    target: uuid.UUID | str | None = None,
+    *,
+    fields: list[str] | None = None,
+    allow_create: bool = False,
+) -> uuid.UUID:
     preview = preview_case(case.id, target_id=target)
-    return approve_case(case.id, revision=preview["revision"], target_id=target, actor_id="test", **kwargs)
+    return approve_case(
+        case.id,
+        revision=preview["revision"],
+        target_id=target,
+        actor_id="test",
+        fields=fields,
+        allow_create=allow_create,
+    )
 
 
 @pytest.fixture
-def source(db):
+def source(db) -> Source:
     return save(db, Source(name="theatre.example"))[0]
 
 
-def test_staging_only_creates_cases_and_is_idempotent(db, source):
+def test_staging_only_creates_cases_and_is_idempotent(db, source) -> None:
     records = [
         {
             "title": "Hamlet",
@@ -126,7 +140,7 @@ def test_staging_only_creates_cases_and_is_idempotent(db, source):
     assert not list_cases()
 
 
-def test_staging_current_person_and_production_fields_survive_review(db, source):
+def test_staging_current_person_and_production_fields_survive_review(db, source) -> None:
     cases = stage_records(
         [
             {
@@ -177,7 +191,7 @@ def test_staging_current_person_and_production_fields_survive_review(db, source)
         )
 
 
-def test_staging_validates_every_record_before_creating_source_or_cases(db):
+def test_staging_validates_every_record_before_creating_source_or_cases(db) -> None:
     with pytest.raises(ValueError):
         stage_records(
             [
@@ -198,7 +212,7 @@ def test_staging_validates_every_record_before_creating_source_or_cases(db):
     assert count(db, ReconciliationCase) == 0
 
 
-def test_production_matching_requires_org_and_directors(db):
+def test_production_matching_requires_org_and_directors(db) -> None:
     org, other_org, director, wrong_director = save(
         db,
         Organization(name="Theatre"),
@@ -230,7 +244,7 @@ def test_production_matching_requires_org_and_directors(db):
     assert all(c["recommendation"] == "review" for c in find_candidates("production", {"name": "Hamlet"}))
 
 
-def test_premiere_conflict_and_missing_dates(db):
+def test_premiere_conflict_and_missing_dates(db) -> None:
     org, director = save(db, Organization(name="Theatre"), Person(name="Director"))
     prod = save(db, Production(name="Hamlet", organization_id=org.id, premiere=dt.datetime(2020, 1, 1, tzinfo=dt.UTC)))[
         0
@@ -243,7 +257,7 @@ def test_premiere_conflict_and_missing_dates(db):
     assert find_candidates("production", incoming, context={"directors": ["Director"]})[0]["recommendation"] == "strong"
 
 
-def test_update_preserves_conflicts_empty_fields_and_unions_lists(db, source):
+def test_update_preserves_conflicts_empty_fields_and_unions_lists(db, source) -> None:
     person = save(db, Person(name="Person", description="Manual biography", type=["director"]))[0]
     case = propose_record(
         "person",
@@ -255,6 +269,7 @@ def test_update_preserves_conflicts_empty_fields_and_unions_lists(db, source):
     approve(case, person.id)
     with Session(db) as session:
         current = session.get(Person, person.id)
+        assert current is not None
         assert current.description == "Manual biography"
         assert current.type == ["director", "author"]
     assert count(db, Person) == 1
@@ -271,7 +286,7 @@ def test_update_preserves_conflicts_empty_fields_and_unions_lists(db, source):
     assert count(db, SCD2History) == 1
 
 
-def test_explicit_overwrite_and_invalid_field_selection(db, source):
+def test_explicit_overwrite_and_invalid_field_selection(db, source) -> None:
     person = save(db, Person(name="Person", description="Old"))[0]
     case = propose_record("person", {"name": "Person", "description": "New"}, source_id=source.id, external_id="1")
     with pytest.raises(ValueError, match="Selected fields"):
@@ -280,7 +295,7 @@ def test_explicit_overwrite_and_invalid_field_selection(db, source):
     assert get_entity_graph(Person, str(person.id))["description"] == "New"
 
 
-def test_no_implicit_creation_and_source_cannot_be_reassigned(db, source):
+def test_no_implicit_creation_and_source_cannot_be_reassigned(db, source) -> None:
     case = propose_record("person", {"name": "One"}, source_id=source.id, external_id="1")
     with pytest.raises(ValueError, match="explicit approval"):
         approve(case)
@@ -300,12 +315,13 @@ def test_no_implicit_creation_and_source_cannot_be_reassigned(db, source):
         approve(next_case, allow_create=True)
 
 
-def test_stale_preview_and_rejection_reopening(db, source):
+def test_stale_preview_and_rejection_reopening(db, source) -> None:
     person = save(db, Person(name="Person"))[0]
     case = propose_record("person", {"name": "Person", "description": "New"}, source_id=source.id, external_id="1")
     preview = preview_case(case.id, target_id=person.id)
     with Session(db) as session:
         current = session.get(Person, person.id)
+        assert current is not None
         current.description = "Other editor"
         session.add(current)
         session.commit()
@@ -317,7 +333,7 @@ def test_stale_preview_and_rejection_reopening(db, source):
     assert len(list_cases()) == 1
 
 
-def test_older_source_snapshot_is_blocked(db, source):
+def test_older_source_snapshot_is_blocked(db, source) -> None:
     case = propose_record("person", {"name": "Person"}, source_id=source.id, external_id="1", captured_at=CAPTURE)
     identity = approve(case, allow_create=True)
     old = propose_record(
@@ -330,10 +346,10 @@ def test_older_source_snapshot_is_blocked(db, source):
 
 
 @pytest.mark.parametrize("kind", list(ENTITY_MODELS))
-def test_all_entity_kinds_merge_and_redirect(db, kind):
+def test_all_entity_kinds_merge_and_redirect(db, kind) -> None:
     model = ENTITY_MODELS[kind]
     label = "title" if kind == EntityType.TEXT else "name"
-    left, right = save(db, model(**{label: "Same"}), model(**{label: "Same"}))
+    left, right = save(db, model.model_validate({label: "Same"}), model.model_validate({label: "Same"}))
     case = queue_duplicate(kind, left.id, right.id, reason="Manual")
     assert queue_duplicate(kind, right.id, left.id, reason="Programmatic").id == case.id
     approve(case)
@@ -344,7 +360,7 @@ def test_all_entity_kinds_merge_and_redirect(db, kind):
     assert get_entity_graph(model, str(right.id))["id"] == str(left.id)
 
 
-def test_person_merge_rewires_all_links_and_deduplicates_roles(db, source):
+def test_person_merge_rewires_all_links_and_deduplicates_roles(db, source) -> None:
     left, right, org, text, prod, award = save(
         db,
         Person(name="Same"),
@@ -379,7 +395,7 @@ def test_person_merge_rewires_all_links_and_deduplicates_roles(db, source):
     ] == str(left.id)
 
 
-def test_merge_survivor_can_be_swapped(db):
+def test_merge_survivor_can_be_swapped(db) -> None:
     left, right = save(db, Person(name="Left"), Person(name="Right"))
     case = queue_duplicate("person", left.id, right.id, reason="Manual")
     approve(case, right.id)
@@ -388,7 +404,7 @@ def test_merge_survivor_can_be_swapped(db):
         assert resolve_id(session, "person", left.id) == right.id
 
 
-def test_text_merge_rewires_productions_and_both_lineage_directions(db):
+def test_text_merge_rewires_productions_and_both_lineage_directions(db) -> None:
     left, right, third = save(db, Text(title="Work"), Text(title="Work"), Text(title="Derived"))
     prod = save(db, Production(name="Staging", text_id=right.id))[0]
     save(
@@ -399,13 +415,15 @@ def test_text_merge_rewires_productions_and_both_lineage_directions(db):
     )
     approve(queue_duplicate("text", left.id, right.id, reason="Manual"))
     with Session(db) as session:
-        assert session.get(Production, prod.id).text_id == left.id
+        current = session.get(Production, prod.id)
+        assert current is not None
+        assert current.text_id == left.id
         lineages = session.exec(select(TextLineage)).all()
         assert len(lineages) == 2
         assert all(right.id not in {r.source_text_id, r.derived_text_id} for r in lineages)
 
 
-def test_merge_failure_rolls_back_everything(db, source):
+def test_merge_failure_rolls_back_everything(db, source) -> None:
     left, right, third = save(db, Person(name="Same"), Person(name="Same"), Person(name="Third"))
     save(
         db,
@@ -423,7 +441,7 @@ def test_merge_failure_rolls_back_everything(db, source):
     assert list_cases()[0]["status"] == "pending"
 
 
-def test_person_and_text_title_only_matches_remain_review(db):
+def test_person_and_text_title_only_matches_remain_review(db) -> None:
     author, work, person = save(db, Person(name="Author"), Text(title="Hamlet"), Person(name="Namesake"))
     save(db, TextContribution(text_id=work.id, person_id=author.id, role="author"))
     assert find_candidates("person", {"name": person.name})[0]["recommendation"] == "review"
@@ -434,7 +452,7 @@ def test_person_and_text_title_only_matches_remain_review(db):
     assert find_candidates("text", {"title": "Hamlet"}, context={"authors": ["Other"]})[0]["conflicts"]
 
 
-def test_search_manual_pair_with_different_names_and_discovery(db):
+def test_search_manual_pair_with_different_names_and_discovery(db) -> None:
     left, right = save(db, Organization(name="Same", city="Berlin"), Organization(name="Same", city="Hamburg"))
     assert len(search_entities("organization", "Same")) == 2
     assert search_entities("organization", str(left.id))[0]["id"] == str(left.id)
@@ -446,7 +464,7 @@ def test_search_manual_pair_with_different_names_and_discovery(db):
     assert case.status == "pending"
 
 
-def test_invalid_payloads_do_not_create_records(db, source):
+def test_invalid_payloads_do_not_create_records(db, source) -> None:
     with pytest.raises(ValueError, match="protected"):
         propose_record("person", {"name": "Person", "id": str(uuid.uuid4())}, source_id=source.id, external_id="1")
     with pytest.raises(ValueError, match="Invalid source URL"):
@@ -456,7 +474,7 @@ def test_invalid_payloads_do_not_create_records(db, source):
     assert count(db, ReconciliationCase) == 0
 
 
-def test_import_requires_organization_and_infers_capture_date(db, tmp_path):
+def test_import_requires_organization_and_infers_capture_date(db, tmp_path) -> None:
     path = tmp_path / "20260607_productions.json"
     path.write_text('[{"title": "Work", "url": "https://theatre.example/1"}]')
     with pytest.raises(ValueError, match="organization-name"):
@@ -469,11 +487,11 @@ def test_import_requires_organization_and_infers_capture_date(db, tmp_path):
 @pytest.mark.parametrize(
     ("raw", "expected"), [("Regie", "director"), ("Inszenierung", "director"), ("creator", "author")]
 )
-def test_canonical_roles(raw, expected):
+def test_canonical_roles(raw, expected) -> None:
     assert canonical_role(raw) == expected
 
 
-def test_review_ui_empty_and_manual_submission(db):
+def test_review_ui_empty_and_manual_submission(db) -> None:
     left, right = save(db, Person(name="Same"), Person(name="Same"))
     app = AppTest.from_file(str(REVIEW_APP)).run()
     assert not app.exception
@@ -491,7 +509,7 @@ def test_review_ui_empty_and_manual_submission(db):
     assert any("Genehmigen" in button.label and button.disabled for button in app.button)
 
 
-def test_staged_enrichment_reuses_existing_theapolis_graph(db, source):
+def test_staged_enrichment_reuses_existing_theapolis_graph(db, source) -> None:
     org, director, author, text = save(
         db,
         Organization(name="Theatre"),
@@ -542,7 +560,7 @@ def test_staged_enrichment_reuses_existing_theapolis_graph(db, source):
     assert data["premiere"].startswith("2026-02-14")
 
 
-def test_matching_uses_approved_person_identity_not_scraped_spelling(db, source):
+def test_matching_uses_approved_person_identity_not_scraped_spelling(db, source) -> None:
     org, director = save(db, Organization(name="Theatre"), Person(name="Canonical Name"))
     prod = save(db, Production(name="Hamlet", organization_id=org.id))[0]
     save(db, ProductionMembership(production_id=prod.id, person_id=director.id, role="director"))
@@ -561,7 +579,7 @@ def test_matching_uses_approved_person_identity_not_scraped_spelling(db, source)
     assert preview_case(case.id)["candidates"][0]["recommendation"] == "strong"
 
 
-def test_merge_keeps_dictionary_lists_and_all_decision_snapshots(db):
+def test_merge_keeps_dictionary_lists_and_all_decision_snapshots(db) -> None:
     venue = {"name": "Main", "seats": "100"}
     left, right = save(
         db,
@@ -571,13 +589,17 @@ def test_merge_keeps_dictionary_lists_and_all_decision_snapshots(db):
     case = queue_duplicate("organization", left.id, right.id, reason="Same theatre")
     approve(case)
     with Session(db) as session:
-        assert len(session.get(Organization, left.id).venues) == 2
-        decision = session.get(ReconciliationCase, case.id).context["decision"]
+        current = session.get(Organization, left.id)
+        assert current is not None
+        assert len(current.venues) == 2
+        current_case = session.get(ReconciliationCase, case.id)
+        assert current_case is not None
+        decision = current_case.context["decision"]
         assert decision["duplicate"]["record"]["id"] == str(right.id)
         assert decision["before"]["venues"] == [venue]
 
 
-def test_org_and_production_merges_rewire_graph(db):
+def test_org_and_production_merges_rewire_graph(db) -> None:
     left, right, person, text, award = save(
         db,
         Organization(name="Theatre"),
@@ -602,13 +624,15 @@ def test_org_and_production_merges_rewire_graph(db):
     approve(queue_duplicate("organization", left.id, right.id, reason="Same theatre"))
     approve(queue_duplicate("production", prod_left.id, prod_right.id, reason="Same staging"))
     with Session(db) as session:
-        assert session.get(Production, prod_left.id).organization_id == left.id
+        current = session.get(Production, prod_left.id)
+        assert current is not None
+        assert current.organization_id == left.id
         assert session.exec(select(OrganizationMembership)).one().organization_id == left.id
         assert session.exec(select(ProductionMembership)).one().production_id == prod_left.id
         assert session.exec(select(AwardNomination)).one().production_id == prod_left.id
 
 
-def test_award_merge_deduplicates_identical_nominations(db):
+def test_award_merge_deduplicates_identical_nominations(db) -> None:
     left, right, person = save(db, Award(name="Award"), Award(name="Award"), Person(name="Actor"))
     for award in (left, right):
         save(
@@ -621,7 +645,7 @@ def test_award_merge_deduplicates_identical_nominations(db):
     assert count(db, AwardNomination) == 1
 
 
-def test_stale_merge_preview_includes_relationship_changes(db):
+def test_stale_merge_preview_includes_relationship_changes(db) -> None:
     left, right, prod = save(db, Person(name="Same"), Person(name="Same"), Production(name="Work"))
     case = queue_duplicate("person", left.id, right.id, reason="Same person")
     preview = preview_case(case.id)
@@ -632,7 +656,7 @@ def test_stale_merge_preview_includes_relationship_changes(db):
     assert count(db, EntityRedirect) == 0
 
 
-def test_legacy_actor_character_credit_is_updated_not_duplicated(db, source):
+def test_legacy_actor_character_credit_is_updated_not_duplicated(db, source) -> None:
     person, production = save(db, Person(name="Actor"), Production(name="Hamlet"))
     credit = save(db, ProductionMembership(production_id=production.id, person_id=person.id, role="Hamlet"))[0]
     person_case = propose_record("person", {"name": "Actor"}, source_id=source.id, external_id="person")
@@ -647,11 +671,12 @@ def test_legacy_actor_character_credit_is_updated_not_duplicated(db, source):
     approve(case, production.id)
     with Session(db) as session:
         row = session.get(ProductionMembership, credit.id)
+        assert row is not None
         assert (row.role, row.character) == ("actor", "Hamlet")
         assert count(db, ProductionMembership) == 1
 
 
-def test_redirect_chain_and_unrelated_merge_target(db):
+def test_redirect_chain_and_unrelated_merge_target(db) -> None:
     first, second, third = save(db, Person(name="One"), Person(name="Two"), Person(name="Three"))
     case = queue_duplicate("person", first.id, second.id, reason="Same")
     with pytest.raises(ValueError, match="submitted pair"):
@@ -663,7 +688,7 @@ def test_redirect_chain_and_unrelated_merge_target(db):
         assert resolve_id(session, "person", first.id) == third.id
 
 
-def test_queue_search_pagination_and_duplicate_discovery_do_not_write(db, source):
+def test_queue_search_pagination_and_duplicate_discovery_do_not_write(db, source) -> None:
     for index in range(3):
         propose_record("person", {"name": f"Person {index}"}, source_id=source.id, external_id=str(index))
     cases = list_cases(query="Person 1")
@@ -675,14 +700,14 @@ def test_queue_search_pagination_and_duplicate_discovery_do_not_write(db, source
     assert discover_duplicates("person") == []
 
 
-def test_capture_time_is_normalized_to_utc(db, source):
+def test_capture_time_is_normalized_to_utc(db, source) -> None:
     local = dt.datetime(2026, 6, 7, 2, tzinfo=dt.timezone(dt.timedelta(hours=2)))
     first = propose_record("person", {"name": "Person"}, source_id=source.id, external_id="1", captured_at=local)
     again = propose_record("person", {"name": "Person"}, source_id=source.id, external_id="1", captured_at=CAPTURE)
     assert first.id == again.id
 
 
-def test_review_ui_merges_only_after_explicit_confirmation(db):
+def test_review_ui_merges_only_after_explicit_confirmation(db) -> None:
     left, right = save(db, Person(name="Same"), Person(name="Same"))
     case = queue_duplicate("person", left.id, right.id, reason="Same person")
     app = AppTest.from_file(str(REVIEW_APP)).run()
@@ -695,7 +720,7 @@ def test_review_ui_merges_only_after_explicit_confirmation(db):
     assert list_cases(status="approved")[0]["id"] == str(case.id)
 
 
-def test_review_ui_preserves_stale_preview_until_refreshed(db, source):
+def test_review_ui_preserves_stale_preview_until_refreshed(db, source) -> None:
     person = save(db, Person(name="Person"))[0]
     case = propose_record(
         "person", {"name": "Person", "description": "Source bio"}, source_id=source.id, external_id="1"
@@ -705,6 +730,7 @@ def test_review_ui_preserves_stale_preview_until_refreshed(db, source):
     next(box for box in app.checkbox if box.label.startswith("Identität")).check().run()
     with Session(db) as session:
         row = session.get(Person, person.id)
+        assert row is not None
         row.description = "Concurrent edit"
         session.add(row)
         session.commit()
@@ -715,7 +741,7 @@ def test_review_ui_preserves_stale_preview_until_refreshed(db, source):
     assert list_cases()[0]["status"] == "pending"
 
 
-def test_duplicate_merge_allows_same_source_identity_on_submitted_pair(db, source):
+def test_duplicate_merge_allows_same_source_identity_on_submitted_pair(db, source) -> None:
     left, right = save(db, Person(name="Same"), Person(name="Same"))
     for person in (left, right):
         save(
@@ -733,7 +759,7 @@ def test_duplicate_merge_allows_same_source_identity_on_submitted_pair(db, sourc
         assert record.entity_id == left.id
 
 
-def test_pending_merge_can_choose_survivor_after_other_merge_redirects(db):
+def test_pending_merge_can_choose_survivor_after_other_merge_redirects(db) -> None:
     left, right, third = save(db, Person(name="Left"), Person(name="Right"), Person(name="Third"))
     pending = queue_duplicate("person", left.id, right.id, reason="Same person")
     approve(queue_duplicate("person", third.id, right.id, reason="Same person"))

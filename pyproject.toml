@@ -71,6 +71,9 @@ preview = true
   "import-private-name",
   "assert",
   "undocumented-public-function",
+  "missing-type-function-argument",
+  "missing-return-type-private-function",
+  "missing-return-type-undocumented-public-function"
 ]
 [tool.ruff.lint.pydocstyle]
 convention = "google"

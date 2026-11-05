@@ -1,6 +1,5 @@
-from backend.user_management import init_db
-
 from backend.models import Award
+from backend.user_management import init_db
 from frontend.management.uifactory import render_sqlmodel_crud
 
 
