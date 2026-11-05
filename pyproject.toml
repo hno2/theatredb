@@ -14,6 +14,7 @@ dependencies = [
 	"streamlit>=1.58.0",
 	"authlib>=1.7.2",
 	"psycopg[binary]>=3.3.4",
+	"python-dotenv>=1.2.1",
 
 ]
 

@@ -6,8 +6,7 @@ import streamlit as st
 from frontend.views.helpers import entity_link
 
 
-def render_production(data: dict) -> None:
-    # ── Header ────────────────────────────────────────────────────────────────
+def _render_header(data: dict) -> None:
     st.title(data["name"])
 
     col1, col2, col3 = st.columns(3)
@@ -22,41 +21,44 @@ def render_production(data: dict) -> None:
     if data.get("url"):
         st.link_button("🔗 Offizielle Seite", data["url"])
 
+
+def _render_memberships(memberships: list[dict]) -> None:
+    if not memberships:
+        return
+    st.subheader("Besetzung")
+    for membership in memberships:
+        person = membership.get("person") or {}
+        role = membership.get("role") or ""
+        character = membership.get("character") or ""
+        caption_parts = [value for value in (role, character) if value]
+        caption = " · ".join(caption_parts) if caption_parts else "—"
+
+        _col_name, col_role = st.columns([2, 3])
+        entity_link(person.get("name", "Unknown"), "person", person.get("id", ""))
+        col_role.caption(caption)
+
+
+def _render_organization(org: dict | None) -> None:
+    if not org:
+        return
+    st.divider()
+    st.subheader("Theater")
+    entity_link(org["name"], "organization", org["id"])
+    if org.get("url"):
+        st.link_button("🔗 Theater-Website", org["url"])
+
+
+def render_production(data: dict) -> None:
+    """Render production details, cast, organization, and tags."""
+    _render_header(data)
     st.divider()
 
-    # ── Description ───────────────────────────────────────────────────────────
     if data.get("description"):
         with st.expander("Über diese Production", expanded=True):
             st.markdown(data["description"])
 
-    # ── Cast ──────────────────────────────────────────────────────────────────
-    memberships = data.get("memberships") or []
-    if memberships:
-        st.subheader("Besetzung")
-        for m in memberships:
-            person = m.get("person") or {}
-            name = person.get("name", "Unknown")
-            role = m.get("role") or ""
-            character = m.get("character") or ""
-
-            label = name
-            caption_parts = [x for x in [role, character] if x]
-            caption = " · ".join(caption_parts) if caption_parts else "—"
-
-            _col_name, col_role = st.columns([2, 3])
-            entity_link(label, "person", person.get("id", ""))
-            col_role.caption(caption)
-
-    # ── Organization ──────────────────────────────────────────────────────────
-    org = data.get("organization")
-    if org:
-        st.divider()
-        st.subheader("Theater")
-        entity_link(org["name"], "organization", org["id"])
-        if org.get("url"):
-            st.link_button("🔗 Theater-Website", org["url"])
-
-    # ── Tags ──────────────────────────────────────────────────────────────────
+    _render_memberships(data.get("memberships") or [])
+    _render_organization(data.get("organization"))
     tags = data.get("tags") or []
     if tags:
         st.divider()

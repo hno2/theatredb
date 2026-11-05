@@ -10,6 +10,7 @@ from backend.models import Organization, Person, Production
 from frontend.views import overview
 
 OVERVIEW_SCRIPT = "from frontend.views.overview import render_overview\nrender_overview()"
+HomepageFixture = tuple[AppTest, list[Organization]]
 
 
 @pytest.mark.parametrize(
@@ -26,7 +27,7 @@ OVERVIEW_SCRIPT = "from frontend.views.overview import render_overview\nrender_o
         (48, -181, False),
     ],
 )
-def test_coordinate_validation(lat, lon, expected) -> None:
+def test_coordinate_validation(lat: float | None, lon: float | None, expected: bool) -> None:
     assert overview.has_coordinates(lat, lon) is expected
 
 
@@ -43,7 +44,7 @@ def test_directory_preserves_missing_coordinates_and_links() -> None:
 
 
 @pytest.mark.parametrize("positions", [[(0, 0)], [(48, 16), (48, 16)], [(48, 16), (52, 13)]])
-def test_map_supports_single_shared_and_multiple_locations(positions) -> None:
+def test_map_supports_single_shared_and_multiple_locations(positions: list[tuple[float, float]]) -> None:
     data = overview.organization_data(
         [Organization(name=f"Theater {i}", lat=lat, lon=lon) for i, (lat, lon) in enumerate(positions)]
     )
@@ -58,7 +59,7 @@ def test_map_supports_single_shared_and_multiple_locations(positions) -> None:
 
 
 @pytest.fixture
-def homepage(monkeypatch):
+def homepage(monkeypatch: pytest.MonkeyPatch) -> HomepageFixture:
     organizations = [
         Organization(name="Bühne [Mitte]", city="Berlin", country="Deutschland", lat=52.5, lon=13.4),
         Organization(name="Burgtheater", city="Wien", country="Österreich", lat=48.2, lon=16.4),
@@ -69,7 +70,7 @@ def homepage(monkeypatch):
     return AppTest.from_string(OVERVIEW_SCRIPT), organizations
 
 
-def test_homepage_metrics_and_literal_search(homepage) -> None:
+def test_homepage_metrics_and_literal_search(homepage: HomepageFixture) -> None:
     app, _ = homepage
     app.run()
     assert not app.exception
@@ -98,7 +99,7 @@ def test_homepage_metrics_and_literal_search(homepage) -> None:
     assert any("Keine Theater gefunden" in message.value for message in app.info)
 
 
-def test_selected_marker_has_internal_detail_link(homepage, monkeypatch) -> None:
+def test_selected_marker_has_internal_detail_link(homepage: HomepageFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     app, organizations = homepage
     selected_id = str(organizations[0].id)
     chart = Mock(return_value={"selection": {"objects": {"theaters": [{"id": selected_id}]}}})
@@ -120,7 +121,7 @@ def test_selected_marker_has_internal_detail_link(homepage, monkeypatch) -> None
     link.assert_not_called()
 
 
-def test_empty_homepage(monkeypatch) -> None:
+def test_empty_homepage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(overview, "list_entities", lambda *args, **kwargs: [])
     monkeypatch.setattr(overview, "count_entities", lambda model: 0)
     app = AppTest.from_string(OVERVIEW_SCRIPT).run()
@@ -130,7 +131,7 @@ def test_empty_homepage(monkeypatch) -> None:
     assert any("Noch keine Theater erfasst" in message.value for message in app.info)
 
 
-def test_shared_map_position_links_every_theater(homepage, monkeypatch) -> None:
+def test_shared_map_position_links_every_theater(homepage: HomepageFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     app, organizations = homepage
     organizations[1].lat = organizations[0].lat
     organizations[1].lon = organizations[0].lon

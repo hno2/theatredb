@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import JSON, Column
+from sqlalchemy.orm import InstrumentedAttribute
 from sqlmodel import Field, Session, SQLModel, select
 
 
@@ -50,7 +51,7 @@ def add_scd2_event(
     latest = session.exec(
         select(SCD2History)
         .where(SCD2History.entity_name == entity_name, SCD2History.entity_id == entity_id)
-        .order_by(SCD2History.version.desc())
+        .order_by(cast(InstrumentedAttribute[int], SCD2History.version).desc())
         .limit(1)
     ).first()
     next_version = (latest.version if latest else 0) + 1

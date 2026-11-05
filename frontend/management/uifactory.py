@@ -1,7 +1,7 @@
 import datetime as dt
 import uuid
 from dataclasses import dataclass
-from typing import cast, get_args, get_origin
+from typing import Any, cast, get_args, get_origin
 
 import pandas as pd
 import streamlit as st
@@ -13,7 +13,7 @@ from streamlit import session_state, user
 from backend.entity_management import create_entity, delete_entity, list_entities, list_entities_where, update_entity
 from backend.models import EntitySource, Person, Source, TextContribution
 
-FormValue = str | int | float | bool | dt.datetime | list[str] | dict | None
+FormValue = str | int | float | bool | dt.date | dt.datetime | list[str] | dict | None
 
 
 @dataclass(slots=True)
@@ -88,7 +88,10 @@ def _order_expr(model_cls: type[SQLModel], field_name: str) -> InstrumentedAttri
 def _actor_id() -> str | None:
     """Get the actor ID for auditing purposes, based on the current user or mock user."""
     src = user if getattr(user, "is_logged_in", False) else session_state.get("mock_user")
-    return src and (getattr(src, "email", None) or getattr(src, "sub", None))
+    if src is None:
+        return None
+    actor_id = getattr(src, "email", None) or getattr(src, "sub", None)
+    return str(actor_id) if actor_id else None
 
 
 def _unwrap_optional(annotation: object) -> tuple[object, bool]:
@@ -242,7 +245,7 @@ def _render_datetime(field: _FieldUI, d: dt.datetime | dt.date | None) -> FormVa
     return picked or None
 
 
-def _render_multiselect(field: _FieldUI, d: str, key: str, accept_new: bool = True) -> FormValue:
+def _render_multiselect(field: _FieldUI, d: list[str] | None, key: str, accept_new: bool = True) -> FormValue:
     return st.multiselect(
         field.label,
         options=field.options or [],
@@ -252,7 +255,7 @@ def _render_multiselect(field: _FieldUI, d: str, key: str, accept_new: bool = Tr
     )
 
 
-def _render_list_text(field: _FieldUI, d: str, key: str) -> FormValue:
+def _render_list_text(field: _FieldUI, d: list[str] | None, key: str) -> FormValue:
     text = st.text_area(
         field.label,
         value="\n".join(d if isinstance(d, list) else []),
@@ -261,11 +264,11 @@ def _render_list_text(field: _FieldUI, d: str, key: str) -> FormValue:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-def _render_text(field: _FieldUI, d: str, key: str) -> FormValue:
+def _render_text(field: _FieldUI, d: str | None, key: str) -> FormValue:
     return st.text_input(field.label, value="" if d is None else str(d), key=key).strip() or None
 
 
-def _render_field(field: _FieldUI, defaults: dict, *, form_key: str, errors: dict[str, str]) -> FormValue:
+def _render_field(field: _FieldUI, defaults: dict[str, Any], *, form_key: str, errors: dict[str, str]) -> FormValue:
     d = defaults.get(field.name)
     err = _field_error(errors, field.name)
     key = _field_key(form_key, field.name)
@@ -599,7 +602,9 @@ def _render_table(df: pd.DataFrame, fields: list[_FieldUI], name: str) -> dict |
     return df.iloc[sel_rows[0]].to_dict() if len(sel_rows) == 1 and not df.empty else None
 
 
-def _render_edit_form(model_cls: type[SQLModel], fields: list[_FieldUI], sel_row: dict, actor: str) -> None:
+def _render_edit_form(
+    model_cls: type[SQLModel], fields: list[_FieldUI], sel_row: dict[str, Any], actor: str | None
+) -> None:
     st.subheader(":material/edit: Edit")
     edit_form_key = f"edit_{model_cls.__name__.lower()}"
     edit_errors: _FormErrors = _FormErrors.load(edit_form_key)
@@ -611,19 +616,19 @@ def _render_edit_form(model_cls: type[SQLModel], fields: list[_FieldUI], sel_row
         if save.form_submit_button("Save", icon=":material/save:", width="stretch", type="primary"):
             try:
                 resolved = _resolve_new_entities(vals, actor)
-                update_entity(model_cls, entity_id=sel_row.get("id"), payload=resolved, actor_id=actor)
+                update_entity(model_cls, entity_id=str(sel_row["id"]), payload=resolved, actor_id=actor)
                 st.session_state["_flash"] = "Saved."
                 edit_errors.clear(edit_form_key)
             except Exception as exc:  # ruff: ignore[blind-except]
                 _FormErrors(*_extract_validation_errors(exc)).save(edit_form_key)
             st.rerun()
         if delete.form_submit_button("Delete", icon=":material/delete:", width="stretch", type="secondary"):
-            delete_entity(model_cls, entity_id=sel_row.get("id"), actor_id=actor)
+            delete_entity(model_cls, entity_id=str(sel_row["id"]), actor_id=actor)
             st.session_state["_flash"] = "Deleted."
             st.rerun()
 
 
-def _render_add_form(model_cls: type[SQLModel], fields: list[_FieldUI], actor: str) -> None:
+def _render_add_form(model_cls: type[SQLModel], fields: list[_FieldUI], actor: str | None) -> None:
     st.subheader(":material/add_circle: Add")
     add_form_key = f"add_{model_cls.__name__.lower()}"
     add_errors = _FormErrors.load(add_form_key)
@@ -653,7 +658,7 @@ def _render_sources_for_selected(model_cls: type[SQLModel], sel_row: dict) -> No
         str(s.model_dump(mode="python").get("id")): str(getattr(s, "name", "")) for s in list_entities(Source)
     }
     source_rows = []
-    for es in list_entities(EntitySource, order_by=EntitySource.sourced_at):
+    for es in list_entities(EntitySource, order_by="sourced_at"):
         data = es.model_dump(mode="python")
         if str(data.get("entity_id")) != entity_id:
             continue
