@@ -2,6 +2,13 @@ from types import SimpleNamespace
 
 import streamlit as st
 
+from backend.user_management import init_db
+
+
+@st.cache_resource
+def _initialize_database() -> None:
+    init_db()
+
 
 def _get_effective_user() -> SimpleNamespace:
     real_user = st.user
@@ -19,6 +26,7 @@ def _get_effective_user() -> SimpleNamespace:
 
 
 st.set_page_config(page_title="TheaterDB", layout="wide")
+_initialize_database()
 
 user = _get_effective_user()
 st.sidebar.write(f"User: {user.name} ({user.email})")
@@ -35,6 +43,7 @@ pages = {
         # st.Page("views/awards.py", title="Awards", icon=":material/trophy:"),
     ],
     "Verwaltung": [
+        st.Page("management/reconciliation.py", title="Datenabgleich & Duplikate", icon=":material/merge:"),
         st.Page("management/organizations.py", title="Organisationen", icon=":material/event_seat:"),
         st.Page("management/persons.py", title="Personen", icon=":material/person:"),
         st.Page("management/productions.py", title="Produktionen", icon=":material/local_activity:"),

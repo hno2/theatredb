@@ -73,7 +73,7 @@ class SourceMixin:
             EntitySource.entity_id == self.id,
             EntitySource.entity_type == self.__class__._entity_type,
         )
-        return list(session.exec(stmt).all())
+        return list(session.scalars(stmt).all())
 
     def get_source_url(self, source_name: str) -> str | None:
         """Get the URL of a source by its name."""
@@ -88,6 +88,55 @@ class SourceMixin:
             (es for es in self.sources if es.source and es.source.name == source_name),
             None,
         )
+
+
+class ReconciliationCase(SQLModel, table=True):
+    """Persistent proposals for importing records or merging existing duplicates."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    key: str = Field(unique=True, index=True)
+    entity_type: EntityType = Field(index=True)
+    operation: str
+    status: str = Field(default="pending", index=True)
+    target_id: uuid.UUID | None = None
+    duplicate_id: uuid.UUID | None = None
+    source_id: uuid.UUID | None = Field(default=None, foreign_key="source.id")
+    record_key: str | None = None
+    incoming: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    context: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    reason: str
+    captured_at: dt.datetime | None = None
+    created_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
+    decided_at: dt.datetime | None = None
+    actor_id: str | None = None
+    decision_note: str | None = None
+
+
+class SourceRecord(SQLModel, table=True):
+    """Approved source identities, including multiple records merged into one entity."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    source_id: uuid.UUID = Field(foreign_key="source.id")
+    entity_type: EntityType
+    record_key: str
+    entity_id: uuid.UUID = Field(index=True)
+    external_id: str | None = None
+    external_url: str | None = None
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    captured_at: dt.datetime | None = None
+
+    __table_args__ = (UniqueConstraint("source_id", "entity_type", "record_key"),)
+
+
+class EntityRedirect(SQLModel, table=True):
+    """Retain the identity of an entity after an approved duplicate merge."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    entity_type: EntityType
+    old_id: uuid.UUID
+    target_id: uuid.UUID
+
+    __table_args__ = (UniqueConstraint("entity_type", "old_id"),)
 
 
 class Organization(SourceMixin, SQLModel, table=True):
@@ -141,6 +190,7 @@ class Person(SourceMixin, SQLModel, table=True):
     born: dt.date | None = None
     died: dt.date | None = None
     nationality: str | None = None
+    description: str | None = None
     urls: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     text_contributions: list[TextContribution] = Relationship(back_populates="person")
     production_memberships: list[ProductionMembership] = Relationship(back_populates="person")

@@ -6,6 +6,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlmodel import Session, SQLModel, func, select
 
+from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
 
@@ -121,7 +122,10 @@ def get_entity_graph[ModelT: SQLModel](
 ) -> dict[str, Any]:
     """Fetch one entity by id with nested relationship data."""
     with get_session() as session:
-        entity = session.get(model_cls, entity_id)
+        resolved_id = (
+            resolve_id(session, model_cls._entity_type, entity_id) if hasattr(model_cls, "_entity_type") else entity_id
+        )
+        entity = session.get(model_cls, resolved_id)
         if entity is None:
             raise ValueError(f"{model_cls.__name__} not found")
         return _serialize_entity_graph(entity, max_depth=max_depth)

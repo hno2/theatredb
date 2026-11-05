@@ -1,0 +1,56 @@
+"""Shared database configuration and sessions used by management and ingestion."""
+
+import os
+from collections.abc import Generator
+from contextlib import contextmanager
+from functools import lru_cache
+from pathlib import Path
+
+from dotenv import load_dotenv
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine.base import Engine
+from sqlmodel import Session, SQLModel, create_engine
+
+from backend import models  # ruff: ignore[unused-import]
+from backend.scd2 import SCD2History  # ruff: ignore[unused-import]
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+
+DB_HOST = os.getenv("POSTGRES_HOST", "localhost")
+DB_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
+DB_USER = os.getenv("POSTGRES_USER", "postgres")
+DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "example")
+DB_NAME = os.getenv("POSTGRES_DB", "postgres")
+
+_database_url = os.getenv("THEATERDB_DATABASE_URL") or os.getenv("DATABASE_URL")
+DATABASE_URL = (
+    make_url(_database_url)
+    if _database_url
+    else URL.create(
+        "postgresql+psycopg",
+        username=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        port=DB_PORT,
+        database=DB_NAME,
+    )
+)
+if DATABASE_URL.drivername in {"postgres", "postgresql", "postgresql+psycopg2"}:
+    DATABASE_URL = DATABASE_URL.set(drivername="postgresql+psycopg")
+
+
+@lru_cache(maxsize=1)
+def _get_engine() -> Engine:
+    return create_engine(DATABASE_URL, echo=False)
+
+
+def init_db() -> None:
+    """Create missing tables without rewriting existing domain data."""
+    SQLModel.metadata.create_all(_get_engine())
+
+
+@contextmanager
+def get_session() -> Generator[Session]:
+    """Provide one session; callers explicitly commit accepted changes."""
+    with Session(_get_engine()) as session:
+        yield session
