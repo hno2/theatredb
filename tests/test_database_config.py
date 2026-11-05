@@ -1,8 +1,12 @@
 import runpy
 from pathlib import Path
+from unittest.mock import MagicMock, Mock
 
 import dotenv
 import pytest
+from psycopg.errors import DuplicateDatabase, InsufficientPrivilege
+from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlmodel import SQLModel
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -88,3 +92,95 @@ def test_defaults_without_dotenv(load_config) -> None:
     assert url.port == 5432
     assert url.username == "postgres"
     assert url.database == "postgres"
+
+
+@pytest.fixture
+def database_setup(load_config, monkeypatch):
+    config = load_config("DATABASE_URL=postgresql://app:secret@localhost/theatredb\n")
+    engine = config["_get_engine"]()
+    admin_engine = MagicMock()
+    connection = admin_engine.connect.return_value.__enter__.return_value = Mock()
+    connection.dialect = engine.dialect
+    connection.execute.return_value.scalar.return_value = None
+    create_engine = Mock(return_value=admin_engine)
+    monkeypatch.setitem(config["init_db"].__globals__, "create_engine", create_engine)
+    create_tables = Mock()
+    monkeypatch.setattr(SQLModel.metadata, "create_all", create_tables)
+    return config["init_db"], engine, admin_engine, connection, create_engine, create_tables
+
+
+def test_existing_database_needs_no_admin_connection(database_setup) -> None:
+    init_db, engine, _, _, create_engine, create_tables = database_setup
+    init_db()
+    create_tables.assert_called_once_with(engine)
+    create_engine.assert_not_called()
+
+
+def test_creates_missing_database_before_tables(database_setup) -> None:
+    init_db, engine, admin_engine, connection, create_engine, create_tables = database_setup
+    create_tables.side_effect = [OperationalError(None, None, Exception("missing database")), None]
+    init_db()
+    assert create_engine.call_args.args[0] == engine.url.set(database="postgres")
+    assert create_engine.call_args.kwargs == {"isolation_level": "AUTOCOMMIT"}
+    assert connection.execute.call_args.args[1] == {"name": "theatredb"}
+    connection.exec_driver_sql.assert_called_once_with('CREATE DATABASE "theatredb"')
+    assert create_tables.call_count == 2
+    admin_engine.dispose.assert_called_once()
+
+
+def test_database_name_is_quoted(database_setup) -> None:
+    init_db, engine, _, connection, _, create_tables = database_setup
+    engine.url = engine.url.set(database='theatre"db')
+    create_tables.side_effect = [OperationalError(None, None, Exception("missing database")), None]
+    init_db()
+    connection.exec_driver_sql.assert_called_once_with('CREATE DATABASE "theatre""db"')
+
+
+def test_existing_database_preserves_connection_error(database_setup) -> None:
+    init_db, _, admin_engine, connection, _, create_tables = database_setup
+    error = OperationalError(None, None, Exception("connection failed"))
+    create_tables.side_effect = error
+    connection.execute.return_value.scalar.return_value = 1
+    with pytest.raises(OperationalError) as raised:
+        init_db()
+    assert raised.value is error
+    connection.exec_driver_sql.assert_not_called()
+    admin_engine.dispose.assert_called_once()
+
+
+def test_unavailable_server_preserves_connection_error(database_setup) -> None:
+    init_db, _, admin_engine, _, _, create_tables = database_setup
+    error = OperationalError(None, None, Exception("connection refused"))
+    create_tables.side_effect = error
+    admin_engine.connect.side_effect = OperationalError(None, None, Exception("admin connection failed"))
+    with pytest.raises(OperationalError) as raised:
+        init_db()
+    assert raised.value is error
+    admin_engine.dispose.assert_called_once()
+
+
+def test_concurrent_database_creation_is_safe(database_setup) -> None:
+    init_db, _, _, connection, _, create_tables = database_setup
+    create_tables.side_effect = [OperationalError(None, None, Exception("missing database")), None]
+    connection.exec_driver_sql.side_effect = ProgrammingError(None, None, DuplicateDatabase())
+    init_db()
+    assert create_tables.call_count == 2
+
+
+def test_database_creation_permission_error_is_not_swallowed(database_setup) -> None:
+    init_db, _, admin_engine, connection, _, create_tables = database_setup
+    create_tables.side_effect = OperationalError(None, None, Exception("missing database"))
+    error = ProgrammingError(None, None, InsufficientPrivilege())
+    connection.exec_driver_sql.side_effect = error
+    with pytest.raises(ProgrammingError) as raised:
+        init_db()
+    assert raised.value is error
+    assert create_tables.call_count == 1
+    admin_engine.dispose.assert_called_once()
+
+
+def test_sqlite_initialization(load_config) -> None:
+    config = load_config("DATABASE_URL=sqlite://\n")
+    config["init_db"]()
+    with config["_get_engine"]().connect() as connection:
+        assert connection.exec_driver_sql("SELECT COUNT(*) FROM person").scalar() == 0

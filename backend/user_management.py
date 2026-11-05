@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import os
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
+from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.engine.base import Engine
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlmodel import Session, SQLModel, create_engine
 
 from backend import models  # ruff: ignore[unused-import]
@@ -47,8 +49,34 @@ def _get_engine() -> Engine:
 
 
 def init_db() -> None:
-    """Create missing tables without rewriting existing domain data."""
-    SQLModel.metadata.create_all(_get_engine())
+    """Create a missing PostgreSQL database and tables without rewriting data."""
+    engine = _get_engine()
+    try:
+        SQLModel.metadata.create_all(engine)
+    except OperationalError as connection_error:
+        database_name = engine.url.database
+        if engine.url.get_backend_name() != "postgresql" or not database_name:
+            raise
+        with ExitStack() as stack:
+            admin_engine = create_engine(engine.url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+            stack.callback(admin_engine.dispose)
+            try:
+                connection = stack.enter_context(admin_engine.connect())
+            except OperationalError:
+                raise connection_error from None
+            exists = connection.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": database_name},
+            ).scalar()
+            if exists:
+                raise
+            database = connection.dialect.identifier_preparer.quote_identifier(database_name)
+            try:
+                connection.exec_driver_sql(f"CREATE DATABASE {database}")
+            except ProgrammingError as error:
+                if getattr(error.orig, "sqlstate", None) != "42P04":
+                    raise
+        SQLModel.metadata.create_all(engine)
 
 
 @contextmanager

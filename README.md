@@ -9,6 +9,16 @@ Set `THEATERDB_DATABASE_URL` (highest priority), `DATABASE_URL`, or individual
 URLs use the installed `psycopg` driver.
 Keep credentials in `.env`, not in the `.venv` Python environment directory.
 
+On first startup, `init_db()` creates the configured PostgreSQL database if it
+does not exist, then creates its tables. PostgreSQL must already be running.
+Automatic database creation connects to the `postgres` maintenance database with
+the same credentials and requires `CREATEDB` permission. Otherwise, ask your
+database administrator to create the configured database and grant access first.
+Existing databases need no database-creation permission and are not recreated.
+Docker's `POSTGRES_DB` setting only creates a database when its data directory is
+first initialized; changing `.env` does not update an existing PostgreSQL volume.
+Do not delete the data directory to fix a missing database.
+
 ## Quick Start
 ### Data Ingestion
 
