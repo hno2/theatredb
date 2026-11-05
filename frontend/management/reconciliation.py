@@ -10,6 +10,18 @@ import streamlit as st
 from pandas.io.formats.style import Styler
 from sqlalchemy.exc import SQLAlchemyError
 
+from backend.config import (
+    CONFLICT_CHOICE_LABELS,
+    FIELD_STATUS,
+    IMPORT_RESULT_LABELS,
+    PEOPLE_STATUS,
+    REVIEW_STATUS_LABELS,
+    ROW_COLORS,
+)
+from backend.config import ENTITY_LABELS as KINDS
+from backend.config import ROLE_LABELS as ROLES
+from backend.config import SCRAPE_FRESHNESS as FRESHNESS
+from backend.config import SCRAPE_SCOPES as SCOPES
 from backend.entity_management import list_entities
 from backend.import_status import FIELDS, scrape_overview, theatre_status
 from backend.models import Organization, Source
@@ -37,47 +49,6 @@ from backend.reconciliation import (
 from backend.user_management import init_db
 from frontend.management.uifactory import _actor_id
 
-KINDS = {
-    "organization": "Organisationen",
-    "person": "Personen",
-    "text": "Texte",
-    "production": "Produktionen",
-    "award": "Auszeichnungen",
-}
-ROLES = {
-    "director": "Regie",
-    "actor": "Schauspiel",
-    "dramaturg": "Dramaturgie",
-    "set_designer": "Bühne",
-    "costume_designer": "Kostüme",
-    "light_designer": "Licht",
-    "choreographer": "Choreografie",
-    "composer": "Musik",
-    "video_designer": "Video",
-    "author": "Autor:in",
-    "translator": "Übersetzung",
-    "adapter": "Fassung",
-}
-FIELD_STATUS = {
-    "same": "✅ gleich",
-    "new": "🆕 wird ergänzt",
-    "extended": "🔗 wird erweitert",
-    "kept": "◻️ bleibt (nur Bestand)",
-    "conflict": "⚠️ Konflikt - bitte wählen",
-}
-PEOPLE_STATUS = {
-    "same": "✅ in beiden",
-    "new_known": "🆕 wird verknüpft (Person existiert)",
-    "new_person": "🆕 Person wird neu angelegt",
-    "kept": "◻️ nur Bestand",
-}
-ROW_COLORS = {
-    "conflict": "#fde2e1",
-    "new": "#e3f6e8",
-    "extended": "#e3f6e8",
-    "new_known": "#e3f6e8",
-    "new_person": "#fff4d6",
-}
 NEW_PRODUCTION = "__new__"
 
 
@@ -183,12 +154,7 @@ def _import_summary() -> None:
     if saved:
         theatre_name, result = saved
         st.success(f"Import für {theatre_name} abgeschlossen.")
-        labels = {
-            "merged": "Ergänzt",
-            "created": "Neu angelegt",
-            "review": "Zur Prüfung",
-            "unchanged": "Unverändert",
-        }
+        labels = IMPORT_RESULT_LABELS
         for column, (key, label) in zip(st.columns(len(labels)), labels.items(), strict=True):
             column.metric(label, len(result[key]))
         for key, label in labels.items():
@@ -197,10 +163,6 @@ def _import_summary() -> None:
                     st.write("\n".join(f"- {name} · {theatre_name}" for name in result[key]))
         if result["review"]:
             st.info("Offene Konflikte im Reiter **Produktionskonflikte** bearbeiten.")
-
-
-SCOPES = {"all": "vollständig"}
-FRESHNESS = ((30, "🟢"), (90, "🟡"))
 
 
 def _scope(scope: str | None) -> str:
@@ -404,7 +366,7 @@ def _conflict_choices(review: dict) -> dict[str, str]:
             choices[field] = st.radio(
                 f"Welcher Wert gilt für {label}?",
                 ["existing", "incoming"],
-                format_func={"existing": "Bestand behalten", "incoming": "Upload übernehmen"}.__getitem__,
+                format_func=CONFLICT_CHOICE_LABELS.__getitem__,
                 horizontal=True,
                 key=f"choice_{review['case_id']}_{review['target']['id']}_{field}",
             )
@@ -830,7 +792,7 @@ def _review_tab() -> None:
     status = st.selectbox(
         "Status",
         ["pending", "approved", "rejected"],
-        format_func={"pending": "Offen", "approved": "Genehmigt", "rejected": "Abgelehnt"}.__getitem__,
+        format_func=REVIEW_STATUS_LABELS.__getitem__,
     )
     query = st.text_input("Prüffälle suchen (Name, Titel, Grund oder Fall-UUID)")
     page = st.number_input("Seite", min_value=1, value=1, step=1)

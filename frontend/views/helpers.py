@@ -4,23 +4,7 @@ from urllib.parse import urlencode
 
 import streamlit as st
 
-from backend.reconciliation import canonical_role
-
-ROLE_LABELS = {
-    "director": "Regie",
-    "dramaturg": "Dramaturgie",
-    "set_designer": "Bühnenbild",
-    "actor": "Schauspiel",
-    "composer": "Musik",
-    "light_designer": "Licht",
-    "costume_designer": "Kostüme",
-    "video_designer": "Video",
-    "choreographer": "Choreografie",
-    "author": "Text",
-    "translator": "Übersetzung",
-    "adapter": "Bearbeitung",
-    "other": "Weitere Mitwirkung",
-}
+from backend.config import ROLE_LABELS, canonical_role
 
 
 def role_label(role: str | None) -> str:

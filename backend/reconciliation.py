@@ -18,14 +18,13 @@ from sqlalchemy import String, cast, or_
 from sqlalchemy import inspect as sa_inspect
 from sqlmodel import Session, SQLModel, col, select
 
+from backend.config import ENTITY_MODELS, LINK_IDENTITY_FIELDS, canonical_role
 from backend.models import (
     Award,
-    AwardNomination,
     EntityRedirect,
     EntitySource,
     EntityType,
     Organization,
-    OrganizationMembership,
     Person,
     Production,
     ProductionMembership,
@@ -39,57 +38,14 @@ from backend.models import (
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
 
-ENTITY_MODELS = {
-    EntityType.ORGANIZATION: Organization,
-    EntityType.PERSON: Person,
-    EntityType.PRODUCTION: Production,
-    EntityType.TEXT: Text,
-    EntityType.AWARD: Award,
-}
 type Entity = Organization | Person | Production | Text | Award
 EMPTY = (None, "", [], {})
-ROLE_ALIASES = {
-    "regie": "director",
-    "inszenierung": "director",
-    "director": "director",
-    "dramaturgie": "dramaturg",
-    "bühne": "set_designer",
-    "bühnenbild": "set_designer",
-    "kostüm": "costume_designer",
-    "kostüme": "costume_designer",
-    "licht": "light_designer",
-    "lighting_designer": "light_designer",
-    "choreografie": "choreographer",
-    "choreographie": "choreographer",
-    "coreographer": "choreographer",
-    "schauspiel": "actor",
-    "schauspieler": "actor",
-    "autor": "author",
-    "creator": "author",
-    "text": "author",
-    "buch": "author",
-    "übersetzung": "translator",
-    "bearbeitung": "adapter",
-    "fassung": "adapter",
-    "musik": "composer",
-    "komposition": "composer",
-    "theaterpädagoge": "theatre_educator",
-    "Vermittlung": "theatre_educator",
-}
 
 
 def normalize(value: str) -> str:
     """Normalize names without deleting non-Latin letters or significant words."""
     value = unicodedata.normalize("NFKC", value).casefold()
     return " ".join(re.sub(r"[^\w\s]", " ", value).split())
-
-
-def canonical_role(value: str | None) -> str | None:
-    """Canonicalize known credit labels, preserving unknown roles."""
-    if not value or not value.strip():
-        return None
-    value = value.strip().casefold()
-    return ROLE_ALIASES.get(value, value)
 
 
 def canonical_url(value: str) -> str:
@@ -907,14 +863,7 @@ def _archive_source(
 
 
 def _deduplicate_links(session: Session, actor_id: str | None, touched: set[tuple[type, uuid.UUID]]) -> None:
-    specs = {
-        ProductionMembership: ("production_id", "person_id", "role", "character"),
-        TextContribution: ("text_id", "person_id", "role"),
-        OrganizationMembership: ("organization_id", "person_id", "role", "start_date", "end_date"),
-        TextLineage: ("source_text_id", "derived_text_id", "relation", "notes"),
-        AwardNomination: ("award_id", "production_id", "person_id", "category", "year", "result"),
-    }
-    for model, fields in specs.items():
+    for model, fields in LINK_IDENTITY_FIELDS.items():
         for touched_model, row_id in touched:
             if touched_model != model:
                 continue

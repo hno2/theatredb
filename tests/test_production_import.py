@@ -258,6 +258,26 @@ def test_theatre_is_required(db) -> None:
     assert not rows(db, Source)
 
 
+@pytest.mark.parametrize("person_type", [None, "actor", ["actor"], "theatre_educator"])
+def test_vermittlung_imports_as_educator_even_from_legacy_actor_snapshot(db, theatre, person_type) -> None:
+    member = {"name": "Example Educator", "role": "Vermittlung"}
+    if person_type is not None:
+        member["type"] = person_type
+    upload(
+        theatre,
+        {
+            "title": "Education",
+            "url": "https://theatre.example/p/education",
+            "memberships": [member],
+        },
+    )
+    person = rows(db, Person, Person.name == "Example Educator")[0]
+    assert person.type == ["theatre_educator"]
+    membership = rows(db, ProductionMembership, ProductionMembership.person_id == person.id)[0]
+    assert membership.role == "theatre_educator"
+    assert membership.character is None
+
+
 def test_person_and_production_fields_survive_import(db, theatre) -> None:
     upload(
         theatre,

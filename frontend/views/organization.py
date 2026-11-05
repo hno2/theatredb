@@ -7,9 +7,9 @@ from urllib.parse import urlsplit
 import pandas as pd
 import streamlit as st
 
+from backend.config import canonical_role
 from backend.entity_management import list_entities
 from backend.models import Source
-from backend.reconciliation import canonical_role
 from frontend.views.helpers import entity_link, has_coordinates, role_label
 
 

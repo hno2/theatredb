@@ -1,6 +1,5 @@
 import datetime as dt
 import json
-import uuid
 from dataclasses import dataclass
 from typing import Any, cast, get_args, get_origin
 
@@ -11,6 +10,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 from sqlmodel import SQLModel
 from streamlit import session_state, user
 
+from backend.config import FORM_FIELD_KINDS
 from backend.entity_management import create_entity, delete_entity, list_entities, list_entities_where, update_entity
 from backend.models import EntitySource, Person, Source, TextContribution
 
@@ -102,22 +102,12 @@ def _unwrap_optional(annotation: object) -> tuple[object, bool]:
     return (non_none[0], True) if len(non_none) == 1 < len(args) else (annotation, False)
 
 
-_KIND_MAP: dict[object, str] = {
-    bool: "bool",
-    int: "int",
-    float: "float",
-    dt.date: "datetime",
-    dt.datetime: "datetime",
-    uuid.UUID: "uuid",
-}
-
-
 def _guess_kind(t: object) -> str:
     if get_origin(t) is list and get_args(t) == (str,):
         return "list_text"
     if get_origin(t) is dict:
         return "json"
-    return _KIND_MAP.get(t, "text")  # type: ignore[arg-type]
+    return FORM_FIELD_KINDS.get(t, "text")
 
 
 def _build_fields(model_cls: type[SQLModel], *, field_overrides: dict | None = None) -> list[_FieldUI]:

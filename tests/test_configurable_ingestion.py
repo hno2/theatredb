@@ -207,6 +207,23 @@ def test_bundled_config_names_are_case_insensitive() -> None:
     assert load_config("STUTTGART") == load_config("stuttgart")
 
 
+@pytest.mark.parametrize("role", ["Vermittlung", "VERMITTLUNG", "Theaterpädagogik"])
+def test_educator_credit_uses_shared_mapping_without_venue_overrides(role: str) -> None:
+    config = load_config("karlsruhe").model_copy(update={"role_types": {}})
+    scraper = ConfigurableScraper(config)
+    html = KARLSRUHE_HTML.replace("<th>Regie</th>", f"<th>{role}</th>")
+    member = scraper.parse_page(html, KARLSRUHE_URL, "production")["memberships"][2]
+    assert member["role"] == role
+    assert member["type"] == "theatre_educator"
+
+
+def test_venue_role_overrides_still_take_precedence() -> None:
+    config = load_config("karlsruhe").model_copy(update={"role_types": {"Vermittlung": "custom_educator"}})
+    html = KARLSRUHE_HTML.replace("<th>Regie</th>", "<th>Vermittlung</th>")
+    member = ConfigurableScraper(config).parse_page(html, KARLSRUHE_URL, "production")["memberships"][2]
+    assert member["type"] == "custom_educator"
+
+
 @pytest.mark.parametrize(
     "spacer",
     [
@@ -418,12 +435,52 @@ def test_scraper_rejects_outside_origins(url: str) -> None:
     [
         ("Premiere Fr \u2013 16. Okt 26", "2026-10-16"),
         ("1. März 2026", "2026-03-01"),
+        ("1. Mär. 26", "2026-03-01"),
+        ("1. Mar 2026", "2026-03-01"),
+        ("1. Oktober 2026", "2026-10-01"),
+        ("1. OKT. 26", "2026-10-01"),
+        ("29. Februar 2024", "2024-02-29"),
         ("3.10.2026", "2026-10-03"),
         ("no announced premiere", None),
+        ("1. Unknown 2026", None),
     ],
 )
 def test_german_dates(text: str, expected: str | None) -> None:
     assert parse_date_de(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("month", "name"),
+    list(
+        enumerate(
+            (
+                "Januar",
+                "Februar",
+                "März",
+                "April",
+                "Mai",
+                "Juni",
+                "Juli",
+                "August",
+                "September",
+                "Oktober",
+                "November",
+                "Dezember",
+            ),
+            start=1,
+        )
+    ),
+)
+def test_all_german_months(month: int, name: str) -> None:
+    expected = f"2026-{month:02d}-01"
+    assert parse_date_de(f"Premiere: 1. {name} 2026") == expected
+    assert parse_date_de(f"1. {name[:3]}. 26") == expected
+
+
+@pytest.mark.parametrize("text", ["29. Februar 2026", "31. April 2026", "31.04.2026"])
+def test_invalid_german_dates_fail_explicitly(text: str) -> None:
+    with pytest.raises(ValueError):
+        parse_date_de(text)
 
 
 def test_extract_list_fields() -> None:
@@ -718,7 +775,9 @@ def test_cli_scrapes_all_by_default_on_local_fixture(tmp_path: Path, capsys: pyt
                 )
                 == 0
             )
-            assert requests == ["/list", "/programm/info/1/", "/programm/info/2/", "/ensemble/id/1/"]
+            assert requests[0] == "/list"
+            assert sorted(requests[1:3]) == ["/programm/info/1/", "/programm/info/2/"]
+            assert requests[3:] == ["/ensemble/id/1/"]
             snapshot = next((tmp_path / "output").rglob("*productions.json"))
             records = json.loads(snapshot.read_text())
             assert len(records) == 2
@@ -745,9 +804,8 @@ def test_pagination_is_bounded_and_failures_never_save_partial_scrapes(tmp_path:
             paged_config["listing"]["max_pages"] = 2
             paged = ConfigurableScraper(ScraperConfig.model_validate(paged_config))
             assert len(await paged.scrape(limit=None, enrich_people=False)) == 3
-            assert requests == [
-                "/paged-list",
-                "/second-list",
+            assert requests[:2] == ["/paged-list", "/second-list"]
+            assert sorted(requests[2:]) == [
                 "/programm/info/1/",
                 "/programm/info/2/",
                 "/programm/info/3/",

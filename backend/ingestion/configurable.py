@@ -13,6 +13,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 import aiohttp
 import yaml
+from babel.dates import get_month_names
 from bs4 import BeautifulSoup, NavigableString
 from markdownify import MarkdownConverter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -20,7 +21,9 @@ from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from selectolax.lexbor import LexborNode as Node
 from selectolax.lexbor import SelectolaxError
 from tqdm import tqdm
+from tqdm.asyncio import tqdm as async_tqdm
 
+from backend.config import TEXT_TRANSLATION
 from backend.ingestion.base_scraper import (
     extract_author_info,
     infer_person_type,
@@ -31,6 +34,9 @@ from backend.ingestion.base_scraper import (
 from backend.ingestion.staging import HttpURL, NonEmptyText, StagedMembership, StagedProduction, validate_records
 
 CONFIG_DIR = Path(__file__).with_name("configs")
+_GERMAN_MONTHS = {name[:3].casefold(): number for number, name in get_month_names(locale="de").items()}
+# Retain the ASCII March spelling accepted by earlier snapshots.
+_GERMAN_MONTHS["mar"] = _GERMAN_MONTHS["mär"]
 type PageKind = Literal["production", "person"]
 type PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 
@@ -162,23 +168,8 @@ def parse_date_de(text: str) -> str | None:
     """Parse numeric dates or German month names, including '16. Okt 26'."""
     if result := parse_date_dmy(text):
         return dt.date.fromisoformat(result).isoformat()
-    months = {
-        "jan": 1,
-        "feb": 2,
-        "mär": 3,
-        "mar": 3,
-        "apr": 4,
-        "mai": 5,
-        "jun": 6,
-        "jul": 7,
-        "aug": 8,
-        "sep": 9,
-        "okt": 10,
-        "nov": 11,
-        "dez": 12,
-    }
     if match := re.search(r"(\d{1,2})\.\s*([A-Za-zÄÖÜäöü]+)\.?\s+(\d{4}|\d{2})\b", text):
-        month = months.get(match[2][:3].casefold())
+        month = _GERMAN_MONTHS.get(match[2][:3].casefold())
         if month is not None:
             year = int(match[3]) + (2000 if len(match[3]) == 2 else 0)
             return dt.date(year, month, int(match[1])).isoformat()
@@ -195,7 +186,7 @@ def _past_stop(node: Node, tag: str | None) -> bool:
 
 
 def _clean_text(text: str) -> str:
-    return text.translate(str.maketrans({"\u00ad": None, "\u200b": None, "\ufeff": None, "\u00a0": " "}))
+    return text.translate(TEXT_TRANSLATION)
 
 
 def _markdown(node: Node, base_url: str) -> str:
@@ -418,14 +409,30 @@ class ConfigurableScraper:
             urls = await self._discover(session, limit)
             if not urls:
                 raise ValueError("No production links found; check listing selectors")
-            with tqdm(urls, desc="Productions", unit="page") as progress:
-                records = [self.parse_page(await self.fetch(session, url), url, "production") for url in progress]
+
+            semaphore = asyncio.Semaphore(4)
+
+            async def fetch_production(url: str) -> dict:
+                async with semaphore:
+                    html = await self.fetch(session, url)
+                    return self.parse_page(html, url, "production")
+
+            tasks = [fetch_production(url) for url in urls]
+            records = await async_tqdm.gather(*tasks, desc="Productions", unit="page")
+
             if enrich_people:
                 profiles = {}
                 person_urls = sorted({m["url"] for r in records for m in r["memberships"] if m["url"]})
-                with tqdm(person_urls, desc="People", unit="page") as progress:
-                    for url in progress:
-                        profiles[url] = self.parse_page(await self.fetch(session, url), url, "person")
+
+                async def fetch_person(url: str) -> tuple[str, dict]:
+                    async with semaphore:
+                        html = await self.fetch(session, url)
+                        return url, self.parse_page(html, url, "person")
+
+                tasks = [fetch_person(url) for url in person_urls]
+                profile_pairs = await async_tqdm.gather(*tasks, desc="People", unit="page")
+                profiles = dict(profile_pairs)
+
                 for record in records:
                     for member in record["memberships"]:
                         profile = profiles.get(member["url"])

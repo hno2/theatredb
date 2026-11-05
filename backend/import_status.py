@@ -10,6 +10,8 @@ from collections.abc import Collection
 from sqlalchemy import func
 from sqlmodel import Session, col, select
 
+from backend.config import IMPORT_COVERAGE_FIELDS as FIELDS
+from backend.config import canonical_role
 from backend.models import (
     EntitySource,
     EntityType,
@@ -22,16 +24,7 @@ from backend.models import (
     SourceRecord,
 )
 from backend.production_import import OPERATION, url_host
-from backend.reconciliation import canonical_role
 from backend.user_management import get_session
-
-FIELDS = {
-    "description": "Beschreibung",
-    "premiere": "Premiere",
-    "director": "Regie",
-    "cast": "Besetzung",
-    "text": "Werk",
-}
 
 
 def _as_utc(value: dt.datetime) -> dt.datetime:

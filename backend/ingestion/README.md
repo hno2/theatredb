@@ -19,6 +19,25 @@ path to a YAML/JSON file. Bundled venue names are case-insensitive (`Karlsruhe`
 and `karlsruhe` are equivalent). YAML is loaded with `safe_load`; configuration is data,
 not executable Python.
 
+Shared inline lookup tables live in [backend/config.py](../config.py). Its
+`ROLE_CONFIG` defines canonical role names, German display labels, exact aliases
+and patterns for descriptive credits; scraping, imports and UI labels reuse it.
+For example, `Vermittlung` maps to `theatre_educator`, not `actor`.
+Lighting uses `light_designer`; translation and adaptation use `translator` and
+`adapter` consistently. Venue YAML `role_types` overrides still take precedence
+and remain local. Unknown role labels are retained by reconciliation and the UI;
+scraping keeps its existing actor/default-type fallback.
+
+Uploads also recognize `Vermittlung` in older snapshots whose type was inferred
+as `actor`. Existing database records are not bulk-rewritten by this change.
+Entity registries, field/status labels and other inline lookup tables share the
+same central module; page-specific form configuration remains with its page.
+German month numbers are derived from Babel's locale data in the ingestion
+module, not maintained as a second handwritten calendar. This does not depend on
+installed OS locales or change process-wide locale settings. Domain mappings
+(roles, entity types, coverage fields and review statuses) remain explicit:
+they encode application rules rather than generic locale data.
+
 ## Theapolis: separate directory import
 
 Theapolis has one independent entry point, `backend.ingestion.theapolis`. It

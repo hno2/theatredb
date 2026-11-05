@@ -77,7 +77,7 @@ class SourceMixin:
         if session is None:
             return []
         entity_id = cast(_EntityWithId, self).id
-        entity_type = cast(EntityType, type(self)._entity_type)
+        entity_type = type(self)._entity_type
         entity_type_filter = cast(
             ColumnElement[bool],
             EntitySource.entity_type == entity_type,

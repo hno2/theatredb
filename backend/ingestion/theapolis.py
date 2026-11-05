@@ -17,6 +17,7 @@ import aiohttp
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from sqlmodel import select
 
+from backend.config import IMAGE_SIGNATURES
 from backend.ingestion.snapshots import digest, snapshot_path
 from backend.ingestion.staging import validate_records
 from backend.models import EntityType, Source
@@ -264,8 +265,7 @@ async def _download_image(session: aiohttp.ClientSession, page_url: str, output:
     if not metadata["url"]:
         return record
     body = await _fetch(session, metadata["url"])
-    signatures = {b"\xff\xd8\xff": ".jpg", b"\x89PNG\r\n\x1a\n": ".png", b"GIF8": ".gif", b"RIFF": ".webp"}
-    suffix = next((ext for signature, ext in signatures.items() if body.startswith(signature)), None)
+    suffix = next((ext for signature, ext in IMAGE_SIGNATURES.items() if body.startswith(signature)), None)
     if suffix is None:
         raise ValueError(f"Not a supported image: {metadata['url']}")
     target = output / kind / f"{slug}{suffix}"

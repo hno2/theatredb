@@ -35,6 +35,8 @@ from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from selectolax.lexbor import LexborNode as Node
 from tqdm.asyncio import tqdm
 
+from backend.config import CREDIT_ROLES, ROLE_TYPE_PATTERNS, canonical_role
+
 DATE = dt.datetime.now(dt.UTC).strftime("%Y%m%d")
 EMPTY = (None, "", [], {})
 
@@ -97,19 +99,6 @@ def parse_duration_minutes(text: str) -> int | None:
 
 # ── Person / cast helpers (available to all subclasses) ──────────────────────
 
-# Roles that map to non-actor person types
-_ROLE_TYPE_MAP: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"Regie|Inszenierung", re.IGNORECASE), "director"),
-    (re.compile(r"Bühnenbild|Ausstattung", re.IGNORECASE), "set_designer"),
-    (re.compile(r"Kostüm", re.IGNORECASE), "costume_designer"),
-    (re.compile(r"Musik|Komposition", re.IGNORECASE), "composer"),
-    (re.compile(r"Choreograph|Tanz", re.IGNORECASE), "choreographer"),
-    (re.compile(r"Dramaturgi", re.IGNORECASE), "dramaturg"),
-    (re.compile(r"Licht", re.IGNORECASE), "lighting_designer"),
-    (re.compile(r"Video|Medien", re.IGNORECASE), "video_designer"),
-    (re.compile(r"Text|Buch|Übersetz|Bearb", re.IGNORECASE), "author"),
-]
-
 # Prefixes/suffixes to strip when normalising person names
 _NAME_NOISE = re.compile(
     r"\b(Herr|Frau|Dr\.?|Prof\.?)\b\.?|\s*\(.*?\)|\s*\(?\bStaats?schauspieler\b\)?",
@@ -119,7 +108,10 @@ _NAME_NOISE = re.compile(
 
 def infer_person_type(role: str) -> str:
     """Map a role label to a person type string; defaults to 'actor'."""
-    for pattern, kind in _ROLE_TYPE_MAP:
+    canonical = canonical_role(role)
+    if canonical is not None and canonical in CREDIT_ROLES:
+        return canonical
+    for pattern, kind in ROLE_TYPE_PATTERNS:
         if pattern.search(role):
             return kind
     return "actor"

@@ -11,7 +11,7 @@ from streamlit.testing.v1 import AppTest
 from backend import entity_management
 from backend.models import Organization, Person, Production, ProductionMembership, Text, TextContribution
 from frontend.views import organization, person, production
-from frontend.views.helpers import entity_link, production_people
+from frontend.views.helpers import entity_link, production_people, role_label
 
 PRODUCTION_SCRIPT = """
 import streamlit as st
@@ -23,6 +23,16 @@ import streamlit as st
 from frontend.views.person import render_person
 render_person(st.session_state.profile)
 """
+
+
+@pytest.mark.parametrize("role", ["Vermittlung", "VERMITTLUNG", "theatre_educator"])
+def test_educator_role_label(role: str) -> None:
+    assert role_label(role) == "Theaterpädagogik"
+
+
+def test_unknown_role_label_preserves_source_text() -> None:
+    assert role_label("Example character") == "Example character"
+    assert not role_label(None)
 
 
 class LinkParser(HTMLParser):

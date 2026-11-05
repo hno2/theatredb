@@ -1,15 +1,10 @@
 import streamlit as st
 
+from backend.config import DISCOVERY_KINDS
 from backend.entity_management import browse_entities
-from backend.models import Organization, Person, Production
 from frontend.views.helpers import entity_link
 from frontend.views.organization import render_production_card
 
-DISCOVERY_KINDS = {
-    "organization": ("Theater", Organization),
-    "production": ("Produktionen", Production),
-    "person": ("Personen", Person),
-}
 PAGE_SIZE = 12
 
 

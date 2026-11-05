@@ -24,6 +24,8 @@ from urllib.parse import urlsplit
 from sqlalchemy import func
 from sqlmodel import Session, col, select
 
+from backend.config import CREDIT_ROLES, canonical_role
+from backend.config import PRODUCTION_FIELD_LABELS as FIELD_LABELS
 from backend.ingestion.staging import validate_records
 from backend.models import (
     EntitySource,
@@ -42,7 +44,6 @@ from backend.models import (
 from backend.reconciliation import (
     EMPTY,
     audit_event,
-    canonical_role,
     canonical_url,
     decide_case,
     ensure_credit,
@@ -59,36 +60,9 @@ from backend.user_management import get_session
 OPERATION = "production_upload"
 # Titles at or above this score are treated as "possibly the same production" and reviewed.
 TITLE_THRESHOLD = 0.8
-FIELD_LABELS = {
-    "name": "Titel",
-    "premiere": "Premiere",
-    "premiere_year": "Premierenjahr",
-    "description": "Beschreibung",
-    "duration": "Dauer (Min.)",
-    "age_rating": "Altersempfehlung",
-    "url": "Website",
-    "tags": "Schlagworte",
-    "critics": "Kritiken",
-}
 LIST_FIELDS = frozenset({"tags", "critics"})
 # Every source has its own page; a different URL is stored as source link, never a conflict.
 FILL_ONLY_FIELDS = frozenset({"url"})
-CREDIT_ROLES = frozenset(
-    {
-        "actor",
-        "director",
-        "dramaturg",
-        "set_designer",
-        "costume_designer",
-        "light_designer",
-        "choreographer",
-        "composer",
-        "video_designer",
-        "author",
-        "translator",
-        "adapter",
-    }
-)
 PERSON_FILL_FIELDS = ("description", "born", "died", "nationality")
 
 
@@ -128,6 +102,8 @@ def _credit(member: dict) -> dict:
     role = canonical_role(raw_role) or types[0]
     if role not in CREDIT_ROLES:
         role = types[0]
+    if role == "theatre_educator" and types == ["actor"]:
+        types = [role]
     return {
         "name": member["name"].strip(),
         "role": role,
