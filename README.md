@@ -15,33 +15,42 @@ Keep credentials in `.env`, not in the `.venv` Python environment directory.
 See the separate [ingestion guide](backend/ingestion/README.md) for the staging
 JSON Schema, configurable Karlsruhe/Stuttgart scrapers, safe single-page tests,
 scrape diffs and persistent page-change checks. Scraping does not write to the
-database; imports still require review.
+database; uploads only auto-apply conflict-free changes.
 
 #### Review-first reconciliation
 
 Open **Verwaltung → Datenabgleich & Duplikate**:
 
-1. **Theater-JSON einreichen** uploads existing scraper output. Enter the source
-   and theatre name and confirm the actual capture date. A `YYYYMMDD_` filename
-   supplies the suggested date; an unknown date stays unknown.
-2. **Prüfliste** compares source records with existing entities. Review in order:
-   organization, people, texts, productions. Search cases by name/title, reason,
-   or case UUID; use the type/status filters and pagination for larger queues.
-   Approved prerequisites resolve organization, text and credit references.
-   After approving prerequisites, use **Vergleich aktualisieren** on an already
-   open dependent case.
-3. Select an existing target, inspect matching evidence and choose which fields
-   to update. Empty source values never erase existing values. Populated scalar
-   fields remain unchanged unless selected; lists are combined. Confirm identity,
-   fields and credits before saving. Creation requires choosing **Neuen Datensatz
-   anlegen** and explicitly confirming; creation uses the complete source payload.
+1. **Theater-JSON hochladen**: choose the existing theatre, upload scraper output,
+   confirm source and capture date (a `YYYYMMDD_` filename supplies the date).
+   Matching happens only inside the selected theatre:
+   - same title, no conflicting values → merged automatically (new fields, people,
+     text and the upload as additional source are added);
+   - no title in that theatre with ≥ 80 % similarity → created automatically;
+   - everything else → **Produktionskonflikte**.
+   People are matched by source profile URL, existing cast of the production, then a
+   unique name (namesakes prefer the theatre's people); otherwise created. Texts are
+   reused when the same author already has a text of that title.
+   Every upload is logged (`importrun`: file, scrape scope from the snapshot filename,
+   capture date, outcome counts). Selecting a theatre shows its latest data date and
+   scope, how many productions have an uploaded source / a source from the theatre's
+   own website (stored URL, otherwise the scraped site) and how complete description,
+   premiere, direction, cast and text are. Below, **Scraping-Stand aller Theater**
+   shows how many theatres (with productions) have recent data (≤ 30/90/365 days),
+   stalest first.
+2. **Produktionskonflikte** shows upload and best-fitting production side by side
+   (theatre always shown, no UUIDs). Rows are coloured: red = conflict, green =
+   added/extended, yellow = new person. Pick another production of the same theatre
+   or create a new one; for each conflict choose *Bestand behalten* (default) or
+   *Upload übernehmen*. Merging people, texts and sources happens in the backend.
+3. **Weitere Prüffälle** keeps older generic review cases.
 4. **Duplikate suchen / melden** searches existing organizations, people, texts,
    productions and awards. Submit suggested pairs or manually select any two
    records, even with different names. Submission never merges automatically.
-   Review the pair, choose the surviving UUID, inspect affected links and approve.
+   Review the pair, choose the surviving record, inspect affected links and approve.
    Rejected cases can be reopened with a reason.
 
-The staged importer now queues proposals instead of directly creating entities:
+The same import is available on the command line (theatre by name or ID):
 
 ```bash
 uv run python -m backend.ingestion.staged_to_db \
@@ -49,17 +58,11 @@ uv run python -m backend.ingestion.staged_to_db \
   --organization-name "Badisches Staatstheater Karlsruhe"
 ```
 
-Organizations are resolved before production matching. Exact titles alone are
-never sufficient for an automatic merge (there are no automatic approvals).
-Production suggestions compare organization, premiere, directors and overlapping
-personnel by canonical role. Missing credits/dates are unknown, not conflicts.
-Text suggestions compare authors; person names alone remain review candidates.
-Candidate searches are bounded to 200 records, with source-linked identities
-always included; duplicate discovery is a bounded search, not an exhaustive audit.
-Use manual search/UUID selection when the desired candidate is not suggested.
-Known role aliases such as `Regie`/`Inszenierung`/`director` share a canonical
-credit role; actors' characters are stored separately. Credits absent from a
-scrape are not deleted.
+A whole upload is validated first and written in one transaction. Re-uploading is
+idempotent; rejected uploads are not queued again. Older snapshots of an already
+linked page only fill empty fields. Known role aliases such as
+`Regie`/`Inszenierung`/`director` share a canonical credit role; actors' characters
+are stored separately. Credits absent from a scrape are not deleted.
 
 Confirmed source IDs/URLs are mapped persistently. Identical submissions reuse
 their cases. Later snapshots require review again; older/undated snapshots cannot
@@ -75,8 +78,8 @@ rejected; refresh it and review again. Detail-page lookups follow old UUID
 redirects. Merge is not a one-click reversible operation; back up the database
 before large cleanup runs.
 
-The app and `init_db()` add the three new tables (`reconciliationcase`,
-`sourcerecord`, `entityredirect`) without rewriting existing domain tables.
+The app and `init_db()` add the new tables (`reconciliationcase`,
+`sourcerecord`, `entityredirect`, `importrun`) without rewriting existing domain tables.
 The person biography field is a required schema prerequisite. For an existing
 PostgreSQL database without that column, apply this additive migration before
 starting the app (fresh databases already include it):
@@ -91,7 +94,8 @@ workflow: do not use them for ongoing reconciliation.
 ##### Python integration
 
 All five entity types use the same backend API. Source metadata must exist first.
-Theatre-specific staged JSON is an adapter on top of this generic API:
+Theatre uploads use `backend.production_import.ingest_records()`; the generic
+review API below serves other sources, legacy cases and duplicates:
 
 ```python
 from backend.models import EntityType
@@ -130,9 +134,7 @@ duplicate_case = queue_duplicate(
 Use `find_candidates()` for read-only matching and `list_cases()` for queue
 integration. `propose_record()` accepts `organization`, `person`, `production`,
 `text` and `award`; use `title` for texts and `name` for the other types.
-It requires a stable external ID, URL or explicit `record_key`. The staged adapter
-uses source assertions scoped to each production for people without profile URLs,
-not globally unique names. An approved person case can be referenced in
+It requires a stable external ID, URL or explicit `record_key`. An approved person case can be referenced in
 `context["credits"]` (`case_id`, canonical `role`, optional `character`).
 `context["dependencies"]` entries (`case_id`, foreign-key `field`) resolve approved
 organization/text references before applying a production. Unapproved prerequisites
