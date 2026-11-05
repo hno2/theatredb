@@ -88,7 +88,13 @@ def _theatre_names() -> dict[str, str]:
 
 def _label(record: dict) -> str:
     name = record.get("name") or record.get("title") or "Ohne Titel"
-    details = [record.get("city") or record.get("premiere", "")[:10] or record.get("born") or ""]
+    details = [
+        record.get("city")
+        or (record.get("premiere") or "")[:10]
+        or str(record.get("premiere_year") or "")
+        or record.get("born")
+        or ""
+    ]
     if record.get("organization_id"):
         details.append(_theatre_names().get(record["organization_id"], ""))
     return " · ".join([name, *[detail for detail in details if detail]])

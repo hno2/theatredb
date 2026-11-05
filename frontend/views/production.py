@@ -2,7 +2,13 @@ import streamlit as st
 
 from backend.entity_management import get_people_productions
 from frontend.views.helpers import entity_link, production_people, role_label
-from frontend.views.organization import parse_date, render_production_card, render_sources, render_web_link
+from frontend.views.organization import (
+    parse_date,
+    premiere_label,
+    render_production_card,
+    render_sources,
+    render_web_link,
+)
 
 
 def render_cast(data: dict, other_productions: list[dict]) -> None:
@@ -81,12 +87,12 @@ def render_production(data: dict) -> None:
     organization = data.get("organization") or {}
     if organization:
         entity_link(organization["name"], "organization", organization["id"])
-        render_web_link("Theater-Website", organization.get("url"))
+        render_web_link("Theater-Website", organization.get("url"), official=True)
         if organization.get("city"):
             st.text(organization["city"])
     premiere = parse_date(data.get("premiere"))
     facts = [
-        ("Premiere", premiere.strftime("%d.%m.%Y") if premiere else "Nicht hinterlegt"),
+        ("Premiere", premiere_label(data)),
         ("Dauer", f"{data['duration']} Minuten" if data.get("duration") is not None else "Nicht hinterlegt"),
         (
             "Altersempfehlung",
@@ -100,7 +106,7 @@ def render_production(data: dict) -> None:
     if data.get("premiere") and premiere is None:
         st.warning(f"Ungültiges Premierendatum: {data['premiere']}")
     st.caption("Die Premiere bezeichnet keine Laufzeit und keinen aktuellen Aufführungstermin.")
-    render_web_link("Offizielle Seite", data.get("url"))
+    render_web_link("Offizielle Seite", data.get("url"), official=True)
     if data.get("tags"):
         st.text(" · ".join(data["tags"]))
     if data.get("description"):

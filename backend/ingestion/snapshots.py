@@ -128,6 +128,12 @@ def scrape_diff(before: list[dict], after: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def snapshot_path(directory: Path, scope: str) -> Path:
+    """Name snapshots consistently without overwriting earlier same-day runs."""
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d_%H%M%S_%f")
+    return directory / f"{stamp}_{scope}_productions.json"
+
+
 def save_scrape(
     records: list[dict],
     config: ScraperConfig,
@@ -147,8 +153,7 @@ def save_scrape(
     report = scrape_diff(old, records)
     if not previous:
         report = "No previous scrape for this config and scope; creating baseline.\n" + report
-    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d_%H%M%S_%f")
-    path = directory / f"{stamp}_{scope}_productions.json"
+    path = snapshot_path(directory, scope)
     write_json(path, records)
     return path, report
 

@@ -19,6 +19,110 @@ path to a YAML/JSON file. Bundled venue names are case-insensitive (`Karlsruhe`
 and `karlsruhe` are equivalent). YAML is loaded with `safe_load`; configuration is data,
 not executable Python.
 
+## Theapolis: separate directory import
+
+Theapolis has one independent entry point, `backend.ingestion.theapolis`. It
+uses the **same staging JSON schema** as all venue scrapers: a root array of
+productions with `title`, `url`, `premiere`, and `memberships`. It does not use
+venue configs, theatre uploads or their automatic matching/import rules.
+API export and image downloads do not connect to the database. The separate
+Theapolis import queues generic reconciliation cases only.
+
+For an existing PostgreSQL database, back it up and apply this additive schema
+change **before starting the updated app or importing** (fresh databases already
+include the column; `init_db()` does not alter existing tables):
+
+```sql
+ALTER TABLE production ADD COLUMN IF NOT EXISTS premiere_year INTEGER;
+```
+
+Re-export and reimport from the repository root:
+
+```bash
+uv sync --all-groups
+uv run python -m backend.ingestion.theapolis download --concurrency 10
+uv run python -m backend.ingestion.theapolis images --concurrency 10
+uv run python -m backend.ingestion.theapolis import
+```
+
+To **create JSON only**, without downloading images or writing to the database:
+
+```bash
+uv run --group ingest python -m backend.ingestion.theapolis download --concurrency 10
+```
+
+Default staged JSON:
+`data/staged/theapolis.de/YYYYMMDD_HHMMSS_microseconds_all-people_<config-hash>_productions.json`,
+using the same timestamp/scope naming helper as venue scrapers. Each run keeps
+earlier snapshots. Limited runs use `limit-<max-records>` instead of `all`
+(`--max-pages 1` is at most 500 records). Default import selects the latest full
+snapshot for the current API configuration, never a limited smoke export.
+Image manifest:
+`data/theapolis/images/manifest.json`. `--json PATH` selects another export/import
+file. A sibling `<timestamp-and-scope>_productions.source.json` keeps raw IDs, organization metadata,
+capture time and partial-export status outside the shared staging records.
+Keep both files together for the separate Theapolis review import; it checks
+that staged JSON matches its source metadata before writing any cases.
+`images --output DIRECTORY` selects another image directory. Existing flat
+`{"items": [...]}` exports (including `productions_new.json` and
+`theapolis_export.json`) and API `{"data": {"items": [...]}}` envelopes are accepted.
+For example:
+
+```bash
+uv run python -m backend.ingestion.theapolis import --json productions_new.json
+```
+
+Staged records use normalized `premiere`/`premiere_year`; raw API IDs, dates,
+logos, attribution and the timezone-aware capture timestamp stay in the sidecar.
+The shared schema accepts optional integer `premiere_year` (1–9999) for every
+scraper, and the shared importer preserves it. This keeps year-only dates valid
+without adding Theapolis-specific keys to the staging contract.
+`premierDate` accepts ISO date/datetime, German `DD.MM.YYYY`, or a four-digit year;
+`premierYear` (or detail API `year`) supplies year-only premieres.
+Known full dates go into `Production.premiere`; year-only values go into
+`Production.premiere_year` with `premiere = NULL`, never an invented January 1.
+The UI shows the recorded precision, includes year-only productions in sorting,
+and matches them to date filters overlapping that year. Conflicting date/year
+values fail validation before any review cases are written.
+
+Review under **Verwaltung → Datenabgleich & Duplikate → Weitere Prüffälle**.
+Approve organizations and people, then texts, then productions. Match existing
+records explicitly; creating a domain entity requires explicit confirmation.
+Production credit IDs are kept as numeric source IDs, not inferred from names.
+Profile slugs such as `vanessa-waldhart` are separate public profile identities;
+they are not assumed to be the same as production-credit IDs. Missing organization
+data stays unknown and requires manual review. Reimporting an unchanged snapshot
+reuses the same cases. Export capture time is retained; legacy exports without a
+timestamp remain undated. No automatic deletion or cleanup of legacy data occurs.
+
+Theapolis organization/production URLs are **citations only**, never proposed
+official website fields. Existing legacy Theapolis website values are displayed
+as “Theapolis-Quelle”, not “Offizielle Seite”; no official theatre URL is erased.
+
+Images are discovered independently from **all public people/organization
+sitemaps**, not only people/theatres present in the production export. Downloads
+use bounded parallel requests and retries for rate limits/transient errors.
+Files are `people/<profile-slug>.<extension>` and
+`organizations/<organization-slug>.<extension>`. Each manifest entry retains its
+slug, source page, image URL, local path and download/no-image/failure status.
+Missing photos are logged; other failures are recorded while remaining downloads
+continue, then the command exits nonzero. Completed batches survive interruptions;
+rerunning refreshes images. This downloads each public profile's main photo and
+each organization's logo, not private media or entire photo galleries. Keep source
+attribution and obtain appropriate rights before publishing downloaded images;
+downloading does not grant a licence. Neither images nor snapshots are committed.
+
+Bounded checks (do not run a full job for validation):
+
+```bash
+uv run python -m backend.ingestion.theapolis download --max-pages 1 --json data/staged/theapolis.de/smoke.json
+uv run python -m backend.ingestion.theapolis images --limit 2 --output data/theapolis/smoke-images
+uv run pytest -q tests/test_theapolis.py
+```
+
+`--max-pages` marks the source sidecar as `partial`; it never pretends to be a full
+snapshot. `--limit` caps image profiles and reads only the first sitemap per kind.
+
 ## Staging JSON contract
 
 [staging.schema.json](staging.schema.json) is JSON Schema draft 2020-12, generated

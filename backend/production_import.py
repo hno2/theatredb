@@ -62,6 +62,7 @@ TITLE_THRESHOLD = 0.8
 FIELD_LABELS = {
     "name": "Titel",
     "premiere": "Premiere",
+    "premiere_year": "Premierenjahr",
     "description": "Beschreibung",
     "duration": "Dauer (Min.)",
     "age_rating": "Altersempfehlung",
@@ -151,6 +152,7 @@ def prepare_record(record: dict) -> dict:
             "name": record["title"].strip(),
             "description": _clean(record.get("description")),
             "premiere": dt.datetime.fromisoformat(premiere).isoformat() if premiere else None,
+            **({"premiere_year": record["premiere_year"]} if record.get("premiere_year") is not None else {}),
             "duration": record.get("duration"),
             "age_rating": record.get("age_rating"),
             "url": record["url"],

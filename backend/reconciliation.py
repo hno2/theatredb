@@ -325,13 +325,24 @@ def _production_evidence(
         overlap = {normalize(n) for n in names} & _person_names(session, row.id, canonical_role(role))
         if overlap:
             evidence.append(f"{role}: {', '.join(sorted(overlap))}")
+    _premiere_evidence(row, incoming, evidence, conflicts)
+    return evidence, conflicts, exact and same_org and same_directors
+
+
+def _premiere_evidence(row: Production, incoming: dict, evidence: list[str], conflicts: list[str]) -> None:
     premiere = incoming.get("premiere")
     if premiere and row.premiere:
         if str(premiere)[:10] == row.premiere.date().isoformat():
             evidence.append("Gleiche Premiere")
         else:
             conflicts.append("Abweichende Premiere")
-    return evidence, conflicts, exact and same_org and same_directors
+    elif (premiere or incoming.get("premiere_year")) and (row.premiere or row.premiere_year):
+        incoming_year = int(str(premiere)[:4]) if premiere else incoming["premiere_year"]
+        current_year = row.premiere.year if row.premiere else row.premiere_year
+        if incoming_year == current_year:
+            evidence.append("Gleiches Premierenjahr")
+        else:
+            conflicts.append("Abweichende Premiere")
 
 
 def _candidates(

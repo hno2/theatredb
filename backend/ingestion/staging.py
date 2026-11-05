@@ -79,6 +79,7 @@ class StagedProduction(BaseModel):
     url: HttpURL
     description: str | None = None
     premiere: dt.date | AwareDatetime | None = None
+    premiere_year: Annotated[StrictInt, Field(ge=1, le=9999)] | None = None
     duration: NonNegativeInt | None = None
     age_rating: NonNegativeInt | None = None
     tags: list[NonEmptyText] = Field(default_factory=list)

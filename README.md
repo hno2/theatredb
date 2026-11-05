@@ -97,8 +97,11 @@ starting the app (fresh databases already include it):
 ALTER TABLE person ADD COLUMN IF NOT EXISTS description VARCHAR;
 ```
 
-Legacy Theapolis import scripts, where available locally, bypass this review
-workflow: do not use them for ongoing reconciliation.
+The [separate Theapolis pipeline](backend/ingestion/README.md#theapolis-separate-directory-import)
+exports API records, downloads public profile photos/theatre logos in parallel,
+and queues generic review cases. It never uses the venue-upload importer or sets
+Theapolis URLs as official websites. Do not use the historical `cli/ingest.py`
+or other legacy direct-write scripts.
 
 ##### Python integration
 
