@@ -1,4 +1,3 @@
-import math
 from itertools import starmap
 from typing import cast
 from urllib.parse import urlencode
@@ -9,6 +8,7 @@ import streamlit as st
 
 from backend.entity_management import count_entities, list_entities
 from backend.models import Award, Organization, Person, Production, Source, Text
+from frontend.views.helpers import has_coordinates
 
 
 def organization_data(organizations: list[Organization]) -> pd.DataFrame:
@@ -27,18 +27,6 @@ def organization_data(organizations: list[Organization]) -> pd.DataFrame:
             for org in organizations
         ],
         columns=["id", "name", "city", "country", "lat", "lon", "detail"],
-    )
-
-
-def has_coordinates(lat: float | None, lon: float | None) -> bool:
-    """Accept only finite coordinates within geographic bounds, including zero."""
-    return (
-        lat is not None
-        and lon is not None
-        and math.isfinite(lat)
-        and math.isfinite(lon)
-        and -90 <= lat <= 90
-        and -180 <= lon <= 180
     )
 
 

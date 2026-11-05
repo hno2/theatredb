@@ -18,6 +18,13 @@ The interface uses native Streamlit components and a theme in
 `.streamlit/config.toml`. German is the current UI language; a future translation
 mode should extract UI strings into language catalogs and use one shared language
 selection across pages, leaving theatre names and source data unchanged.
+
+Theatre detail pages show an address and location map, a premiere timeline
+(newest or oldest first), and readable source citations with review status and
+capture date. Productions without a valid premiere remain listed separately;
+premiere dates do not represent production run dates. Missing coordinates and
+unusable source links are indicated explicitly. Production titles are searchable;
+long lists scroll within the production tab, while sources have their own tab.
 ## Contribution
 
 
