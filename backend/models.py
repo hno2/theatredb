@@ -1,10 +1,12 @@
 import datetime as dt
 import uuid
 from enum import StrEnum
-from typing import ClassVar
+from typing import Any, ClassVar, Protocol, cast
 
 from sqlalchemy import JSON, Column, select
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.orm import InstanceState
+from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
@@ -40,6 +42,10 @@ class EntityType(StrEnum):
     AWARD = "award"
 
 
+class _EntityWithId(Protocol):
+    id: uuid.UUID
+
+
 class EntitySource(SQLModel, table=True):
     """Represents a concrete source record tied to a specific entity."""
 
@@ -65,15 +71,26 @@ class SourceMixin:
 
     @property
     def sources(self) -> list[EntitySource]:
-        """Get all source links for this entity."""
-        session = sa_inspect(self).session
+        """Source links associated with this entity."""
+        state = cast(InstanceState[Any], sa_inspect(self))
+        session = state.session
         if session is None:
             return []
-        stmt = select(EntitySource).where(
-            EntitySource.entity_id == self.id,
-            EntitySource.entity_type == self.__class__._entity_type,
+        entity_id = cast(_EntityWithId, self).id
+        entity_type = cast(EntityType, type(self)._entity_type)
+        entity_type_filter = cast(
+            ColumnElement[bool],
+            EntitySource.entity_type == entity_type,
         )
-        return list(session.exec(stmt).all())
+        entity_id_filter = cast(
+            ColumnElement[bool],
+            EntitySource.entity_id == entity_id,
+        )
+        stmt = select(EntitySource).where(
+            entity_id_filter,
+            entity_type_filter,
+        )
+        return list(session.scalars(stmt).all())
 
     def get_source_url(self, source_name: str) -> str | None:
         """Get the URL of a source by its name."""

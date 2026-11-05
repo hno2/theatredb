@@ -28,7 +28,8 @@ if params.get("id"):
             except ValueError:
                 st.error("Not found")
                 st.stop()
-            render_fn(data)
+            else:
+                render_fn(data)
 else:
     kind = st.selectbox(
         "Typ",
