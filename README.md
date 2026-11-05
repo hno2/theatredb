@@ -154,6 +154,14 @@ capture date. Productions without a valid premiere remain listed separately;
 premiere dates do not represent production run dates. Missing coordinates and
 unusable source links are indicated explicitly. Production titles are searchable;
 long lists scroll within the production tab, while sources have their own tab.
+
+Production profiles use the same style, with premiere, duration, age guidance,
+cast and team credits, sources, and links to other productions at the theatre or
+with the same contributors. Person profiles list productions and shared credits
+with theatres and other people. Counts use distinct recorded productions, not
+roles or inferred similarity; “other” excludes the production currently shown.
+Detail links navigate in the same tab and replace the entity kind and UUID in
+the URL, including links between two entries on the detail page.
 ## Contribution
 
 Pull requests run the **PR checks** workflow with Python 3.14 and locked uv
