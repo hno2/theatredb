@@ -1,7 +1,7 @@
 # Theatre ingestion
 
-The pipeline is **website -> validated staged JSON -> reconciliation proposals ->
-explicit review**. Scraping, schema validation and change checks do not connect to
+The pipeline is **website -> validated staged JSON -> theatre upload (automatic for
+conflict-free changes) -> review of conflicts**. Scraping, schema validation and change checks do not connect to
 the database. Never use the historical Scrapy/DB scripts for ongoing imports.
 
 ## Setup
@@ -262,14 +262,15 @@ uv run python -m backend.ingestion.staged_to_db \
 For Stuttgart use source `schauspiel-stuttgart.de`, base URL
 `https://www.schauspiel-stuttgart.de/` and organization `Schauspiel Stuttgart`.
 The filename's `YYYYMMDD_` prefix supplies the capture date. Files can also be
-uploaded through **Verwaltung -> Datenabgleich & Duplikate**. Organization, person,
-text and production cases require review in that order. New domain entities
-still need explicit `allow_create=True` approval; scraping never approves cases.
+uploaded through **Verwaltung -> Datenabgleich & Duplikate**. The theatre must
+already exist (`--organization-name` or `--organization-id`). Conflict-free
+same-title productions are merged, productions without a similar title (< 80 %)
+in that theatre are created, the rest is queued under **Produktionskonflikte**.
 
 ## Tests
 
 ```bash
-uv run pytest tests/test_configurable_ingestion.py tests/test_base_scraper.py tests/test_reconciliation.py
+uv run pytest tests/test_configurable_ingestion.py tests/test_base_scraper.py tests/test_reconciliation.py tests/test_production_import.py
 ```
 
 Tests use synthetic venue DOMs and a loopback HTTP server. They cover schema

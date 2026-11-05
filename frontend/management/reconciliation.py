@@ -1,15 +1,25 @@
-"""German review desk for staged imports and manually submitted duplicates."""
+"""German review desk: theatre uploads, production conflicts and manually submitted duplicates."""
 
 import datetime as dt
 import json
 import re
+from urllib.parse import urlsplit
 
+import pandas as pd
 import streamlit as st
+from pandas.io.formats.style import Styler
 from sqlalchemy.exc import SQLAlchemyError
 
 from backend.entity_management import list_entities
-from backend.ingestion.staged_to_db import stage_records
-from backend.models import Source
+from backend.models import Organization, Source
+from backend.production_import import (
+    OPERATION,
+    ingest_records,
+    list_production_cases,
+    production_review,
+    reject_production_case,
+    resolve_production_case,
+)
 from backend.reconciliation import (
     approve_case,
     decide_case,
@@ -29,40 +39,342 @@ KINDS = {
     "production": "Produktionen",
     "award": "Auszeichnungen",
 }
+ROLES = {
+    "director": "Regie",
+    "actor": "Schauspiel",
+    "dramaturg": "Dramaturgie",
+    "set_designer": "Bühne",
+    "costume_designer": "Kostüme",
+    "light_designer": "Licht",
+    "choreographer": "Choreografie",
+    "composer": "Musik",
+    "video_designer": "Video",
+    "author": "Autor:in",
+    "translator": "Übersetzung",
+    "adapter": "Fassung",
+}
+FIELD_STATUS = {
+    "same": "✅ gleich",
+    "new": "🆕 wird ergänzt",
+    "extended": "🔗 wird erweitert",
+    "kept": "◻️ bleibt (nur Bestand)",
+    "conflict": "⚠️ Konflikt - bitte wählen",
+}
+PEOPLE_STATUS = {
+    "same": "✅ in beiden",
+    "new_known": "🆕 wird verknüpft (Person existiert)",
+    "new_person": "🆕 Person wird neu angelegt",
+    "kept": "◻️ nur Bestand",
+}
+ROW_COLORS = {
+    "conflict": "#fde2e1",
+    "new": "#e3f6e8",
+    "extended": "#e3f6e8",
+    "new_known": "#e3f6e8",
+    "new_person": "#fff4d6",
+}
+NEW_PRODUCTION = "__new__"
+
+
+@st.cache_data(ttl=30)
+def _theatre_names() -> dict[str, str]:
+    return {str(org.id): org.name for org in list_entities(Organization)}
 
 
 def _label(record: dict) -> str:
     name = record.get("name") or record.get("title") or "Ohne Titel"
-    detail = record.get("city") or record.get("premiere") or record.get("born") or ""
-    return f"{name} · {detail} · {record['id']}"
+    details = [record.get("city") or record.get("premiere", "")[:10] or record.get("born") or ""]
+    if record.get("organization_id"):
+        details.append(_theatre_names().get(record["organization_id"], ""))
+    return " · ".join([name, *[detail for detail in details if detail]])
+
+
+def _unique(labels: dict) -> dict:
+    """Streamlit keys selectbox state by label: number repeated labels (namesakes) instead of showing UUIDs."""
+    seen: dict[str, int] = {}
+    result = {}
+    for key, label in labels.items():
+        seen[label] = seen.get(label, 0) + 1
+        result[key] = label if seen[label] == 1 else f"{label} ({seen[label]})"
+    return result
 
 
 def _actor() -> str:
     return _actor_id() or "reconciliation-ui"
 
 
+def _theatre_label(org: Organization) -> str:
+    return f"{org.name} · {org.city}" if org.city else org.name
+
+
 def _import_tab() -> None:
-    st.write("Theater-JSON hochladen. Es entstehen nur Prüffälle, keine neuen Personen oder Produktionen.")
-    st.caption("Reihenfolge: Organisation → Personen → Texte → Produktionen. Jeder neue Datensatz braucht Zustimmung.")
+    st.write(
+        "Theater wählen und JSON hochladen. Gleiche Produktionen dieses Theaters werden automatisch ergänzt, "
+        "neue Produktionen angelegt. Nur echte Widersprüche landen unter **Produktionskonflikte**."
+    )
+    theatres = sorted(list_entities(Organization), key=lambda org: org.name.casefold())
+    if not theatres:
+        st.info("Noch kein Theater vorhanden. Bitte zuerst unter Verwaltung → Organisationen anlegen.")
+        return
+    by_id = {str(org.id): org for org in theatres}
+    theatre_labels = _unique({key: _theatre_label(org) for key, org in by_id.items()})
+    theatre = st.selectbox(
+        "Theater",
+        list(by_id),
+        index=None,
+        placeholder="Theater suchen und wählen",
+        format_func=theatre_labels.__getitem__,
+        key="upload_theatre",
+    )
     uploaded = st.file_uploader("Produktionsdatei (JSON)", type=["json"])
-    source = st.text_input("Quellenname", placeholder="staatstheater-karlsruhe.de")
-    organization = st.text_input("Name der Organisation", placeholder="Badisches Staatstheater Karlsruhe")
+    records = None
+    if uploaded is not None:
+        try:
+            records = json.loads(uploaded.getvalue())
+        except json.JSONDecodeError as exc:
+            st.error(f"Keine gültige JSON-Datei: {exc}")
+    first_url = (
+        records[0].get("url", "") if isinstance(records, list) and records and isinstance(records[0], dict) else ""
+    )
+    source = st.text_input(
+        "Quelle",
+        value=urlsplit(first_url).netloc,
+        key=f"upload_source_{uploaded.name if uploaded else ''}",
+        help="Wird als zusätzliche Quelle an jeder Produktion gespeichert.",
+    )
     match = re.match(r"(\d{8})_", uploaded.name) if uploaded else None
     inferred_date = dt.datetime.strptime(match[1], "%Y%m%d").replace(tzinfo=dt.UTC).date() if match else None
     known_date = st.checkbox("Erfassungsdatum bekannt", value=bool(inferred_date))
     capture = st.date_input("Stand der Quelldaten (nicht Importdatum)", value=inferred_date) if known_date else None
-    st.caption("Ohne Erfassungsdatum wird kein aktueller Quellstand behauptet.")
-    if st.button("Zur Prüfung einreichen", disabled=uploaded is None) and uploaded is not None:
-        records = json.loads(uploaded.getvalue())
-        result = stage_records(
-            records,
-            source_name=source,
-            organization_name=organization,
-            actor_id=_actor(),
-            captured_at=dt.datetime.combine(capture, dt.time(), tzinfo=dt.UTC) if capture else None,
+    ready = records is not None and theatre is not None and bool(source.strip())
+    if st.button("Importieren", type="primary", disabled=not ready) and ready:
+        with st.spinner(f"{len(records)} Produktionen werden geprüft und mit dem Bestand abgeglichen …"):
+            result = ingest_records(
+                records,
+                organization_id=theatre,
+                source_name=source,
+                actor_id=_actor(),
+                captured_at=dt.datetime.combine(capture, dt.time(), tzinfo=dt.UTC) if capture else None,
+            )
+        st.session_state["upload_result"] = (by_id[theatre].name, result)
+        # Rerun so the conflict tab (rendered before this tab) shows the new cases; stay on this tab.
+        st.session_state["show_import_tab"] = True
+        st.rerun()
+    saved = st.session_state.get("upload_result")
+    if saved:
+        theatre_name, result = saved
+        st.success(f"Import für {theatre_name} abgeschlossen.")
+        labels = {
+            "merged": "Ergänzt",
+            "created": "Neu angelegt",
+            "review": "Zur Prüfung",
+            "unchanged": "Unverändert",
+        }
+        for column, (key, label) in zip(st.columns(len(labels)), labels.items(), strict=True):
+            column.metric(label, len(result[key]))
+        for key, label in labels.items():
+            if result[key]:
+                with st.expander(f"{label}: {len(result[key])}"):
+                    st.write("\n".join(f"- {name} · {theatre_name}" for name in result[key]))
+        if result["review"]:
+            st.info("Offene Konflikte im Reiter **Produktionskonflikte** bearbeiten.")
+
+
+def _format(field: str, value: object) -> str:
+    if value in (None, "", [], {}):
+        return "—"
+    if field == "premiere":
+        return dt.date.fromisoformat(str(value)[:10]).strftime("%d.%m.%Y")
+    if isinstance(value, list):
+        return ", ".join(map(str, value))
+    if field == "duration":
+        return f"{value} Min."
+    if field == "age_rating":
+        return f"ab {value} J."
+    return str(value)
+
+
+def _styled(frame: pd.DataFrame, statuses: list[str]) -> Styler:
+    styles = pd.DataFrame(
+        [[f"background-color: {ROW_COLORS[s]}" if s in ROW_COLORS else ""] * len(frame.columns) for s in statuses],
+        index=frame.index,
+        columns=frame.columns,
+    )
+    return frame.style.apply(lambda _: styles, axis=None)
+
+
+def _field_table(review: dict) -> None:
+    rows = [row for row in review["fields"] if row["status"] != "empty"]
+    frame = pd.DataFrame(
+        [
+            {
+                "Feld": row["label"],
+                "Bestand": _format(row["field"], row["existing"]) if review["target"] else "—",
+                "Upload": _format(row["field"], row["incoming"]),
+                "Ergebnis": FIELD_STATUS[row["status"]] if review["target"] else "🆕 neu",
+            }
+            for row in rows
+        ]
+    )
+    if review["target"] is None:
+        st.dataframe(frame, hide_index=True, width="stretch")
+        return
+    st.dataframe(_styled(frame, [row["status"] for row in rows]), hide_index=True, width="stretch")
+
+
+def _people_table(review: dict) -> None:
+    if not review["people"]:
+        st.caption("Keine Beteiligten im Upload.")
+        return
+    frame = pd.DataFrame(
+        [
+            {
+                "Person": row["name"],
+                "Funktion": ROLES.get(row["role"], row["role"] or "—"),
+                "Figur": row["character"] or "",
+                "Ergebnis": PEOPLE_STATUS[row["status"]],
+            }
+            for row in review["people"]
+        ]
+    )
+    st.dataframe(_styled(frame, [row["status"] for row in review["people"]]), hide_index=True, width="stretch")
+    st.caption("Personen werden über Name, Quelle und Theater wiedererkannt - es entstehen keine Dubletten.")
+
+
+def _conflict_choices(review: dict) -> dict[str, str]:
+    choices = {}
+    rows = {row["field"]: row for row in review["fields"]}
+    directors = {
+        "existing": ", ".join(p["name"] for p in review["people"] if p["role"] == "director" and p["status"] == "kept"),
+        "incoming": ", ".join(p["name"] for p in review["people"] if p["role"] == "director" and p["status"] != "kept"),
+    }
+    for field in review["conflicts"]:
+        if field == "director":
+            label, values = "Regie", directors
+        else:
+            row = rows[field]
+            label = row["label"]
+            values = {"existing": _format(field, row["existing"]), "incoming": _format(field, row["incoming"])}
+        with st.container(border=True):
+            st.markdown(f"**⚠️ {label}**")
+            left, right = st.columns(2)
+            left.caption("Bestand")
+            left.write(values["existing"])
+            right.caption("Upload")
+            right.write(values["incoming"])
+            choices[field] = st.radio(
+                f"Welcher Wert gilt für {label}?",
+                ["existing", "incoming"],
+                format_func={"existing": "Bestand behalten", "incoming": "Upload übernehmen"}.__getitem__,
+                horizontal=True,
+                key=f"choice_{review['case_id']}_{review['target']['id']}_{field}",
+            )
+    return choices
+
+
+def _header(review: dict) -> None:
+    left, right = st.columns(2)
+    with left.container(border=True):
+        st.caption("BESTAND (Datenbank)")
+        if review["target"]:
+            st.markdown(f"#### {review['target']['label']}")
+            sources = review["target"]["sources"]
+            st.write("Quellen: " + (", ".join(s["source"] for s in sources) if sources else "keine"))
+        else:
+            st.markdown("#### 🆕 Neue Produktion")
+            st.write(f"Wird bei {review['theatre']} angelegt.")
+    with right.container(border=True):
+        st.caption("UPLOAD")
+        st.markdown(f"#### {review['incoming_label']}")
+        stand = (
+            dt.date.fromisoformat(review["captured_at"]).strftime("%d.%m.%Y") if review["captured_at"] else "unbekannt"
         )
-        st.success("Eingereicht. Identische Einreichungen verwenden bestehende Prüffälle.")
-        st.write({KINDS[kind]: len(ids) for kind, ids in result.items()})
+        st.write(f"Quelle: [{review['source']['name']}]({review['source']['url']}) · Stand {stand}")
+
+
+def _conflict_tab() -> None:
+    theatres = _theatre_names()
+    cases = list_production_cases()
+    if not cases:
+        st.success("Keine offenen Produktionskonflikte.")
+        return
+    theatre_filter = st.selectbox(
+        "Theater",
+        [None, *sorted({case["organization_id"] for case in cases}, key=lambda key: theatres.get(key, ""))],
+        format_func=lambda key: "Alle Theater" if key is None else theatres.get(key, "Unbekanntes Theater"),
+        key="conflict_theatre",
+    )
+    cases = [case for case in cases if theatre_filter is None or case["organization_id"] == theatre_filter]
+    by_id = {case["id"]: case for case in cases}
+    st.caption(f"{len(cases)} offene Konflikte - nach dem Speichern folgt automatisch der nächste.")
+    case_labels = _unique(
+        {key: f"{case['name']} · {case['theatre']} - {case['reason']}" for key, case in by_id.items()}
+    )
+    case_id = st.selectbox(
+        "Konflikt",
+        list(by_id),
+        format_func=case_labels.__getitem__,
+        key="conflict_case",
+    )
+    if case_id is None:
+        return
+    suggested = production_review(case_id)
+    candidates = {row["id"]: row for row in suggested["candidates"]}
+    options = [*candidates, NEW_PRODUCTION]
+    default = suggested["target"]["id"] if suggested["target"] else NEW_PRODUCTION
+    target_labels = _unique(
+        {
+            **{key: f"{row['label']}  ({row['similarity']:.0%} ähnlich)" for key, row in candidates.items()},
+            NEW_PRODUCTION: "🆕 Keine davon - als neue Produktion anlegen",
+        }
+    )
+    choice = st.selectbox(
+        "Vergleichen mit (nur Produktionen desselben Theaters; tippen zum Suchen)",
+        options,
+        index=options.index(default),
+        format_func=target_labels.__getitem__,
+        key=f"conflict_target_{case_id}",
+    )
+    create = choice == NEW_PRODUCTION
+    review = (
+        suggested
+        if choice == default
+        else production_review(case_id, target_id=None if create else choice, create=create)
+    )
+    _header(review)
+    st.subheader("Felder")
+    _field_table(review)
+    choices = _conflict_choices(review) if review["target"] else {}
+    st.subheader("Beteiligte")
+    _people_table(review)
+    revision_key = f"conflict_revision_{case_id}_{choice}"
+    shown_revision = st.session_state.get(revision_key, review["revision"])
+    st.session_state[revision_key] = review["revision"]
+    save_col, reject_col = st.columns([3, 1])
+    action = "Als neue Produktion anlegen" if create else "Zusammenführen"
+    if save_col.button(action, type="primary", width="stretch", key=f"resolve_{case_id}"):
+        try:
+            resolve_production_case(
+                case_id,
+                revision=shown_revision,
+                actor_id=_actor(),
+                target_id=None if create else choice,
+                create=create,
+                choices=choices,
+            )
+        except ValueError as exc:
+            if "Data changed" not in str(exc):
+                raise
+            st.error("Daten wurden zwischenzeitlich geändert. Der Vergleich ist aktualisiert - bitte erneut prüfen.")
+        else:
+            st.session_state["_flash"] = f"Gespeichert: {review['incoming_label']}"
+            st.session_state.pop("conflict_case", None)
+            st.rerun()
+    if reject_col.button("Upload verwerfen", width="stretch", key=f"reject_{case_id}"):
+        reject_production_case(case_id, actor_id=_actor())
+        st.session_state["_flash"] = f"Verworfen: {review['incoming_label']}"
+        st.session_state.pop("conflict_case", None)
+        st.rerun()
 
 
 def _duplicates_tab() -> None:
@@ -70,21 +382,23 @@ def _duplicates_tab() -> None:
     kind = st.selectbox("Datensatztyp", list(KINDS), format_func=KINDS.__getitem__, key="duplicate_kind")
     query = st.text_input("Name, Titel oder UUID suchen", key="duplicate_query")
     records = search_entities(kind, query)
-    st.caption("Maximal 50 Treffer. Bei gleichen Namen helfen UUID, Ort und Datum.")
+    st.caption("Maximal 50 Treffer. Bei gleichen Namen helfen Ort, Datum und Theater.")
     choices = {row["id"]: row for row in records}
+    left_labels = _unique({None: "Bitte wählen", **{key: _label(row) for key, row in choices.items()}})
     left = st.selectbox(
         "Bevorzugter Datensatz",
         [None, *choices],
-        format_func=lambda key: "Bitte wählen" if key is None else _label(choices[key]),
+        format_func=left_labels.__getitem__,
         key="duplicate_left",
     )
     right_query = st.text_input("Zweiten Datensatz suchen (auch anderer Name möglich)", key="duplicate_right_query")
     right_records = search_entities(kind, right_query) if right_query else records
     right_choices = {row["id"]: row for row in right_records if row["id"] != left}
+    right_labels = _unique({None: "Bitte wählen", **{key: _label(row) for key, row in right_choices.items()}})
     right = st.selectbox(
         "Mögliches Duplikat",
         [None, *right_choices],
-        format_func=lambda key: "Bitte wählen" if key is None else _label(right_choices[key]),
+        format_func=right_labels.__getitem__,
         key="duplicate_right",
     )
     reason = st.text_input("Begründung", key="duplicate_reason")
@@ -131,26 +445,28 @@ def _select_target(case: dict, initial: dict) -> str | None:
             initial["target_state"]["record"]["id"]: initial["target_state"]["record"],
             initial["duplicate_state"]["record"]["id"]: initial["duplicate_state"]["record"],
         }
+        labels = _unique({key: _label(records[key]) for key in ids})
         return st.selectbox(
-            "Diese UUID bleibt erhalten",
+            "Dieser Datensatz bleibt erhalten",
             ids,
-            format_func=lambda key: _label(records[key]),
+            format_func=labels.__getitem__,
             key=f"survivor_{case['id']}",
         )
     query = st.text_input("Zusätzlich nach bestehendem Ziel suchen (Name oder UUID)", key=f"target_query_{case['id']}")
     options = {c["id"]: c["record"] for c in initial["candidates"]}
     if query:
         options.update({row["id"]: row for row in search_entities(case["entity_type"], query)})
+    labels = _unique(
+        {
+            "choose": "Bitte wählen",
+            "new": "Neuen Datensatz anlegen (nur nach Zustimmung)",
+            **{key: _label(row) for key, row in options.items()},
+        }
+    )
     choice = st.selectbox(
         "Ziel auswählen",
         ["choose", "new", *options],
-        format_func=lambda key: (
-            "Bitte wählen"
-            if key == "choose"
-            else "Neuen Datensatz anlegen (nur nach Zustimmung)"
-            if key == "new"
-            else _label(options[key])
-        ),
+        format_func=labels.__getitem__,
         key=f"target_{case['id']}",
     )
     return choice
@@ -162,7 +478,6 @@ def _comparison(case: dict, preview: dict, target_id: str | None) -> list[str]:
         st.dataframe(
             [
                 {
-                    "UUID": row["id"],
                     "Name/Titel": row["label"],
                     "Ähnlichkeit": row["similarity"],
                     "Belege": "; ".join(row["evidence"]),
@@ -175,7 +490,7 @@ def _comparison(case: dict, preview: dict, target_id: str | None) -> list[str]:
         )
     if preview["blocked"]:
         st.warning("Noch nicht genehmigbar: " + " · ".join(preview["blocked"]))
-        st.caption("Prüffälle mit diesen UUIDs zuerst bearbeiten. Fehlende Angaben gelten nicht als Widerspruch.")
+        st.caption("Abhängige Prüffälle zuerst bearbeiten. Fehlende Angaben gelten nicht als Widerspruch.")
     if preview["credits"]:
         st.subheader("Beteiligte Personen & Credits")
         st.dataframe(preview["credits"], hide_index=True)
@@ -184,7 +499,7 @@ def _comparison(case: dict, preview: dict, target_id: str | None) -> list[str]:
         )
     if case["operation"] == "merge":
         st.warning(
-            "Beim Zusammenführen wird das Duplikat gelöscht. Alle Verknüpfungen werden auf die gewählte UUID "
+            "Beim Zusammenführen wird das Duplikat gelöscht. Alle Verknüpfungen werden auf den gewählten Datensatz "
             "umgehängt; Quellbelege, Weiterleitungen und Änderungsverlauf bleiben erhalten. "
             "Nicht ausgewählte Konfliktwerte bleiben nur im Verlauf erhalten."
         )
@@ -262,19 +577,29 @@ def _review_tab() -> None:
     )
     query = st.text_input("Prüffälle suchen (Name, Titel, Grund oder Fall-UUID)")
     page = st.number_input("Seite", min_value=1, value=1, step=1)
-    cases = list_cases(status=status, kind=None if kind == "all" else kind, query=query, offset=(page - 1) * 200)
+    cases = list_cases(
+        status=status,
+        kind=None if kind == "all" else kind,
+        query=query,
+        offset=(page - 1) * 200,
+        exclude_operations=[OPERATION],
+    )
     if not cases:
         st.info("Keine Prüffälle für diesen Filter.")
         return
     by_id = {case["id"]: case for case in cases}
     st.caption("Bis zu 200 Fälle, älteste zuerst. Voraussetzungen zuerst genehmigen.")
+    case_labels = _unique(
+        {
+            key: f"{KINDS[case['entity_type']]} · "
+            f"{case['incoming'].get('name') or case['incoming'].get('title') or case['reason']}"
+            for key, case in by_id.items()
+        }
+    )
     case_id = st.selectbox(
         "Prüffall",
         list(by_id),
-        format_func=lambda key: (
-            f"{KINDS[by_id[key]['entity_type']]} · "
-            f"{by_id[key]['incoming'].get('name') or by_id[key]['incoming'].get('title') or by_id[key]['reason']} · {key}"
-        ),
+        format_func=case_labels.__getitem__,
         key=f"review_case_{kind}_{status}",
     )
     if case_id is None:
@@ -300,15 +625,29 @@ def _review_tab() -> None:
                 st.rerun()
 
 
+IMPORT_TAB = "Theater-JSON hochladen"
+
+
 def _render_tabs() -> None:
     init_db()
-    review, duplicates, imports = st.tabs(["Prüfliste", "Duplikate suchen / melden", "Theater-JSON einreichen"])
+    open_conflicts = len(list_production_cases())
+    conflicts, imports, review, duplicates = st.tabs(
+        [
+            f"Produktionskonflikte ({open_conflicts})",
+            IMPORT_TAB,
+            "Weitere Prüffälle",
+            "Duplikate suchen / melden",
+        ],
+        default=IMPORT_TAB if st.session_state.pop("show_import_tab", False) else None,
+    )
+    with conflicts:
+        _conflict_tab()
+    with imports:
+        _import_tab()
     with review:
         _review_tab()
     with duplicates:
         _duplicates_tab()
-    with imports:
-        _import_tab()
 
 
 def render() -> None:

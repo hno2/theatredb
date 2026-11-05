@@ -8,9 +8,10 @@ import json
 import re
 import unicodedata
 import uuid
+from collections.abc import Collection
 from difflib import SequenceMatcher
 from operator import itemgetter
-from typing import Any
+from typing import Any, get_origin
 from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import String, cast, or_
@@ -97,16 +98,29 @@ def canonical_url(value: str) -> str:
     return urlunsplit(("https", parts.netloc.casefold(), parts.path.rstrip("/"), parts.query, ""))
 
 
-def _digest(value: object) -> str:
+def stable_digest(value: object) -> str:
+    """Hash JSON-compatible values independent of key order."""
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
 
-def _union(left: list, right: list) -> list:
-    return list({_digest(value): value for value in [*left, *right]}.values())
+def union_values(left: list, right: list) -> list:
+    """Combine lists in order without duplicates, including unhashable items."""
+    return list({stable_digest(value): value for value in [*left, *right]}.values())
 
 
-def _snapshot(entity: SQLModel) -> dict[str, Any]:
+def entity_snapshot(entity: SQLModel) -> dict[str, Any]:
+    """Serialize an entity to JSON-compatible values."""
     return entity.model_dump(mode="json")
+
+
+def revalidate[Model: SQLModel](entity: Model, changes: dict[str, Any]) -> Model:
+    """Validate an existing row with changes; legacy NULL list columns count as empty lists."""
+    model: type[Model] = type(entity)
+    data = {**entity_snapshot(entity), **changes}
+    for name, field in model.model_fields.items():
+        if data.get(name) is None and get_origin(field.annotation) is list:
+            data[name] = []
+    return model.model_validate(data)
 
 
 def _kind(value: EntityType | str) -> EntityType:
@@ -149,7 +163,7 @@ def search_entities(kind: EntityType | str, query: str = "", *, limit: int = 50)
                 stmt = stmt.where(label.icontains(query.strip(), autoescape=True))
             else:
                 stmt = stmt.where(model.id == resolve_id(session, kind, entity_id))
-        return [_snapshot(row) for row in session.exec(stmt.order_by(label, col(model.id)).limit(limit)).all()]
+        return [entity_snapshot(row) for row in session.exec(stmt.order_by(label, col(model.id)).limit(limit)).all()]
 
 
 def _source_matches(session: Session, kind: EntityType, source_id: uuid.UUID, context: dict) -> set[uuid.UUID]:
@@ -330,7 +344,7 @@ def _candidates(
                 else "strong"
                 if strong and not conflicts
                 else "review",
-                "record": _snapshot(row),
+                "record": entity_snapshot(row),
             }
         )
     results.sort(
@@ -347,7 +361,8 @@ def find_candidates(
         return _candidates(session, _kind(kind), incoming, context or {}, source_id)
 
 
-def _validate_payload(kind: EntityType, payload: dict, *, complete: bool = False) -> dict:
+def validate_payload(kind: EntityType, payload: dict, *, complete: bool = False) -> dict:
+    """Validate entity fields and return their JSON-compatible representation."""
     model = ENTITY_MODELS[kind]
     unknown = set(payload) - (set(model.model_fields) - {"id"})
     if unknown:
@@ -384,7 +399,7 @@ def propose_record(
     Dependencies reference other approved cases, never implicitly create entities.
     """
     kind = _kind(kind)
-    incoming = _validate_payload(kind, incoming, complete=True)
+    incoming = validate_payload(kind, incoming, complete=True)
     external_url = canonical_url(external_url) if external_url else None
     record_key = record_key or (f"id:{external_id}" if external_id else external_url)
     if not record_key:
@@ -394,7 +409,7 @@ def propose_record(
     if captured_at:
         captured_at = captured_at.astimezone(dt.UTC)
     context = {**(context or {}), "external_id": external_id, "external_url": external_url, "record_key": record_key}
-    key = _digest([kind, str(source_id), record_key, incoming, context, captured_at])
+    key = stable_digest([kind, str(source_id), record_key, incoming, context, captured_at])
     with get_session() as session:
         if session.get(Source, source_id) is None:
             raise ValueError("Source not found")
@@ -435,7 +450,7 @@ def queue_duplicate(
         target, duplicate = _get(session, kind, target_id), _get(session, kind, duplicate_id)
         if target.id == duplicate.id:
             raise ValueError("Select two different records")
-        key = _digest(["duplicate", kind, sorted([str(target.id), str(duplicate.id)])])
+        key = stable_digest(["duplicate", kind, sorted([str(target.id), str(duplicate.id)])])
         existing = session.exec(select(ReconciliationCase).where(ReconciliationCase.key == key)).first()
         if existing:
             return existing
@@ -490,10 +505,13 @@ def list_cases(
     query: str = "",
     limit: int = 200,
     offset: int = 0,
+    exclude_operations: Collection[str] = (),
 ) -> list[dict]:
     """List persistent review cases, including decisions for audit and follow-up."""
     with get_session() as session:
         stmt = select(ReconciliationCase).where(ReconciliationCase.status == status)
+        if exclude_operations:
+            stmt = stmt.where(col(ReconciliationCase.operation).not_in(list(exclude_operations)))
         if kind:
             stmt = stmt.where(ReconciliationCase.entity_type == _kind(kind))
         if query.strip():
@@ -509,7 +527,7 @@ def list_cases(
             else:
                 stmt = stmt.where(ReconciliationCase.id == identity)
         return [
-            _snapshot(case)
+            entity_snapshot(case)
             for case in session.exec(
                 stmt.order_by(col(ReconciliationCase.created_at), col(ReconciliationCase.id))
                 .offset(offset)
@@ -554,7 +572,7 @@ def _references(session: Session, kind: EntityType, entity_id: uuid.UUID) -> lis
 
 def _state(session: Session, kind: EntityType, entity: Entity) -> dict:
     refs = {
-        f"{model.__tablename__}.{field}": sorted((_snapshot(row) for row in rows), key=itemgetter("id"))
+        f"{model.__tablename__}.{field}": sorted((entity_snapshot(row) for row in rows), key=itemgetter("id"))
         for model, field, rows in _references(session, kind, entity.id)
     }
     sources = session.exec(
@@ -564,10 +582,10 @@ def _state(session: Session, kind: EntityType, entity: Entity) -> dict:
         select(SourceRecord).where(SourceRecord.entity_type == kind, SourceRecord.entity_id == entity.id)
     ).all()
     return {
-        "record": _snapshot(entity),
+        "record": entity_snapshot(entity),
         "references": refs,
-        "sources": sorted((_snapshot(row) for row in sources), key=itemgetter("id")),
-        "source_records": sorted((_snapshot(row) for row in mappings), key=itemgetter("id")),
+        "sources": sorted((entity_snapshot(row) for row in sources), key=itemgetter("id")),
+        "source_records": sorted((entity_snapshot(row) for row in mappings), key=itemgetter("id")),
     }
 
 
@@ -671,16 +689,16 @@ def _credit_comparison(session: Session, case: ReconciliationCase, target: Entit
 def _preview(session: Session, case: ReconciliationCase, target_id: uuid.UUID | str | None) -> dict:
     incoming, blocked = _dependencies(session, case)
     target, duplicate = _preview_pair(session, case, target_id)
-    current = _snapshot(target) if target else {}
+    current = entity_snapshot(target) if target else {}
     if duplicate:
-        incoming = _snapshot(duplicate)
+        incoming = entity_snapshot(duplicate)
         incoming.pop("id")
     fields = []
     for field, value in incoming.items():
         if value in EMPTY or current.get(field) == value:
             continue
         old = current.get(field)
-        merged = _union(old or [], value) if isinstance(value, list) else value
+        merged = union_values(old or [], value) if isinstance(value, list) else value
         if merged == old:
             continue
         fields.append(
@@ -707,14 +725,14 @@ def _preview(session: Session, case: ReconciliationCase, target_id: uuid.UUID | 
             credit_targets.append(str(resolve_id(session, EntityType.PERSON, related.target_id)))
     state = [case.id, case.status, case.context, incoming, blocked, credit_targets, target_state, duplicate_state]
     return {
-        "case": _snapshot(case),
+        "case": entity_snapshot(case),
         "current": current,
         "incoming": incoming,
         "fields": fields,
         "blocked": blocked,
         "candidates": candidates,
         "credits": _credit_comparison(session, case, target),
-        "revision": _digest(state),
+        "revision": stable_digest(state),
         "target_id": str(target.id) if target else None,
         "target_state": target_state,
         "duplicate_state": duplicate_state,
@@ -730,13 +748,14 @@ def preview_case(case_id: uuid.UUID | str, *, target_id: uuid.UUID | str | None 
         return _preview(session, case, target_id)
 
 
-def _audit(session: Session, entity: SQLModel, operation: str, actor_id: str | None) -> None:
+def audit_event(session: Session, entity: SQLModel, operation: str, actor_id: str | None) -> None:
+    """Record an SCD2 history event for an entity change."""
     add_scd2_event(
         session,
         entity_name=type(entity).__name__.lower(),
         entity_id=str(entity.model_dump(mode="python")["id"]),
         operation=operation,
-        snapshot=_snapshot(entity),
+        snapshot=entity_snapshot(entity),
         actor_id=actor_id,
     )
 
@@ -824,13 +843,13 @@ def _archive_source(
                 entity_id=target_id,
                 external_id=source.external_id,
                 external_url=source.external_url,
-                payload={"legacy_source": _snapshot(source)},
+                payload={"legacy_source": entity_snapshot(source)},
                 captured_at=None,
             )
         elif record.entity_id not in {source.entity_id, target_id, duplicate_id}:
             raise ValueError("Source identity collision with a third entity; resolve it first")
         archived = record.payload.get("merged_sources", [])
-        snapshot = _snapshot(source)
+        snapshot = entity_snapshot(source)
         if snapshot not in archived:
             record.payload = {**record.payload, "merged_sources": [*archived, snapshot]}
         record.entity_id = target_id
@@ -861,7 +880,7 @@ def _deduplicate_links(session: Session, actor_id: str | None, touched: set[tupl
             for match in matches:
                 key = tuple(canonical_role(getattr(match, f)) if f == "role" else getattr(match, f) for f in fields)
                 if key in seen or (isinstance(match, TextLineage) and match.source_text_id == match.derived_text_id):
-                    _audit(session, match, "delete", actor_id)
+                    audit_event(session, match, "delete", actor_id)
                     session.delete(match)
                 else:
                     seen.add(key)
@@ -886,7 +905,7 @@ def _merge(
     for model, row_id in touched:
         row = session.get(model, row_id)
         if row is not None:
-            _audit(session, row, "update", actor_id)
+            audit_event(session, row, "update", actor_id)
     _deduplicate_links(session, actor_id, touched)
     links = session.exec(
         select(EntitySource).where(
@@ -920,57 +939,69 @@ def _merge(
         redirect.target_id = target.id
         session.add(redirect)
     session.add(EntityRedirect(entity_type=case.entity_type, old_id=duplicate.id, target_id=target.id))
-    _audit(session, duplicate, "delete", actor_id)
+    audit_event(session, duplicate, "delete", actor_id)
     session.delete(duplicate)
     session.flush()
 
 
+def ensure_credit(
+    session: Session,
+    entity: Production | Text,
+    person_id: uuid.UUID,
+    role: str | None,
+    character: str | None,
+    actor_id: str | None,
+) -> bool:
+    """Add a production membership or text contribution unless an equivalent credit exists."""
+    role = canonical_role(role)
+    model, endpoint = (
+        (ProductionMembership, "production_id") if isinstance(entity, Production) else (TextContribution, "text_id")
+    )
+    rows = session.exec(
+        select(model).where(
+            getattr(model, endpoint) == entity.id,
+            model.person_id == person_id,
+        )
+    ).all()
+    if role == "actor" and character:
+        legacy = next(
+            (
+                row
+                for row in rows
+                if isinstance(row, ProductionMembership) and row.role == character and not row.character
+            ),
+            None,
+        )
+        if legacy:
+            legacy.role, legacy.character = "actor", character
+            session.add(legacy)
+            audit_event(session, legacy, "update", actor_id)
+            return True
+    if any(
+        canonical_role(row.role) == role and (not isinstance(row, ProductionMembership) or row.character == character)
+        for row in rows
+    ):
+        return False
+    payload = {endpoint: entity.id, "person_id": person_id, "role": role}
+    if model == ProductionMembership:
+        payload["character"] = character
+    row = model.model_validate(payload)
+    session.add(row)
+    audit_event(session, row, "insert", actor_id)
+    return True
+
+
 def _apply_credits(session: Session, case: ReconciliationCase, entity: Entity, actor_id: str | None) -> None:
+    if not isinstance(entity, (Production, Text)):
+        if case.context.get("credits"):
+            raise ValueError("Credits are supported for productions and texts only")
+        return
     for credit in case.context.get("credits", []):
         person_case = session.get(ReconciliationCase, uuid.UUID(credit["case_id"]))
         if person_case is None or person_case.target_id is None:
             raise ValueError("Approved person case is required")
         person_id = resolve_id(session, EntityType.PERSON, person_case.target_id)
-        role = canonical_role(credit.get("role"))
-        if case.entity_type == EntityType.PRODUCTION:
-            model, endpoint = ProductionMembership, "production_id"
-        elif case.entity_type == EntityType.TEXT:
-            model, endpoint = TextContribution, "text_id"
-        else:
-            raise ValueError("Credits are supported for productions and texts only")
-        rows = session.exec(
-            select(model).where(
-                getattr(model, endpoint) == entity.id,
-                model.person_id == person_id,
-            )
-        ).all()
-        character = credit.get("character")
-        if role == "actor" and character:
-            legacy = next(
-                (
-                    row
-                    for row in rows
-                    if isinstance(row, ProductionMembership) and row.role == character and not row.character
-                ),
-                None,
-            )
-            if legacy:
-                legacy.role, legacy.character = "actor", character
-                session.add(legacy)
-                _audit(session, legacy, "update", actor_id)
-                continue
-        if any(
-            canonical_role(row.role) == role
-            and (not isinstance(row, ProductionMembership) or row.character == character)
-            for row in rows
-        ):
-            continue
-        payload = {endpoint: entity.id, "person_id": person_id, "role": role}
-        if model == ProductionMembership:
-            payload["character"] = character
-        row = model.model_validate(payload)
-        session.add(row)
-        _audit(session, row, "insert", actor_id)
+        ensure_credit(session, entity, person_id, credit.get("role"), credit.get("character"), actor_id)
 
 
 def approve_case(
@@ -1007,18 +1038,18 @@ def approve_case(
         model = ENTITY_MODELS[case.entity_type]
         if target_id:
             entity = _get(session, case.entity_type, target_id)
-            before = _snapshot(entity)
+            before = entity_snapshot(entity)
             changes = {field: options[field]["value"] for field in selected}
-            validated = model.model_validate({**before, **changes})
+            validated = revalidate(entity, changes)
             for field in changes:
                 setattr(entity, field, getattr(validated, field))
-            if _snapshot(entity) != before:
+            if entity_snapshot(entity) != before:
                 session.add(entity)
-                _audit(session, entity, "update", actor_id)
+                audit_event(session, entity, "update", actor_id)
         else:
             entity = model.model_validate(preview["incoming"])
             session.add(entity)
-            _audit(session, entity, "insert", actor_id)
+            audit_event(session, entity, "insert", actor_id)
         session.flush()
         if case.operation == "merge":
             _merge(session, case, entity, preview["duplicate_state"]["record"]["id"], actor_id)
@@ -1030,7 +1061,7 @@ def approve_case(
             **case.context,
             "decision": {
                 "before": preview["current"],
-                "after": _snapshot(entity),
+                "after": entity_snapshot(entity),
                 "fields": selected,
                 "duplicate": preview["duplicate_state"],
             },

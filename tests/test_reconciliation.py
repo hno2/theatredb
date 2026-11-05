@@ -10,7 +10,6 @@ from streamlit.testing.v1 import AppTest
 
 from backend import user_management
 from backend.entity_management import get_entity_graph
-from backend.ingestion.staged_to_db import import_staged_productions, stage_records
 from backend.models import (
     Award,
     AwardNomination,
@@ -101,115 +100,6 @@ def approve(
 @pytest.fixture
 def source(db) -> Source:
     return save(db, Source(name="theatre.example"))[0]
-
-
-def test_staging_only_creates_cases_and_is_idempotent(db, source) -> None:
-    records = [
-        {
-            "title": "Hamlet",
-            "url": "https://theatre.example/p/1/",
-            "premiere": "2026-02-14",
-            "author": "William Shakespeare",
-            "memberships": [
-                {"name": "Director One", "type": "director", "role": "Regie"},
-                {"name": "Actor One", "type": "actor", "role": "Hamlet", "description": "Bio"},
-            ],
-        }
-    ]
-    kwargs = {"source_name": source.name, "organization_name": "Theatre", "actor_id": "test", "captured_at": CAPTURE}
-    result = stage_records(records, **kwargs)
-    assert result == stage_records(records, **kwargs)
-    assert count(db, ReconciliationCase) == 6
-    assert all(count(db, model) == 0 for model in ENTITY_MODELS.values())
-    production_case = result["production"][0]
-    assert preview_case(production_case)["blocked"]
-    for kind in ("organization", "person", "text", "production"):
-        for case_id in result[kind]:
-            preview = preview_case(case_id)
-            approve_case(case_id, revision=preview["revision"], actor_id="test", allow_create=True)
-    assert count(db, Production) == 1
-    assert count(db, Person) == 3
-    assert count(db, TextContribution) == 1
-    with Session(db) as session:
-        actor = session.exec(select(ProductionMembership).where(ProductionMembership.role == "actor")).one()
-        assert actor.character == "Hamlet"
-        assert session.exec(select(Person).where(Person.name == "Actor One")).one().description == "Bio"
-    history = count(db, SCD2History)
-    assert stage_records(records, **kwargs) == result
-    assert count(db, SCD2History) == history
-    assert not list_cases()
-
-
-def test_staging_current_person_and_production_fields_survive_review(db, source) -> None:
-    cases = stage_records(
-        [
-            {
-                "title": "Current fields",
-                "url": "https://theatre.example/p/current",
-                "tags": ["drama"],
-                "critics": ["https://reviews.example/current"],
-                "memberships": [
-                    {
-                        "name": "Multi-role Person",
-                        "type": ["actor", "director"],
-                        "role": "Regie",
-                        "url": "https://theatre.example/people/1",
-                        "urls": ["https://profile.example/1"],
-                        "born": "1980-01-02",
-                        "died": "2025-03-04",
-                        "nationality": "Example",
-                    },
-                    {"name": "Actor", "type": "actor", "role": "source label", "character": "Hamlet"},
-                ],
-            }
-        ],
-        source_name=source.name,
-        organization_name="Theatre",
-        actor_id="test",
-    )
-    for kind in ("organization", "person", "text", "production"):
-        for case_id in cases[kind]:
-            preview = preview_case(case_id)
-            approve_case(case_id, revision=preview["revision"], actor_id="test", allow_create=True)
-    with Session(db) as session:
-        person = session.exec(select(Person).where(Person.name == "Multi-role Person")).one()
-        assert person.type == ["actor", "director"]
-        assert person.born == dt.date(1980, 1, 2)
-        assert person.died == dt.date(2025, 3, 4)
-        assert person.nationality == "Example"
-        assert person.urls == ["https://theatre.example/people/1", "https://profile.example/1"]
-        production = session.exec(select(Production)).one()
-        assert production.tags == ["drama"]
-        assert production.critics == ["https://reviews.example/current"]
-        assert (
-            session.exec(select(ProductionMembership).where(ProductionMembership.person_id == person.id)).one().role
-            == "director"
-        )
-        assert (
-            session.exec(select(ProductionMembership).where(ProductionMembership.role == "actor")).one().character
-            == "Hamlet"
-        )
-
-
-def test_staging_validates_every_record_before_creating_source_or_cases(db) -> None:
-    with pytest.raises(ValueError):
-        stage_records(
-            [
-                {"title": "Valid", "url": "https://theatre.example/1"},
-                {
-                    "title": "Invalid",
-                    "url": "https://theatre.example/2",
-                    "memberships": [
-                        {"name": "Person", "url": "javascript:alert(1)"},
-                    ],
-                },
-            ],
-            source_name="new-source",
-            organization_name="Theatre",
-            actor_id="test",
-        )
-    assert count(db, Source) == 0
-    assert count(db, ReconciliationCase) == 0
 
 
 def test_production_matching_requires_org_and_directors(db) -> None:
@@ -474,16 +364,6 @@ def test_invalid_payloads_do_not_create_records(db, source) -> None:
     assert count(db, ReconciliationCase) == 0
 
 
-def test_import_requires_organization_and_infers_capture_date(db, tmp_path) -> None:
-    path = tmp_path / "20260607_productions.json"
-    path.write_text('[{"title": "Work", "url": "https://theatre.example/1"}]')
-    with pytest.raises(ValueError, match="organization-name"):
-        import_staged_productions(json_path=path, actor_id="test")
-    result = import_staged_productions(json_path=path, actor_id="test", organization_name="Theatre")
-    case = preview_case(result["production"][0])["case"]
-    assert case["captured_at"].startswith("2026-06-07")
-
-
 @pytest.mark.parametrize(
     ("raw", "expected"), [("Regie", "director"), ("Inszenierung", "director"), ("creator", "author")]
 )
@@ -507,57 +387,6 @@ def test_review_ui_empty_and_manual_submission(db) -> None:
     app.run()
     assert not app.exception
     assert any("Genehmigen" in button.label and button.disabled for button in app.button)
-
-
-def test_staged_enrichment_reuses_existing_theapolis_graph(db, source) -> None:
-    org, director, author, text = save(
-        db,
-        Organization(name="Theatre"),
-        Person(name="Director", type=["director"]),
-        Person(name="Author", type=["author"]),
-        Text(title="Hamlet"),
-    )
-    prod = save(db, Production(name="Hamlet", organization_id=org.id, text_id=text.id))[0]
-    save(
-        db,
-        ProductionMembership(production_id=prod.id, person_id=director.id, role="director"),
-        ProductionMembership(production_id=prod.id, person_id=author.id, role="creator"),
-        TextContribution(text_id=text.id, person_id=author.id, role="author"),
-    )
-    records = [
-        {
-            "title": "Hamlet",
-            "url": "https://theatre.example/p/1",
-            "description": "Official description",
-            "premiere": "2026-02-14",
-            "author": "Author",
-            "memberships": [{"name": "Director", "type": "director", "role": "Regie"}],
-        }
-    ]
-    cases = stage_records(
-        records, source_name=source.name, organization_name="Theatre", actor_id="test", captured_at=CAPTURE
-    )
-    identities = {"organization": org.id, "text": text.id, "production": prod.id}
-    for kind in ("organization", "person", "text", "production"):
-        for case_id in cases[kind]:
-            preview = preview_case(case_id)
-            if kind == "person":
-                target = director.id if preview["incoming"]["name"] == "Director" else author.id
-            else:
-                target = identities[kind]
-            preview = preview_case(case_id, target_id=target)
-            if kind == "production":
-                assert preview["candidates"][0]["recommendation"] == "strong"
-            approve_case(case_id, revision=preview["revision"], target_id=target, actor_id="test")
-    assert count(db, Organization) == 1
-    assert count(db, Person) == 2
-    assert count(db, Text) == 1
-    assert count(db, Production) == 1
-    assert count(db, ProductionMembership) == 2
-    assert count(db, TextContribution) == 1
-    data = get_entity_graph(Production, str(prod.id))
-    assert data["description"] == "Official description"
-    assert data["premiere"].startswith("2026-02-14")
 
 
 def test_matching_uses_approved_person_identity_not_scraped_spelling(db, source) -> None:
