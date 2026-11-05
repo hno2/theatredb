@@ -1,5 +1,5 @@
-## Install 
-### Docker 
+## Install
+### Docker
 ### Local Usage
 The app loads database settings from the project-root `.env` file, regardless of
 the working directory. Existing environment variables are not overwritten.
@@ -156,8 +156,13 @@ unusable source links are indicated explicitly. Production titles are searchable
 long lists scroll within the production tab, while sources have their own tab.
 ## Contribution
 
+Pull requests run the **PR checks** workflow with Python 3.14 and locked uv
+dependencies, including all dependency groups. `prek` selects files changed
+between the PR base and head; hooks configured with `pass_filenames: false`
+(including Pyrefly) still run their repository-wide checks. The full pytest suite
+runs even if hooks fail, provided dependency installation succeeded.
 
 ## Planned Features
-- [ ] 
+- [ ]
 - [ ] Actual Dates of performances
-- [ ] Crawl all Staatstheater/Stadttheater for new info weekly 
+- [ ] Crawl all Staatstheater/Stadttheater for new info weekly

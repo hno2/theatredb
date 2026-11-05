@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
 import streamlit as st
+from streamlit.user_info import UserInfoProxy
+
+from backend.user_management import init_db
 
 from backend.user_management import init_db
 
@@ -10,7 +13,12 @@ def _initialize_database() -> None:
     init_db()
 
 
-def _get_effective_user() -> SimpleNamespace:
+@st.cache_resource
+def _initialize_database() -> None:
+    init_db()
+
+
+def _get_effective_user() -> UserInfoProxy | SimpleNamespace:
     real_user = st.user
     if getattr(real_user, "is_logged_in", False):
         return real_user

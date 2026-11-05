@@ -55,8 +55,8 @@ extend-select = [
   "W",    # pycodestyle (warning)
 ]
 ignore = [
-  "D100",   # Missing docstring in public module
-  "D104",   # Missing docstring in public package
+  "undocumented-public-module",
+  "undocumented-public-package",
   "PLR",    # pylint refactor
 ]
 preview = true
@@ -64,10 +64,9 @@ preview = true
 [tool.ruff.lint.per-file-ignores]
 
 "tests/*" = [
-  "PLC2701", # Private name import from external module
-  "S101", # Use of assert detected
-  "D103", # Docstring
-  "ANN",
+  "import-private-name",
+  "assert",
+  "undocumented-public-function",
 ]
 [tool.ruff.lint.pydocstyle]
 convention = "google"

@@ -3,14 +3,14 @@ from __future__ import annotations
 from typing import Any, TypeVar, cast
 
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.orm import InstrumentedAttribute, Mapper
 from sqlmodel import Session, SQLModel, func, select
 
 from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
 
-from .models import EntitySource
+from .models import EntitySource, EntityType
 
 ModelT = TypeVar("ModelT", bound=SQLModel)
 
@@ -24,6 +24,10 @@ def _entity_identity(entity: SQLModel) -> tuple[str, str]:
     """Create a stable identity tuple for the entity based on its class name and id."""
     data = entity.model_dump(mode="python")
     return (entity.__class__.__name__, str(data.get("id", id(entity))))
+
+
+def _entity_id(entity: SQLModel) -> str:
+    return str(entity.model_dump(mode="python")["id"])
 
 
 def _serialize_entity_graph(
@@ -40,7 +44,7 @@ def _serialize_entity_graph(
         return data
 
     seen.add(ident)
-    mapper = sa_inspect(entity.__class__)
+    mapper = cast(Mapper[Any], sa_inspect(entity.__class__))
     for rel in mapper.relationships:
         rel_value = getattr(entity, rel.key)
         if rel_value is None:
@@ -59,15 +63,15 @@ def _serialize_entity_graph(
 
 
 def _resolve_order_by[ModelT: SQLModel](
-    model_cls: type[ModelT], order_by: str | InstrumentedAttribute | None = None
-) -> InstrumentedAttribute | None:
+    model_cls: type[ModelT], order_by: str | InstrumentedAttribute[Any] | None = None
+) -> InstrumentedAttribute[Any] | None:
     """Resolve `order_by` into a SQLModel column/expression.
 
     Accepts either a SQLAlchemy column/expression or a field name string.
     Falls back to `name`, then `title`, then `id` when field is missing.
     """
     if order_by is not None and not isinstance(order_by, str):
-        return cast(InstrumentedAttribute[Any], order_by)
+        return order_by
     candidates = ([order_by] if order_by is not None else []) + ["name", "title", "id"]
     for field in candidates:
         value = getattr(model_cls, field, None)
@@ -76,7 +80,9 @@ def _resolve_order_by[ModelT: SQLModel](
     return None
 
 
-def list_entities[ModelT: SQLModel](model_cls: type[ModelT], order_by: str | None = None) -> list[ModelT]:
+def list_entities[ModelT: SQLModel](
+    model_cls: type[ModelT], order_by: str | InstrumentedAttribute[Any] | None = None
+) -> list[ModelT]:
     """List all entities of the given type, optionally ordered by a specified field."""
     with get_session() as session:
         stmt = select(model_cls)
@@ -90,7 +96,7 @@ def list_entities_where[ModelT: SQLModel](
     model_cls: type[ModelT],
     *,
     filter_field: str,
-    filter_value: Any,  # noqa: ANN401
+    filter_value: Any,  # ruff: ignore[any-type]
     order_by: str | None = "id",
 ) -> list[ModelT]:
     """List entities of the given type filtered by a field value, optionally ordered."""
@@ -159,7 +165,7 @@ def create_entity[ModelT: SQLModel](
                 stmt = stmt.where(getattr(model_cls, key) == value)
             existing = session.exec(stmt.limit(1)).first()
             if existing is not None:
-                _attach_missing_sources(session, model_cls, existing.id, source_links)
+                _attach_missing_sources(session, model_cls, _entity_id(existing), source_links)
                 session.commit()
                 session.refresh(existing)
                 return existing
@@ -168,12 +174,13 @@ def create_entity[ModelT: SQLModel](
         session.add(entity)
         session.flush()
 
-        _attach_missing_sources(session, model_cls, entity.id, source_links)
+        entity_id = _entity_id(entity)
+        _attach_missing_sources(session, model_cls, entity_id, source_links)
 
         add_scd2_event(
             session,
             entity_name=model_cls.__name__.lower(),
-            entity_id=str(entity.id),
+            entity_id=entity_id,
             operation="insert",
             snapshot=_snapshot(entity),
             actor_id=actor_id,
@@ -191,9 +198,13 @@ def _attach_missing_sources[ModelT: SQLModel](
 ) -> None:
     """Attach source links that don't already exist on the entity."""
     for link in source_links or []:
+        entity_type = getattr(model_cls, "_entity_type", None)
+        if not isinstance(entity_type, EntityType):
+            raise TypeError(f"{model_cls.__name__} cannot have sources attached")
+
         already_exists = session.exec(
             select(EntitySource).where(
-                EntitySource.entity_type == model_cls._entity_type,
+                EntitySource.entity_type == entity_type,
                 EntitySource.entity_id == entity_id,
                 EntitySource.source_id == link["source_id"],
             )
@@ -205,7 +216,7 @@ def _attach_missing_sources[ModelT: SQLModel](
         session.add(
             EntitySource(
                 source_id=link["source_id"],
-                entity_type=model_cls._entity_type,
+                entity_type=entity_type,
                 entity_id=entity_id,
                 external_id=link.get("external_id"),
                 external_url=link.get("external_url"),
@@ -234,7 +245,7 @@ def update_entity[ModelT: SQLModel](
         add_scd2_event(
             session,
             entity_name=model_cls.__name__.lower(),
-            entity_id=str(entity.id),
+            entity_id=_entity_id(entity),
             operation="update",
             snapshot=_snapshot(entity),
             actor_id=actor_id,
@@ -259,7 +270,7 @@ def delete_entity[ModelT: SQLModel](
         add_scd2_event(
             session,
             entity_name=model_cls.__name__.lower(),
-            entity_id=str(entity.id),
+            entity_id=_entity_id(entity),
             operation="delete",
             snapshot=_snapshot(entity),
             actor_id=actor_id,
