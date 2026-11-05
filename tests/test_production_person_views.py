@@ -1,4 +1,5 @@
 from html.parser import HTMLParser
+from pathlib import Path
 from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
@@ -241,7 +242,7 @@ def test_people_productions_query_is_scoped_distinct_and_detached(monkeypatch):
 
 def test_missing_detail_stops_before_render(monkeypatch):
     monkeypatch.setattr(entity_management, "get_entity_graph", Mock(side_effect=ValueError("not found")))
-    app = AppTest.from_file("frontend/views/detail.py")
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "frontend" / "views" / "detail.py")
     app.query_params.update(kind="production", id=str(UUID(int=1)))
     app.run()
     assert not app.exception
