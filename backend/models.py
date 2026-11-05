@@ -196,7 +196,7 @@ class Organization(SourceMixin, SQLModel, table=True):
     memberships: list[OrganizationMembership] = Relationship(back_populates="organization")
     founded_year: int | None = None
     closed_year: int | None = None
-    venues: list[dict[str, str]] = Field(default_factory=list, sa_column=Column(JSON))  # format {"Name": "Seats"}
+    venues: dict[str, int] | None = Field(default=None, sa_column=Column(JSON))  # format {"Name": "Seats"}
 
 
 class ProductionRole(StrEnum):
@@ -211,6 +211,7 @@ class ProductionRole(StrEnum):
     COSTUME_DESIGNER = "costume_designer"
     VIDEO_DESIGNER = "video_designer"
     COREOGRAPHER = "choreographer"
+    THEATRE_EDUCATOR = "theatre_educator"
     OTHER = "other"
     #    "author",
 

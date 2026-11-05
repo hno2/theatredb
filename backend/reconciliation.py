@@ -73,6 +73,8 @@ ROLE_ALIASES = {
     "fassung": "adapter",
     "musik": "composer",
     "komposition": "composer",
+    "theaterpädagoge": "theatre_educator",
+    "Vermittlung": "theatre_educator",
 }
 
 

@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import uuid
 from dataclasses import dataclass
 from typing import Any, cast, get_args, get_origin
@@ -114,6 +115,8 @@ _KIND_MAP: dict[object, str] = {
 def _guess_kind(t: object) -> str:
     if get_origin(t) is list and get_args(t) == (str,):
         return "list_text"
+    if get_origin(t) is dict:
+        return "json"
     return _KIND_MAP.get(t, "text")  # type: ignore[arg-type]
 
 
@@ -264,6 +267,24 @@ def _render_list_text(field: _FieldUI, d: list[str] | None, key: str) -> FormVal
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
+def _render_json(field: _FieldUI, d: dict | None, key: str) -> FormValue:
+    json_str = json.dumps(d if isinstance(d, dict) else {}, indent=2)
+    text = st.text_area(
+        field.label,
+        value=json_str,
+        key=key,
+        height=150,
+        help="Enter valid JSON",
+    )
+    if not text.strip():
+        return None if field.optional else ({} if d is None else d)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        st.error(f"Invalid JSON: {e}")
+        return d
+
+
 def _render_text(field: _FieldUI, d: str | None, key: str) -> FormValue:
     return st.text_input(field.label, value="" if d is None else str(d), key=key).strip() or None
 
@@ -284,6 +305,8 @@ def _render_field(field: _FieldUI, defaults: dict[str, Any], *, form_key: str, e
             val = _render_multiselect(field, d, key)
         case "list_text":
             val = _render_list_text(field, d, key)
+        case "json":
+            val = _render_json(field, d, key)
         case "fk_select":
             val = _render_fk_select(field, d, form_key=form_key)
         case _:
