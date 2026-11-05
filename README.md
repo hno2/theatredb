@@ -31,6 +31,13 @@ Open **Verwaltung → Datenabgleich & Duplikate**:
    People are matched by source profile URL, existing cast of the production, then a
    unique name (namesakes prefer the theatre's people); otherwise created. Texts are
    reused when the same author already has a text of that title.
+   Every upload is logged (`importrun`: file, scrape scope from the snapshot filename,
+   capture date, outcome counts). Selecting a theatre shows its latest data date and
+   scope, how many productions have an uploaded source / a source from the theatre's
+   own website (stored URL, otherwise the scraped site) and how complete description,
+   premiere, direction, cast and text are. Below, **Scraping-Stand aller Theater**
+   shows how many theatres (with productions) have recent data (≤ 30/90/365 days),
+   stalest first.
 2. **Produktionskonflikte** shows upload and best-fitting production side by side
    (theatre always shown, no UUIDs). Rows are coloured: red = conflict, green =
    added/extended, yellow = new person. Pick another production of the same theatre
@@ -71,8 +78,8 @@ rejected; refresh it and review again. Detail-page lookups follow old UUID
 redirects. Merge is not a one-click reversible operation; back up the database
 before large cleanup runs.
 
-The app and `init_db()` add the three new tables (`reconciliationcase`,
-`sourcerecord`, `entityredirect`) without rewriting existing domain tables.
+The app and `init_db()` add the new tables (`reconciliationcase`,
+`sourcerecord`, `entityredirect`, `importrun`) without rewriting existing domain tables.
 The person biography field is a required schema prerequisite. For an existing
 PostgreSQL database without that column, apply this additive migration before
 starting the app (fresh databases already include it):

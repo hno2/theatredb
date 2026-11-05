@@ -11,6 +11,7 @@ from pandas.io.formats.style import Styler
 from sqlalchemy.exc import SQLAlchemyError
 
 from backend.entity_management import list_entities
+from backend.import_status import FIELDS, scrape_overview, theatre_status
 from backend.models import Organization, Source
 from backend.production_import import (
     OPERATION,
@@ -126,6 +127,8 @@ def _import_tab() -> None:
         format_func=theatre_labels.__getitem__,
         key="upload_theatre",
     )
+    if theatre:
+        _theatre_status(theatre)
     uploaded = st.file_uploader("Produktionsdatei (JSON)", type=["json"])
     records = None
     if uploaded is not None:
@@ -155,11 +158,17 @@ def _import_tab() -> None:
                 source_name=source,
                 actor_id=_actor(),
                 captured_at=dt.datetime.combine(capture, dt.time(), tzinfo=dt.UTC) if capture else None,
+                file_name=uploaded.name if uploaded else None,
             )
         st.session_state["upload_result"] = (by_id[theatre].name, result)
         # Rerun so the conflict tab (rendered before this tab) shows the new cases; stay on this tab.
         st.session_state["show_import_tab"] = True
         st.rerun()
+    _import_summary()
+    _scrape_overview()
+
+
+def _import_summary() -> None:
     saved = st.session_state.get("upload_result")
     if saved:
         theatre_name, result = saved
@@ -178,6 +187,126 @@ def _import_tab() -> None:
                     st.write("\n".join(f"- {name} · {theatre_name}" for name in result[key]))
         if result["review"]:
             st.info("Offene Konflikte im Reiter **Produktionskonflikte** bearbeiten.")
+
+
+SCOPES = {"all": "vollständig"}
+FRESHNESS = ((30, "🟢"), (90, "🟡"))
+
+
+def _scope(scope: str | None) -> str:
+    if scope is None:
+        return "Umfang unbekannt"
+    return SCOPES.get(scope, f"Teil-Scrape (max. {scope.removeprefix('limit-')})")
+
+
+def _age(days: int) -> str:
+    icon = next((icon for limit, icon in FRESHNESS if days <= limit), "🔴")
+    return f"{icon} heute" if days <= 0 else f"{icon} vor {days} Tagen"
+
+
+def _share(count: int, total: int) -> str:
+    return f"{count} ({count / total:.0%})" if total else "-"
+
+
+def _theatre_status(organization_id: str) -> None:
+    status = theatre_status(organization_id)
+    latest = status["latest"]
+    with st.container(border=True):
+        if latest is None:
+            st.markdown(f"**{status['theatre']}**: noch kein Upload.")
+        else:
+            date_label = "Stand" if latest["captured_known"] else "Hochgeladen (Stand unbekannt)"
+            st.markdown(
+                f"**{status['theatre']}** · {date_label} {latest['data_date']:%d.%m.%Y} ({_age(latest['age_days'])}) · "
+                f"{_scope(latest['scope'])} · {latest['total']} Produktionen · Quelle {latest['source']}"
+            )
+        total = status["productions"]
+        columns = st.columns(4)
+        columns[0].metric("Produktionen", total)
+        columns[1].metric("mit Upload-Quelle", _share(status["scraped"], total))
+        columns[2].metric(
+            "von eigener Website",
+            _share(status["own_website"], total),
+            help="Website: " + (", ".join(status["own_hosts"]) or "unbekannt - beim Theater hinterlegen"),
+        )
+        columns[3].metric("offene Konflikte", status["open_conflicts"])
+        if total:
+            st.dataframe(
+                pd.DataFrame(
+                    {"Feld": list(FIELDS.values()), "Vollständig": [n / total for n in status["fields"].values()]}
+                ),
+                column_config={
+                    "Vollständig": st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1)
+                },
+                hide_index=True,
+                width="stretch",
+            )
+        if status["runs"]:
+            with st.expander(f"Bisherige Uploads ({len(status['runs'])})"):
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Stand": run["data_date"].strftime("%d.%m.%Y"),
+                                "Hochgeladen": run["imported_at"].strftime("%d.%m.%Y %H:%M"),
+                                "Umfang": _scope(run["scope"]),
+                                "Produktionen": run["total"],
+                                "Ergänzt": run["merged"],
+                                "Neu": run["created"],
+                                "Konflikte": run["review"],
+                                "Unverändert": run["unchanged"],
+                                "Datei": run["file_name"] or "",
+                            }
+                            for run in status["runs"]
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+
+
+def _scrape_overview() -> None:
+    st.divider()
+    st.subheader("Scraping-Stand aller Theater")
+    days = st.segmented_control(
+        "Als aktuell gilt",
+        [30, 90, 365],
+        default=90,
+        format_func=lambda value: f"≤ {value} Tage",
+        key="overview_days",
+    )
+    overview = scrape_overview(recent_days=days or 90)
+    columns = st.columns(3)
+    columns[0].metric(f"Aktuell (≤ {overview['recent_days']} Tage)", _share(overview["recent"], overview["theatres"]))
+    columns[1].metric("Jemals hochgeladen", _share(overview["uploaded"], overview["theatres"]))
+    columns[2].metric("Theater mit Produktionen", overview["theatres"])
+    if not overview["rows"]:
+        st.info("Noch keine Uploads.")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Theater": row["theatre"],
+                    "Stand": row["latest"]["data_date"].strftime("%d.%m.%Y"),
+                    "Alter": _age(row["latest"]["age_days"]),
+                    "Umfang": _scope(row["latest"]["scope"]),
+                    "Produktionen": row["productions"],
+                    "mit Upload-Quelle": row["scraped"] / row["productions"] if row["productions"] else 0.0,
+                    "eigene Website": row["own_website"] / row["productions"] if row["productions"] else 0.0,
+                    "Konflikte": row["open_conflicts"],
+                }
+                for row in overview["rows"]
+            ]
+        ),
+        column_config={
+            column: st.column_config.ProgressColumn(format="percent", min_value=0, max_value=1)
+            for column in ("mit Upload-Quelle", "eigene Website")
+        },
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption("Älteste zuerst. 🟢 ≤ 30 Tage · 🟡 ≤ 90 Tage · 🔴 älter. Stand = Erfassungsdatum der Daten.")
 
 
 def _format(field: str, value: object) -> str:

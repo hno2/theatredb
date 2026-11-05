@@ -145,6 +145,25 @@ class SourceRecord(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("source_id", "entity_type", "record_key"),)
 
 
+class ImportRun(SQLModel, table=True):
+    """One uploaded theatre snapshot: what was imported, how much of the site it covered and the outcome."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    organization_id: uuid.UUID = Field(foreign_key="organization.id", index=True)
+    source_id: uuid.UUID = Field(foreign_key="source.id")
+    file_name: str | None = None
+    scope: str | None = None  # "all", "limit-<n>" or None when unknown
+    website: str | None = None  # host the production URLs came from
+    captured_at: dt.datetime | None = None
+    imported_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC), index=True)
+    actor_id: str | None = None
+    total: int = 0
+    merged: int = 0
+    created: int = 0
+    review: int = 0
+    unchanged: int = 0
+
+
 class EntityRedirect(SQLModel, table=True):
     """Retain the identity of an entity after an approved duplicate merge."""
 

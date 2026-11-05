@@ -14,7 +14,9 @@ People and texts are matched against existing records before anything is created
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
+from collections import Counter
 from difflib import SequenceMatcher
 from operator import itemgetter
 from urllib.parse import urlsplit
@@ -26,6 +28,7 @@ from backend.ingestion.staging import validate_records
 from backend.models import (
     EntitySource,
     EntityType,
+    ImportRun,
     Organization,
     Person,
     Production,
@@ -777,11 +780,13 @@ def ingest_records(
     actor_id: str | None,
     captured_at: dt.datetime | None = None,
     source_base_url: str | None = None,
+    file_name: str | None = None,
 ) -> dict[str, list[str]]:
     """Import an uploaded theatre snapshot atomically; return production titles per outcome.
 
     Outcomes: ``merged`` (existing production enriched), ``unchanged``, ``created`` and
     ``review`` (conflict or similar title queued for :func:`production_review`).
+    Every call is logged as an :class:`ImportRun` for the scraping overview.
     """
     if not source_name.strip():
         raise ValueError("A source name is required")
@@ -817,8 +822,37 @@ def ingest_records(
                 actor_id=actor_id,
             )
             result[outcome].append(item["incoming"]["name"])
+        hosts = Counter(url_host(item["record_key"]) for item in items)
+        session.add(
+            ImportRun(
+                organization_id=organization.id,
+                source_id=source.id,
+                file_name=file_name,
+                scope=scrape_scope(file_name),
+                website=hosts.most_common(1)[0][0] if hosts else None,
+                captured_at=captured_at,
+                actor_id=actor_id,
+                total=len(items),
+                merged=len(result["merged"]),
+                created=len(result["created"]),
+                review=len(result["review"]),
+                unchanged=len(result["unchanged"]),
+            )
+        )
         session.commit()
     return result
+
+
+def url_host(url: str | None) -> str | None:
+    """Lower-case host without ``www.`` for comparing a URL with a theatre's website."""
+    host = urlsplit(url or "").hostname
+    return host.removeprefix("www.") if host else None
+
+
+def scrape_scope(file_name: str | None) -> str | None:
+    """Read the scrape scope (``all`` or ``limit-<n>``) from a snapshot filename written by the scraper."""
+    match = re.search(r"_(all|limit-\d+)-(?:no-)?people-[0-9a-f]+_productions\.json$", file_name or "")
+    return match[1] if match else None
 
 
 # --- conflict review ------------------------------------------------------------------------------------------

@@ -58,6 +58,7 @@ def import_staged_productions(
         actor_id=actor_id,
         source_base_url=source_base_url,
         captured_at=captured_at,
+        file_name=json_path.name,
     )
     print({key: len(value) for key, value in result.items()})
     return result

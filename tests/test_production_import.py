@@ -9,9 +9,11 @@ from sqlmodel import Session, SQLModel, create_engine, select, update
 from streamlit.testing.v1 import AppTest
 
 from backend import user_management
+from backend.import_status import scrape_overview, theatre_status
 from backend.ingestion.staged_to_db import import_staged_productions
 from backend.models import (
     EntitySource,
+    ImportRun,
     Organization,
     Person,
     Production,
@@ -29,6 +31,7 @@ from backend.production_import import (
     production_review,
     reject_production_case,
     resolve_production_case,
+    scrape_scope,
     title_similarity,
 )
 
@@ -343,3 +346,73 @@ def test_upload_ui_updates_conflict_count_without_reload(db, theatre) -> None:
     assert not app.exception
     assert app.tabs[0].label == "Produktionskonflikte (1)"
     assert any("Import für Staatstheater abgeschlossen" in element.value for element in app.success)
+
+
+FULL_SCRAPE = "20260607_120000_000000_all-people-3c26446d1d4f_productions.json"
+
+
+def test_scrape_scope_from_snapshot_filename() -> None:
+    assert scrape_scope(FULL_SCRAPE) == "all"
+    assert scrape_scope("20261105_161042_783216_limit-1-no-people-3c26446d1d4f_productions.json") == "limit-1"
+    assert scrape_scope("20260607_productions.json") is None
+    assert scrape_scope(None) is None
+
+
+def test_theatre_status_reports_latest_upload_coverage_and_fields(db, theatre) -> None:
+    existing_hamlet(db, theatre)  # linked to another source only
+    save(db, Production(name="Ohne Quelle", organization_id=theatre.id))
+    macbeth = {"title": "Macbeth", "url": "https://www.theatre.example/p/macbeth", "description": "Neu"}
+    ingest_records(
+        [HAMLET, macbeth],
+        organization_id=theatre.id,
+        source_name="theatre.example",
+        actor_id="test",
+        captured_at=CAPTURE,
+        file_name=FULL_SCRAPE,
+    )
+    status = theatre_status(theatre.id, now=CAPTURE + dt.timedelta(days=10))
+    latest = status["latest"]
+    assert (latest["scope"], latest["total"], latest["merged"], latest["created"]) == ("all", 2, 1, 1)
+    assert latest["data_date"] == CAPTURE
+    assert latest["age_days"] == 10
+    assert latest["source"] == "theatre.example"
+    assert status["own_hosts"] == ["theatre.example"]  # no website stored: the scraped site counts
+    assert (status["productions"], status["scraped"], status["own_website"]) == (3, 2, 2)
+    assert status["fields"] == {"description": 2, "premiere": 1, "director": 1, "cast": 1, "text": 2}
+    assert rows(db, ImportRun)[0].file_name == FULL_SCRAPE
+
+
+def test_own_website_uses_stored_theatre_url(db, theatre) -> None:
+    with Session(db) as session:
+        stored = session.get(Organization, theatre.id)
+        assert stored is not None
+        stored.url = "https://www.other-site.example/"
+        session.add(stored)
+        session.commit()
+    upload(theatre, HAMLET)
+    status = theatre_status(theatre.id)
+    assert status["own_hosts"] == ["other-site.example"]
+    assert (status["scraped"], status["own_website"]) == (1, 0)
+
+
+def test_overview_counts_theatres_with_recent_uploads(db, theatre) -> None:
+    stale, never = save(db, Organization(name="Altes Theater"), Organization(name="Nie hochgeladen"))
+    save(db, Production(name="Alt", organization_id=never.id))
+    upload(theatre, HAMLET, captured_at=CAPTURE)
+    upload(stale, {**HAMLET, "url": "https://old.example/p/hamlet"}, captured_at=CAPTURE - dt.timedelta(days=200))
+    overview = scrape_overview(recent_days=90, now=CAPTURE + dt.timedelta(days=5))
+    assert (overview["theatres"], overview["uploaded"], overview["recent"]) == (3, 2, 1)
+    assert [row["theatre"] for row in overview["rows"]] == ["Altes Theater", "Staatstheater"]
+
+
+def test_upload_tab_shows_theatre_status_and_overview(db, theatre) -> None:
+    upload(theatre, HAMLET, captured_at=dt.datetime.now(dt.UTC))
+    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app.selectbox(key="upload_theatre").set_value(str(theatre.id)).run()
+    assert not app.exception
+    markdown = " ".join(element.value for element in app.markdown)
+    assert "**Staatstheater** · Stand" in markdown
+    assert "Quelle theatre.example" in markdown
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["mit Upload-Quelle"] == "1 (100%)"
+    assert metrics["Aktuell (≤ 90 Tage)"] == "1 (100%)"
