@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from typing import Any, TypeVar, cast
+from uuid import UUID
 
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.orm import InstrumentedAttribute
-from sqlmodel import Session, SQLModel, func, select
+from sqlalchemy.orm import InstrumentedAttribute, selectinload
+from sqlmodel import Session, SQLModel, col, func, select
 
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
 
-from .models import EntitySource
+from .models import EntitySource, Production, ProductionMembership
 
 ModelT = TypeVar("ModelT", bound=SQLModel)
 
@@ -121,10 +122,41 @@ def get_entity_graph[ModelT: SQLModel](
 ) -> dict[str, Any]:
     """Fetch one entity by id with nested relationship data."""
     with get_session() as session:
-        entity = session.get(model_cls, entity_id)
+        entity = session.get(model_cls, UUID(entity_id))
         if entity is None:
             raise ValueError(f"{model_cls.__name__} not found")
         return _serialize_entity_graph(entity, max_depth=max_depth)
+
+
+def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
+    """Fetch distinct productions and credits for people, without recursive graphs."""
+    if not person_ids:
+        return []
+    ids = [UUID(person_id) for person_id in person_ids]
+    with get_session() as session:
+        matching = select(ProductionMembership.production_id).where(col(ProductionMembership.person_id).in_(ids))
+        productions = session.exec(
+            select(Production)
+            .where(col(Production.id).in_(matching))
+            .options(
+                selectinload(cast(InstrumentedAttribute, Production.organization)),
+                selectinload(cast(InstrumentedAttribute, Production.memberships)).selectinload(
+                    cast(InstrumentedAttribute, ProductionMembership.person)
+                ),
+            )
+            .order_by(col(Production.name), col(Production.id))
+        ).all()
+        return [
+            {
+                **_snapshot(production),
+                "organization": _snapshot(production.organization) if production.organization else None,
+                "memberships": [
+                    {**_snapshot(membership), "person": _snapshot(membership.person)}
+                    for membership in production.memberships
+                ],
+            }
+            for production in productions
+        ]
 
 
 def create_entity[ModelT: SQLModel](

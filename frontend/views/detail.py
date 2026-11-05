@@ -4,8 +4,8 @@ import streamlit as st
 from backend.entity_management import get_entity_graph, list_entities
 from backend.models import Organization, Person, Production
 from frontend.views.organization import render_organization
-from frontend.views.production import render_production
 from frontend.views.person import render_person
+from frontend.views.production import render_production
 
 KIND_CONFIG = {
     "production": ("Produktion", Production, render_production),
@@ -27,6 +27,7 @@ if params.get("id"):
                 data = get_entity_graph(KIND_CONFIG[kind][1], params["id"])
             except ValueError:
                 st.error("Not found")
+                st.stop()
             render_fn(data)
 else:
     kind = st.selectbox(
@@ -41,5 +42,5 @@ else:
         format_func=lambda x: x.name,
     )
     if entity and st.button("Öffnen"):
-        st.query_params.update({"kind": kind, "id": entity.id})
+        st.query_params.update({"kind": kind, "id": str(entity.id)})
         st.rerun()
