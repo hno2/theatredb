@@ -4,7 +4,17 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
+    groups: # Optional, define groups of dependencies to update together
+      default: # Name of the group
+        patterns: ["*"] # Update all dependencies in this group together
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      default:
+        patterns: ["*"]
