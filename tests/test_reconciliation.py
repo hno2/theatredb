@@ -37,11 +37,15 @@ from backend.reconciliation import (
     discover_duplicates,
     find_candidates,
     list_cases,
+    merge_people,
     preview_case,
+    preview_people_merge,
     propose_record,
     queue_duplicate,
     resolve_id,
     search_entities,
+    search_people_for_merge,
+    stable_digest,
 )
 from backend.scd2 import SCD2History
 
@@ -596,3 +600,302 @@ def test_pending_merge_can_choose_survivor_after_other_merge_redirects(db) -> No
     with Session(db) as session:
         assert resolve_id(session, "person", left.id) == third.id
         assert resolve_id(session, "person", right.id) == third.id
+
+
+def test_people_merge_table_batches_context_and_paginates(db) -> None:
+    people = save(db, *(Person(name=f"Person {index}") for index in range(5)))
+    theatre, production, unknown = save(
+        db, Organization(name="Theater", city="Berlin"), Production(name="Ohne Theater"), Production(name="Unbekannt")
+    )
+    show = save(db, Production(name="Hamlet", organization_id=theatre.id))[0]
+    save(
+        db,
+        ProductionMembership(person_id=people[0].id, production_id=show.id, role="actor"),
+        ProductionMembership(person_id=people[0].id, production_id=show.id, role="director"),
+        ProductionMembership(person_id=people[0].id, production_id=production.id),
+        ProductionMembership(person_id=people[4].id, production_id=unknown.id),
+    )
+    statements = []
+
+    def record_statement(_, __, statement, *___: object) -> None:
+        statements.append(statement)
+
+    event.listen(db, "before_cursor_execute", record_statement)
+    try:
+        rows = search_people_for_merge("Person", limit=2)
+    finally:
+        event.remove(db, "before_cursor_execute", record_statement)
+    assert len(statements) == 2
+    assert [row["id"] for row in rows] == [str(person.id) for person in people[:2]]
+    assert rows[0]["productions"] == ["Hamlet · Theater (Berlin)", "Ohne Theater · Theater nicht hinterlegt"]
+    assert rows[1]["productions"] == []
+    assert [row["id"] for row in search_people_for_merge("Person", limit=2, offset=2)] == [
+        str(person.id) for person in people[2:4]
+    ]
+    assert search_people_for_merge("%") == []
+    assert search_people_for_merge(str(people[0].id))[0]["id"] == str(people[0].id)
+    assert count(db, ReconciliationCase) == 0
+
+
+def test_people_merge_table_includes_text_credits_without_duplicate_productions(db) -> None:
+    person, author, text, theatre = save(
+        db,
+        Person(name="Author and director"),
+        Person(name="Author only"),
+        Text(title="Text"),
+        Organization(name="Theater"),
+    )
+    show = save(db, Production(name="Hamlet", organization_id=theatre.id, text_id=text.id))[0]
+    save(
+        db,
+        TextContribution(person_id=person.id, text_id=text.id, role="author"),
+        TextContribution(person_id=person.id, text_id=text.id, role="adapter"),
+        TextContribution(person_id=author.id, text_id=text.id, role="author"),
+        ProductionMembership(person_id=person.id, production_id=show.id, role="director"),
+    )
+    assert [row["productions"] for row in search_people_for_merge()] == [["Hamlet · Theater"], ["Hamlet · Theater"]]
+
+
+def test_bulk_people_merge_closes_pending_pairs_within_selection(db) -> None:
+    left, right, third = save(db, Person(name="One"), Person(name="Two"), Person(name="Three"))
+    old_id = uuid.uuid4()
+    save(db, EntityRedirect(entity_type=EntityType.PERSON, old_id=old_id, target_id=right.id))
+    case = queue_duplicate("person", right.id, third.id, reason="Same")
+    with Session(db) as session:
+        stored = session.get(ReconciliationCase, case.id)
+        assert stored is not None
+        stored.target_id = old_id
+        session.add(stored)
+        session.commit()
+    ids = [left.id, right.id, third.id]
+    preview = preview_people_merge(ids, target_id=left.id)
+    merge_people(ids, target_id=left.id, revision=preview["revision"], actor_id="test")
+    assert list_cases(status="pending") == []
+    with Session(db) as session:
+        stored = session.get(ReconciliationCase, case.id)
+        assert stored is not None
+        assert stored.status == "approved"
+        assert stored.target_id == left.id
+        assert stored.context["bulk_merge"]["revision"] == preview["revision"]
+
+
+def test_bulk_people_merge_rewires_every_reference_and_preserves_audit(db, source) -> None:
+    left, right, third, org, text, prod, award = save(
+        db,
+        Person(name="Same", description="Keep", type=["director"]),
+        Person(name="Same", description="Other", type=["actor"], urls=["https://person.example"]),
+        Person(name="Variant", description="Chosen", type=["author"], nationality="DE"),
+        Organization(name="Theater"),
+        Text(title="Text"),
+        Production(name="Show"),
+        Award(name="Award"),
+    )
+    alias = uuid.uuid4()
+    save(db, EntityRedirect(entity_type=EntityType.PERSON, old_id=alias, target_id=third.id))
+    pending = queue_duplicate("person", left.id, right.id, reason="Already reported")
+    for person in (right, third):
+        save(
+            db,
+            ProductionMembership(person_id=person.id, production_id=prod.id, role="director"),
+            TextContribution(person_id=person.id, text_id=text.id, role="author"),
+            OrganizationMembership(person_id=person.id, organization_id=org.id, role="actor"),
+            AwardNomination(
+                person_id=person.id, award_id=award.id, category="Actor", year=2026, result=AwardResult.WON
+            ),
+            EntitySource(
+                source_id=source.id, entity_type=EntityType.PERSON, entity_id=person.id, external_id=str(person.id)
+            ),
+            SourceRecord(
+                source_id=source.id, entity_type=EntityType.PERSON, entity_id=person.id, record_key=str(person.id)
+            ),
+        )
+    ids = [str(person.id) for person in (left, right, third)]
+    preview = preview_people_merge(ids, target_id=left.id)
+    assert count(db, Person) == 3
+    assert count(db, SCD2History) == 0
+    result = merge_people(
+        ids,
+        target_id=left.id,
+        revision=preview["revision"],
+        actor_id="test",
+        choices={"description": str(third.id), "name": str(left.id)},
+    )
+    assert result == left.id
+    with Session(db) as session:
+        survivor = session.exec(select(Person)).one()
+        assert survivor.description == "Chosen"
+        assert survivor.nationality == "DE"
+        assert set(survivor.type) == {"director", "actor", "author"}
+        assert survivor.urls == ["https://person.example"]
+        for model in (ProductionMembership, TextContribution, OrganizationMembership, AwardNomination):
+            assert session.exec(select(model)).one().person_id == left.id
+        assert all(record.entity_id == left.id for record in session.exec(select(SourceRecord)).all())
+        assert session.exec(select(EntitySource)).one().entity_id == left.id
+        assert resolve_id(session, "person", alias) == left.id
+        assert resolve_id(session, "person", right.id) == left.id
+        assert resolve_id(session, "person", third.id) == left.id
+        case = session.get(ReconciliationCase, pending.id)
+        assert case is not None
+        assert case.status == "approved"
+    decisions = list_cases(status="approved")
+    assert len(decisions) == 2
+    assert {case["context"]["decision"]["duplicate"]["record"]["id"] for case in decisions} == set(ids[1:])
+    assert count(db, SCD2History) > 0
+
+
+def test_bulk_people_merge_allows_shared_source_identity_within_selection(db, source) -> None:
+    people = save(db, *(Person(name="Same") for _ in range(3)))
+    for person in people:
+        save(
+            db,
+            EntitySource(source_id=source.id, entity_type=EntityType.PERSON, entity_id=person.id, external_id="same"),
+        )
+    ids = [person.id for person in people]
+    preview = preview_people_merge(ids, target_id=ids[1])
+    merge_people(ids, target_id=ids[1], revision=preview["revision"], actor_id="test")
+    assert count(db, Person) == 1
+    with Session(db) as session:
+        mapping = session.exec(select(SourceRecord)).one()
+        assert mapping.entity_id == ids[1]
+        assert {entry["entity_id"] for entry in mapping.payload["merged_sources"]} == {str(value) for value in ids}
+
+
+def test_bulk_people_merge_failure_rolls_back_earlier_merges(db, source) -> None:
+    left, right, third, outsider = save(
+        db,
+        Person(id=uuid.UUID(int=1), name="One"),
+        Person(id=uuid.UUID(int=2), name="Two", nationality="DE"),
+        Person(id=uuid.UUID(int=3), name="Three"),
+        Person(name="Other"),
+    )
+    save(
+        db,
+        EntitySource(source_id=source.id, entity_type=EntityType.PERSON, entity_id=third.id, external_id="collision"),
+        SourceRecord(
+            source_id=source.id,
+            entity_type=EntityType.PERSON,
+            entity_id=outsider.id,
+            record_key="id:collision",
+            external_id="collision",
+        ),
+    )
+    ids = [left.id, right.id, third.id]
+    preview = preview_people_merge(ids, target_id=left.id)
+    with pytest.raises(ValueError, match="third entity"):
+        merge_people(ids, target_id=left.id, revision=preview["revision"], actor_id="test")
+    assert count(db, Person) == 4
+    assert count(db, EntityRedirect) == 0
+    assert count(db, ReconciliationCase) == 0
+    assert count(db, SCD2History) == 0
+    assert get_entity_graph(Person, str(left.id))["nationality"] is None
+
+
+@pytest.mark.parametrize("change", ["person", "reference", "source"])
+def test_bulk_people_merge_rejects_stale_preview(db, source, change) -> None:
+    left, right, prod = save(db, Person(name="Same"), Person(name="Same"), Production(name="Show"))
+    ids = [left.id, right.id]
+    preview = preview_people_merge(ids, target_id=left.id)
+    if change == "person":
+        with Session(db) as session:
+            person = session.get(Person, right.id)
+            assert person is not None
+            person.description = "Concurrent edit"
+            session.add(person)
+            session.commit()
+    elif change == "reference":
+        save(db, ProductionMembership(person_id=right.id, production_id=prod.id))
+    else:
+        save(db, EntitySource(source_id=source.id, entity_type=EntityType.PERSON, entity_id=right.id))
+    with pytest.raises(ValueError, match="Data changed"):
+        merge_people(ids, target_id=left.id, revision=preview["revision"], actor_id="test")
+    assert count(db, Person) == 2
+    assert count(db, ReconciliationCase) == 0
+
+
+def test_bulk_people_merge_validates_selection_and_choices(db) -> None:
+    left, right = save(db, Person(name="Left"), Person(name="Right"))
+    for ids, target in [
+        ([left.id], left.id),
+        ([left.id, left.id], left.id),
+        ([left.id, right.id], uuid.uuid4()),
+        ([left.id, uuid.uuid4()], left.id),
+    ]:
+        with pytest.raises(ValueError, match=r"Select|no longer exist"):
+            preview_people_merge(ids, target_id=target)
+    ids = [left.id, right.id]
+    preview = preview_people_merge(ids, target_id=left.id)
+    for choices in [{"id": str(right.id)}, {"name": str(uuid.uuid4())}]:
+        with pytest.raises(ValueError, match="Selected fields"):
+            merge_people(ids, target_id=left.id, revision=preview["revision"], actor_id="test", choices=choices)
+    assert count(db, Person) == 2
+    assert count(db, ReconciliationCase) == 0
+
+
+def test_people_table_ui_requires_selection_preview_and_confirmation(db) -> None:
+    people = save(db, Person(name="Same"), Person(name="Same"), Person(name="Other"))
+    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
+    assert not app.exception
+    assert app.selectbox(key="duplicate_kind").value == "person"
+    merge_button = next(button for button in app.button if button.label == "Personen zusammenführen")
+    assert merge_button.disabled
+    ids = [row["id"] for row in search_people_for_merge()]
+    editor_key = f"people_selection_{stable_digest(['', 1, ids])}"
+    app.session_state[editor_key] = {
+        "edited_rows": {ids.index(str(person.id)): {"Auswahl": True} for person in people[:2]},
+        "added_rows": [],
+        "deleted_rows": [],
+    }
+    app.run()
+    assert not app.exception
+    assert not next(button for button in app.button if button.label == "Personen zusammenführen").disabled
+    next(button for button in app.button if button.label == "Personen zusammenführen").click().run()
+    assert count(db, Person) == 3
+    assert count(db, ReconciliationCase) == 0
+    assert next(button for button in app.button if button.label == "Zusammenführung speichern").disabled
+    next(box for box in app.checkbox if box.label.startswith("Alle ausgewählten")).check().run()
+    assert not app.error, [error.value for error in app.error]
+    assert "people_merge_preview" in app.session_state
+    next(button for button in app.button if button.label == "Zusammenführung speichern").click().run()
+    assert not app.exception
+    assert not app.error
+    assert count(db, Person) == 2
+    assert count(db, ReconciliationCase) == 1
+    assert "people_merge_preview" not in app.session_state
+
+
+@pytest.mark.parametrize("change", ["person", "query", "source"])
+def test_people_table_ui_rejects_stale_preview_and_clears_changed_selection(db, source, change) -> None:
+    people = save(db, Person(name="Same"), Person(name="Same"))
+    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
+    ids = [row["id"] for row in search_people_for_merge()]
+    editor_key = f"people_selection_{stable_digest(['', 1, ids])}"
+    app.session_state[editor_key] = {
+        "edited_rows": {index: {"Auswahl": True} for index in range(2)},
+        "added_rows": [],
+        "deleted_rows": [],
+    }
+    app.run()
+    next(button for button in app.button if button.label == "Personen zusammenführen").click().run()
+    if change == "query":
+        app.text_input(key="duplicate_query").set_value("Not found").run()
+        assert "people_merge_preview" not in app.session_state
+    elif change == "person":
+        with Session(db) as session:
+            person = session.get(Person, people[0].id)
+            assert person is not None
+            person.description = "Concurrent edit"
+            session.add(person)
+            session.commit()
+        app.run()
+        assert "people_merge_preview" not in app.session_state
+        assert next(button for button in app.button if button.label == "Personen zusammenführen").disabled
+    else:
+        save(db, EntitySource(source_id=source.id, entity_type=EntityType.PERSON, entity_id=people[0].id))
+        next(box for box in app.checkbox if box.label.startswith("Alle ausgewählten")).check().run()
+        assert not app.error, [error.value for error in app.error]
+        assert "people_merge_preview" in app.session_state
+        next(button for button in app.button if button.label == "Zusammenführung speichern").click().run()
+        assert any("Data changed" in error.value for error in app.error)
+    assert not app.exception
+    assert count(db, Person) == 2
+    assert count(db, ReconciliationCase) == 0

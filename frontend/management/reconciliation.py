@@ -26,9 +26,13 @@ from backend.reconciliation import (
     decide_case,
     discover_duplicates,
     list_cases,
+    merge_people,
     preview_case,
+    preview_people_merge,
     queue_duplicate,
     search_entities,
+    search_people_for_merge,
+    stable_digest,
 )
 from backend.user_management import init_db
 from frontend.management.uifactory import _actor_id
@@ -506,12 +510,130 @@ def _conflict_tab() -> None:
         st.rerun()
 
 
+def _people_merge_review(preview: dict) -> None:
+    labels = _unique({state["record"]["id"]: _label(state["record"]) for state in preview["people"]})
+    st.subheader("Zusammenführung prüfen")
+    st.dataframe(
+        [
+            {"Person": labels[state["record"]["id"]], **{k: v for k, v in state["record"].items() if k != "id"}}
+            for state in preview["people"]
+        ],
+        hide_index=True,
+    )
+    choices = {}
+    result = dict(preview["result"])
+    for field in preview["fields"]:
+        if not field["conflict"]:
+            continue
+        options = {option["person_id"]: option["value"] for option in field["options"]}
+        choice = st.selectbox(
+            f"{field['field']}: Wert behalten",
+            list(options),
+            format_func=lambda person_id, options=options: f"{options[person_id]} · {labels[person_id]}",
+            key=f"people_choice_{preview['revision']}_{field['field']}",
+        )
+        choices[field["field"]] = choice
+        result[field["field"]] = options[choice]
+    with st.expander("Ergebnis und betroffene Verknüpfungen"):
+        st.json({"Ergebnis": result, "Personen": preview["people"]})
+    st.warning(
+        "Die übrigen ausgewählten Personen werden gelöscht. Alle Verknüpfungen, Quellen und alten IDs werden "
+        "auf den verbleibenden Datensatz umgeleitet. Nicht gewählte Feldwerte bleiben im Änderungsverlauf erhalten."
+    )
+    confirmed = st.checkbox(
+        "Alle ausgewählten Datensätze sind dieselbe Person; Zusammenführung bestätigen",
+        key=f"people_confirm_{preview['revision']}",
+    )
+    if st.button("Zusammenführung speichern", type="primary", disabled=not confirmed):
+        merge_people(
+            [state["record"]["id"] for state in preview["people"]],
+            target_id=preview["target_id"],
+            revision=preview["revision"],
+            actor_id=_actor(),
+            choices=choices,
+        )
+        st.session_state.pop("people_merge_preview", None)
+        st.session_state["_flash"] = f"{len(preview['people'])} Personen zusammengeführt."
+        st.rerun()
+
+
+def _people_duplicates(query: str) -> list[dict]:
+    page = st.number_input("Personenseite", min_value=1, value=1, step=1, key=f"people_page_{query}")
+    records = search_people_for_merge(query, offset=(page - 1) * 100)
+    st.caption(
+        "Bis zu 100 Personen pro Seite, nach Name sortiert. Auswahl gilt für diese Seite. "
+        "Produktionen und Theater helfen, Namensgleiche zu unterscheiden."
+    )
+    if not records:
+        st.info("Keine Personen auf dieser Seite.")
+        st.session_state.pop("people_merge_preview", None)
+        return records
+    table = pd.DataFrame(records)
+    table["productions"] = table["productions"].map("; ".join)
+    table.insert(0, "Auswahl", False)
+    edited = st.data_editor(
+        table,
+        hide_index=True,
+        width="stretch",
+        column_order=[
+            "Auswahl",
+            "name",
+            "productions",
+            *[field for field in records[0] if field not in {"name", "productions"}],
+        ],
+        disabled=[column for column in table.columns if column != "Auswahl"],
+        column_config={
+            "id": None,
+            "Auswahl": st.column_config.CheckboxColumn("Auswahl", width="small"),
+            "name": st.column_config.TextColumn("Name"),
+            "productions": st.column_config.TextColumn("Produktionen · Theater", width="large"),
+        },
+        key=f"people_selection_{stable_digest([query, page, table['id'].tolist()])}",
+    )
+    selected = edited.loc[edited["Auswahl"], "id"].tolist()
+    labels = _unique({row["id"]: _label(row) for row in records if row["id"] in selected})
+    target = st.selectbox(
+        "Dieser Personendatensatz bleibt erhalten",
+        selected,
+        format_func=labels.__getitem__,
+        key=f"people_survivor_{stable_digest(selected)}",
+        disabled=len(selected) < 2,
+    )
+    if st.button("Personen zusammenführen", disabled=len(selected) < 2):
+        st.session_state["people_merge_preview"] = preview_people_merge(selected, target_id=target)
+    preview = st.session_state.get("people_merge_preview")
+    if preview and (
+        {state["record"]["id"] for state in preview["people"]} != set(selected) or preview["target_id"] != target
+    ):
+        st.session_state.pop("people_merge_preview", None)
+        preview = None
+    if preview:
+        if st.button("Personenvergleich aktualisieren"):
+            preview = preview_people_merge(selected, target_id=target)
+            st.session_state["people_merge_preview"] = preview
+        _people_merge_review(preview)
+    return records
+
+
 def _duplicates_tab() -> None:
-    st.write("Bestehende Duplikate finden oder zwei bekannte Datensätze manuell zur Prüfung einreichen.")
-    kind = st.selectbox("Datensatztyp", list(KINDS), format_func=KINDS.__getitem__, key="duplicate_kind")
+    kind = st.selectbox(
+        "Bereich",
+        ["person", "organization", "text", "production", "award"],
+        format_func=KINDS.__getitem__,
+        key="duplicate_kind",
+    )
     query = st.text_input("Name, Titel oder UUID suchen", key="duplicate_query")
-    records = search_entities(kind, query)
-    st.caption("Maximal 50 Treffer. Bei gleichen Namen helfen Ort, Datum und Theater.")
+    if kind == "person":
+        records = _people_duplicates(query)
+        with st.expander("Zwei Personen als Prüffall melden / Ähnlichkeitssuche"):
+            _duplicate_pairs(kind, query, records)
+    else:
+        _duplicate_pairs(kind, query, search_entities(kind, query))
+
+
+def _duplicate_pairs(kind: str, query: str, records: list[dict]) -> None:
+    st.write("Bestehende Duplikate finden oder zwei bekannte Datensätze manuell zur Prüfung einreichen.")
+    st.caption("Bei gleichen Namen helfen Ort, Datum und Theater.")
     choices = {row["id"]: row for row in records}
     left_labels = _unique({None: "Bitte wählen", **{key: _label(row) for key, row in choices.items()}})
     left = st.selectbox(
