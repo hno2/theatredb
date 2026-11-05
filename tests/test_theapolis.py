@@ -2,6 +2,7 @@ import asyncio
 import copy
 import datetime as dt
 import json
+import re
 import uuid
 from urllib.parse import parse_qs, urlsplit
 
@@ -224,8 +225,34 @@ def test_staged_import_rejects_missing_or_mismatched_metadata_before_writes(db, 
         assert not session.exec(select(Source)).all()
 
 
-def test_default_export_uses_staged_theapolis_directory():
-    assert str(theapolis.DEFAULT_EXPORT) == "data/staged/theapolis.de/productions.json"
+def test_default_exports_use_shared_timestamp_scope_names_and_import_latest_full(db, monkeypatch, tmp_path, item):
+    assert str(theapolis.DEFAULT_EXPORT_DIR) == "data/staged/theapolis.de"
+    monkeypatch.setattr(theapolis, "DEFAULT_EXPORT_DIR", tmp_path)
+
+    async def fetch(session, url):
+        await asyncio.sleep(0)
+        return json.dumps(
+            {"success": True, "data": {"totalCount": 1, "numItemsPerPage": 500, "items": [item]}}
+        ).encode()
+
+    monkeypatch.setattr(theapolis, "_fetch", fetch)
+    first = asyncio.run(theapolis.download())
+    second = asyncio.run(theapolis.download())
+    limited = asyncio.run(theapolis.download(max_pages=1))
+    assert first != second and first.exists() and second.exists()
+    assert re.fullmatch(r"\d{8}_\d{6}_\d{6}_all-people-[0-9a-f]{12}_productions\.json", second.name)
+    assert re.fullmatch(r"\d{8}_\d{6}_\d{6}_limit-500-people-[0-9a-f]{12}_productions\.json", limited.name)
+    assert second.with_suffix(".source.json").exists()
+    assert theapolis.import_all() == theapolis.import_all(second)
+    assert theapolis.import_all() != theapolis.import_all(limited)
+
+
+def test_default_import_does_not_select_limited_snapshot(db, monkeypatch, tmp_path, item):
+    monkeypatch.setattr(theapolis, "DEFAULT_EXPORT_DIR", tmp_path)
+    limited = tmp_path / f"20261105_120000_000001_{theapolis._export_scope(1)}_productions.json"
+    limited.write_text(json.dumps(theapolis.staged_records([item])))
+    with pytest.raises(ValueError, match="No full Theapolis snapshot"):
+        theapolis.import_all()
 
 
 def test_year_matching_and_display_do_not_invent_date(db):

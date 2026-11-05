@@ -51,9 +51,15 @@ To **create JSON only**, without downloading images or writing to the database:
 uv run --group ingest python -m backend.ingestion.theapolis download --concurrency 10
 ```
 
-Default staged JSON: `data/staged/theapolis.de/productions.json`; image manifest
+Default staged JSON:
+`data/staged/theapolis.de/YYYYMMDD_HHMMSS_microseconds_all-people_<config-hash>_productions.json`,
+using the same timestamp/scope naming helper as venue scrapers. Each run keeps
+earlier snapshots. Limited runs use `limit-<max-records>` instead of `all`
+(`--max-pages 1` is at most 500 records). Default import selects the latest full
+snapshot for the current API configuration, never a limited smoke export.
+Image manifest:
 `data/theapolis/images/manifest.json`. `--json PATH` selects another export/import
-file. A sibling `productions.source.json` keeps raw IDs, organization metadata,
+file. A sibling `<timestamp-and-scope>_productions.source.json` keeps raw IDs, organization metadata,
 capture time and partial-export status outside the shared staging records.
 Keep both files together for the separate Theapolis review import; it checks
 that staged JSON matches its source metadata before writing any cases.

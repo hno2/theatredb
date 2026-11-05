@@ -17,13 +17,14 @@ import aiohttp
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from sqlmodel import select
 
+from backend.ingestion.snapshots import digest, snapshot_path
 from backend.ingestion.staging import validate_records
 from backend.models import EntityType, Source
 from backend.reconciliation import propose_record, validate_payload
 from backend.user_management import get_session, init_db
 
 SITE = "https://www.theapolis.de"
-DEFAULT_EXPORT = Path("data/staged/theapolis.de/productions.json")
+DEFAULT_EXPORT_DIR = Path("data/staged/theapolis.de")
 DEFAULT_IMAGES = Path("data/theapolis/images")
 ACTOR = "theapolis-ingestion"
 LOG = logging.getLogger(__name__)
@@ -145,10 +146,17 @@ def _source_path(path: Path) -> Path:
     return path.with_suffix(".source.json")
 
 
-async def download(output: Path = DEFAULT_EXPORT, *, concurrency: int = 10, max_pages: int | None = None) -> None:
+def _export_scope(max_pages: int | None) -> str:
+    config = {"url": f"{SITE}/api/de/productions", "items": 500, "status": [2, 4]}
+    return f"{'all' if max_pages is None else f'limit-{max_pages * 500}'}-people-{digest(config)[:12]}"
+
+
+async def download(output: Path | None = None, *, concurrency: int = 10, max_pages: int | None = None) -> Path:
     """Export shared-schema staged JSON and source metadata, without database writes."""
     if max_pages is not None and max_pages < 1:
         raise ValueError("max_pages must be positive")
+    if output is None:
+        output = snapshot_path(DEFAULT_EXPORT_DIR, _export_scope(max_pages))
     async with _session(concurrency) as session:
 
         async def page(number: int) -> dict:
@@ -177,6 +185,7 @@ async def download(output: Path = DEFAULT_EXPORT, *, concurrency: int = 10, max_
         )
         _write_json(output, records)
     LOG.info("Exported %s productions to %s", len(items), output)
+    return output
 
 
 def _sitemap_locations(content: bytes) -> list[str]:
@@ -370,8 +379,13 @@ def _prepare_import(snapshot: dict) -> tuple[dict, dict, list, dt.datetime | Non
     return organizations, people, productions, captured_at
 
 
-def import_all(json_path: Path = DEFAULT_EXPORT) -> dict[str, list[str]]:
+def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
     """Validate a whole export, then queue generic review cases, never venue uploads."""
+    if json_path is None:
+        snapshots = sorted(DEFAULT_EXPORT_DIR.glob(f"*_{_export_scope(None)}_productions.json"))
+        if not snapshots:
+            raise ValueError(f"No full Theapolis snapshot in {DEFAULT_EXPORT_DIR}; download first or pass --json")
+        json_path = snapshots[-1]
     snapshot = json.loads(json_path.read_text(encoding="utf-8"))
     if isinstance(snapshot, list):
         source_path = _source_path(json_path)
@@ -454,7 +468,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     export = sub.add_parser("download", help="Export API productions; no database writes")
-    export.add_argument("--json", type=Path, default=DEFAULT_EXPORT)
+    export.add_argument("--json", type=Path, help="Override the timestamped staged snapshot filename")
     export.add_argument("--max-pages", type=int)
     export.add_argument("--concurrency", type=int, default=10)
     images = sub.add_parser("images", help="Download public sitemap profile photos and theatre logos")
@@ -462,7 +476,7 @@ def main() -> None:
     images.add_argument("--limit", type=int)
     images.add_argument("--concurrency", type=int, default=10)
     review = sub.add_parser("import", aliases=["import_all"], help="Queue review cases only")
-    review.add_argument("--json", type=Path, default=DEFAULT_EXPORT)
+    review.add_argument("--json", type=Path, help="Snapshot to import; defaults to latest full staged export")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if args.command == "download":
