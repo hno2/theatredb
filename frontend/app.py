@@ -42,7 +42,7 @@ if "_flash" in st.session_state:
 pages = {
     "Entdecken": [
         st.Page("views/overview.py", title="Startseite", icon=":material/map:", default=True),
-        st.Page("views/detail.py", title="Details", icon=":material/visibility:", url_path="detail"),
+        st.Page("views/detail.py", title="Theater & Produktionen", icon=":material/visibility:", url_path="detail"),
         # st.Page("views/people.py", title="People", icon=":material/person:"),
         # st.Page("views/productions.py", title="Productions", icon=":material/local_activity:"),
         # st.Page("views/texts.py", title="Texts", icon=":material/menu_book:"),

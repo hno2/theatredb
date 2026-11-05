@@ -53,9 +53,6 @@ def render_person(data: dict) -> None:
         if not productions:
             st.info("Für diese Person sind noch keine Produktionen erfasst.")
         for production in productions:
-            organization = production.get("organization")
-            if organization:
-                entity_link(organization["name"], "organization", organization["id"])
             render_production_card(production)
     with collaboration_tab:
         st.caption("Gezählt werden unterschiedliche erfasste Produktionen, unabhängig von der Anzahl der Rollen.")
