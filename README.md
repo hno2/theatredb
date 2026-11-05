@@ -163,13 +163,23 @@ above and below results and stay synchronized. Streamlit handles numbered pages,
 previous/next arrows and responsive truncation. People remain discoverable as well.
 Each profile links back to the directory; existing UUID detail URLs still work.
 
-Theatre detail pages show an address and location map, a premiere timeline
-(newest or oldest first), and readable source citations with review status and
-capture date. Productions without a valid premiere remain listed separately;
-premiere dates do not represent production run dates. Missing coordinates and
-unusable source links are indicated explicitly. Production titles are searchable;
-long lists scroll within the production tab, while sources have their own tab.
-Production cards show premiere dates and recorded credits. **Spielstätten &
+Theatre detail pages show an address and location map, a compact production list,
+and readable source citations with review status and capture date. Unboxed
+production previews show directors first (bold names, grouped once under Regie),
+then comma-separated actors under “mit”. Other team credits remain on the full
+production profile. Premiere, age guidance and duration share one icon facts line;
+descriptions are word-truncated to 200 characters and clamped to two lines.
+
+Title and person searches update while typing using native live inputs inside a
+Streamlit fragment, so filtering does not reload the map. A collapsed **Filter**
+expander offers exact recorded age recommendations (including unknown), an
+inclusive premiere date range, and person search across all production credits
+and text contributors. Filters combine; incomplete date ranges are flagged and
+not applied. With no range selected, undated entries stay visible; an active range
+excludes them. Sort by newest/oldest premiere (undated entries last) or title.
+Long lists use native pagination, reset when search, filters or sorting change.
+Premiere dates do not represent production run dates. Missing coordinates and
+unusable source links are indicated explicitly. **Spielstätten &
 Menschen** lists stored venues, seating capacities and linked theatre memberships
 with their recorded dates; it does not claim to be a current ensemble roster.
 

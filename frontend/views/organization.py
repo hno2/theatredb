@@ -1,5 +1,7 @@
+import re
 from datetime import date, datetime
-from itertools import groupby
+from html import escape
+from textwrap import shorten
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -7,6 +9,7 @@ import streamlit as st
 
 from backend.entity_management import list_entities
 from backend.models import Source
+from backend.reconciliation import canonical_role
 from frontend.views.helpers import entity_link, has_coordinates, role_label
 
 
@@ -133,35 +136,146 @@ def render_production_summary(production: dict) -> None:
         st.caption(" · ".join(f"{role}: {name}" for role, name in credits))
 
 
-def render_timeline(productions: list[dict], organization_id: str) -> None:
-    """Render premiere years as a native Streamlit timeline, without inventing dates."""
-    st.subheader("Produktionen im Zeitverlauf")
-    st.caption("Chronologie nach erfasster Premiere, kein vollständiger Spielplan und keine Laufzeiten.")
+def production_credit_line(production: dict) -> str:
+    """Group distinct directors first, followed by actors, preserving source order."""
+    groups: dict[str, dict[str, str]] = {"director": {}, "actor": {}}
+    for membership in production.get("memberships") or []:
+        role = canonical_role(membership.get("role"))
+        person = membership.get("person") or {}
+        if role in groups and person.get("name"):
+            name = re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", person["name"])
+            groups[role].setdefault(str(person.get("id") or person["name"]), name)
+    parts = []
+    if groups["director"]:
+        parts.append("Regie: " + ", ".join(f"**{name}**" for name in groups["director"].values()))
+    if groups["actor"]:
+        parts.append("mit " + ", ".join(groups["actor"].values()))
+    return " · ".join(parts)
+
+
+def render_theatre_production(production: dict) -> None:
+    """Show an unboxed production preview; keep complete details on its linked profile."""
+    entity_link(production["name"], "production", str(production["id"]))
+    if credits := production_credit_line(production):
+        st.markdown(credits)
+    premiere = parse_date(production.get("premiere"))
+    facts = [f":material/event: Premiere {premiere:%d.%m.%Y}" if premiere else ":material/event: Premiere unbekannt"]
+    if production.get("age_rating") is not None:
+        facts.append(f":material/family_restroom: Ab {production['age_rating']} Jahren")
+    if production.get("duration") is not None:
+        facts.append(f":material/schedule: {production['duration']} Minuten")
+    st.caption(" · ".join(facts))
+    if production.get("premiere") and premiere is None:
+        st.warning(f"Ungültiges Premierendatum: {production['premiere']}")
+    if production.get("description"):
+        preview = escape(shorten(production["description"], width=200, placeholder="…"))
+        st.html(
+            '<p style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; '
+            f'overflow: hidden; margin: 0;">{preview}</p>'
+        )
+
+
+def age_label(production: dict) -> str:
+    """Label missing age guidance distinctly from an age-zero recommendation."""
+    age = production.get("age_rating")
+    return f"Ab {age} Jahren" if age is not None else "Nicht hinterlegt"
+
+
+def filter_productions(
+    productions: list[dict],
+    search: str,
+    person: str,
+    ages: list[str],
+    premiere_range: tuple[date, ...],
+) -> list[dict]:
+    """Combine literal title, credited-person, age and inclusive premiere filters."""
+    matching = []
+    for production in productions:
+        if search.casefold() not in production["name"].casefold():
+            continue
+        if ages and age_label(production) not in ages:
+            continue
+        contributors = [
+            *(production.get("memberships") or []),
+            *((production.get("text") or {}).get("contributions") or []),
+        ]
+        if person and not any(
+            person.casefold() in (contribution.get("person") or {}).get("name", "").casefold()
+            for contribution in contributors
+        ):
+            continue
+        premiere = parse_date(production.get("premiere"))
+        if len(premiere_range) == 2 and (premiere is None or not premiere_range[0] <= premiere <= premiere_range[1]):
+            continue
+        matching.append(production)
+    return matching
+
+
+@st.fragment
+def render_production_list(productions: list[dict], organization_id: str) -> None:
+    """Filter while typing without rerendering the theatre's map and other tabs."""
+    st.subheader("Produktionen")
+    st.caption(
+        "Erfasste Produktionen, kein vollständiger Spielplan. Premieren sind keine aktuellen Aufführungstermine."
+    )
     if not productions:
         st.info("Für dieses Theater sind noch keine Produktionen erfasst.")
         return
-    dated, undated = production_dates(productions)
-    if dated:
-        order = st.radio(
-            "Reihenfolge",
-            ["Neueste zuerst", "Älteste zuerst"],
-            horizontal=True,
-            key=f"production_order_{organization_id}",
+    search = st.text_input(
+        "Produktionen durchsuchen",
+        placeholder="Nach Titel suchen",
+        key=f"production_search_{organization_id}",
+        type="search",
+        live=True,
+    ).strip()
+    with st.expander("Filter", expanded=False):
+        ratings = sorted({row["age_rating"] for row in productions if row.get("age_rating") is not None})
+        age_options = [f"Ab {age} Jahren" for age in ratings]
+        if any(row.get("age_rating") is None for row in productions):
+            age_options.append("Nicht hinterlegt")
+        ages = st.multiselect("Altersempfehlung", age_options, key=f"production_ages_{organization_id}")
+        dated, _ = production_dates(productions)
+        dates = [premiere for premiere, _ in dated]
+        premiere_range = st.date_input(
+            "Premiere im Zeitraum",
+            value=[],
+            min_value=min(dates) if dates else None,
+            max_value=max(dates) if dates else None,
+            format="DD.MM.YYYY",
+            key=f"production_dates_{organization_id}",
+            disabled=not dates,
+            help="Start- und Enddatum einschließen. Ohne Auswahl bleiben auch undatierte Produktionen sichtbar.",
         )
-        dated.sort(key=lambda item: (item[0], item[1]["name"].casefold()), reverse=order == "Neueste zuerst")
-        for year, entries in groupby(dated, key=lambda item: item[0].year):
-            st.markdown(f"#### {year}")
-            for premiere, production in entries:
-                date_column, production_column = st.columns([1, 5], gap="medium")
-                with date_column:
-                    st.text(premiere.strftime("%d.%m.%Y"))
-                with production_column:
-                    render_production_card(production, show_organization=False)
-    if undated:
-        st.markdown("#### Ohne Premierendatum")
-        st.caption("Ohne gültiges Premierendatum ist keine zeitliche Einordnung möglich.")
-        for production in sorted(undated, key=lambda item: item["name"].casefold()):
-            render_production_card(production, show_organization=False)
+        person = st.text_input(
+            "Person suchen",
+            placeholder="Name aus Besetzung, Team oder Textbeiträgen",
+            key=f"production_person_{organization_id}",
+            type="search",
+            live=True,
+        ).strip()
+    if len(premiere_range) == 1:
+        st.info("Bitte auch das Enddatum wählen. Der Zeitraumfilter ist noch nicht aktiv.")
+    order = st.selectbox(
+        "Sortierung",
+        ["Neueste zuerst", "Älteste zuerst", "Titel A-Z"],
+        key=f"production_order_{organization_id}",
+    )
+    matching = filter_productions(productions, search, person, ages, premiere_range)
+    dated, undated = production_dates(matching)
+    dated.sort(key=lambda item: (item[0], item[1]["name"].casefold()), reverse=order == "Neueste zuerst")
+    ordered = [row for _, row in dated] + sorted(undated, key=lambda row: row["name"].casefold())
+    if order == "Titel A-Z":
+        ordered.sort(key=lambda row: row["name"].casefold())
+    st.caption(f"{len(matching)} von {len(productions)} Produktionen")
+    if not matching:
+        st.info("Keine Produktionen für diese Suche und Filter gefunden.")
+        return
+    page_key = f"theatre_page_{organization_id}_{search}_{person}_{ages}_{premiere_range}_{order}"
+    page = st.pagination((len(ordered) + 11) // 12, key=page_key) if len(ordered) > 12 else 1
+    for index, production in enumerate(ordered[(page - 1) * 12 : page * 12]):
+        if index:
+            st.divider()
+        render_theatre_production(production)
 
 
 def render_sources(sources: list[dict]) -> None:
@@ -223,19 +337,7 @@ def render_organization(data: dict) -> None:
     st.divider()
     production_tab, house_tab, source_tab = st.tabs(["Produktionen", "Spielstätten & Menschen", "Quellen & Nachweise"])
     with production_tab:
-        search = st.text_input(
-            "Produktionen durchsuchen",
-            placeholder="Nach Titel suchen",
-            key=f"production_search_{data['id']}",
-        ).strip()
-        matching = [production for production in productions if search.casefold() in production["name"].casefold()]
-        if search and not matching:
-            st.info("Keine Produktionen mit diesem Titel gefunden.")
-        else:
-            if search:
-                st.caption(f"{len(matching)} von {len(productions)} Produktionen")
-            with st.container(height=650 if len(matching) > 8 else "content", border=False):
-                render_timeline(matching, str(data["id"]))
+        render_production_list(productions, str(data["id"]))
     with source_tab:
         render_sources(sources)
     with house_tab:
