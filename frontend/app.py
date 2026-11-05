@@ -5,6 +5,13 @@ from streamlit.user_info import UserInfoProxy
 
 from backend.user_management import init_db
 
+from backend.user_management import init_db
+
+
+@st.cache_resource
+def _initialize_database() -> None:
+    init_db()
+
 
 @st.cache_resource
 def _initialize_database() -> None:
@@ -44,6 +51,7 @@ pages = {
         # st.Page("views/awards.py", title="Awards", icon=":material/trophy:"),
     ],
     "Verwaltung": [
+        st.Page("management/reconciliation.py", title="Datenabgleich & Duplikate", icon=":material/merge:"),
         st.Page("management/organizations.py", title="Organisationen", icon=":material/event_seat:"),
         st.Page("management/persons.py", title="Personen", icon=":material/person:"),
         st.Page("management/productions.py", title="Produktionen", icon=":material/local_activity:"),
