@@ -43,6 +43,8 @@ def production_dates(productions: list[dict]) -> tuple[list[tuple[date, dict]], 
     undated = []
     for production in productions:
         premiere = parse_date(production.get("premiere"))
+        if premiere is None and production.get("premiere_year"):
+            premiere = date(production["premiere_year"], 1, 1)
         if premiere is None:
             undated.append(production)
         else:
@@ -50,9 +52,21 @@ def production_dates(productions: list[dict]) -> tuple[list[tuple[date, dict]], 
     return dated, undated
 
 
-def render_web_link(label: str, value: str | None) -> None:
+def premiere_label(production: dict) -> str:
+    """Display actual precision, never a made-up day for a year-only premiere."""
+    premiere = parse_date(production.get("premiere"))
+    if premiere:
+        return premiere.strftime("%d.%m.%Y")
+    return str(production["premiere_year"]) if production.get("premiere_year") else "Nicht hinterlegt"
+
+
+def render_web_link(label: str, value: str | None, *, official: bool = False) -> None:
     """Render a source-provided URL or explicitly flag an unusable one."""
     if url := web_url(value):
+        host = urlsplit(url).hostname or ""
+        if official and (host == "theapolis.de" or host.endswith(".theapolis.de")):
+            st.link_button("Theapolis-Quelle", url, icon=":material/open_in_new:")
+            return
         st.link_button(label, url, icon=":material/open_in_new:")
     elif value:
         st.warning(f"{label}: Kein gültiger HTTP(S)-Link hinterlegt.")
@@ -72,8 +86,8 @@ def render_location(data: dict) -> None:
             st.text(data["country"])
         if not any(data.get(field) for field in ("street", "zip_code", "city", "country")):
             st.caption("Noch keine Adresse hinterlegt.")
-        render_web_link("Website", data.get("url"))
-        render_web_link("Spielplan", data.get("url_plays"))
+        render_web_link("Website", data.get("url"), official=True)
+        render_web_link("Spielplan", data.get("url_plays"), official=True)
     with map_column:
         if has_coordinates(data.get("lat"), data.get("lon")):
             st.map(pd.DataFrame([{"lat": data["lat"], "lon": data["lon"]}]), zoom=12, height=300, color="#8b3a32")
@@ -109,8 +123,8 @@ def render_production_card(production: dict, *, compact: bool = False, show_orga
 def render_production_summary(production: dict) -> None:
     """Make recorded dates, guidance and credits visible before opening a profile."""
     premiere = parse_date(production.get("premiere"))
-    if premiere:
-        st.caption(f"Premiere: {premiere:%d.%m.%Y}")
+    if premiere or production.get("premiere_year"):
+        st.caption(f"Premiere: {premiere_label(production)}")
     elif production.get("premiere"):
         st.warning(f"Ungültiges Premierendatum: {production['premiere']}")
     else:
@@ -159,7 +173,11 @@ def render_theatre_production(production: dict) -> None:
     if credits := production_credit_line(production):
         st.markdown(credits)
     premiere = parse_date(production.get("premiere"))
-    facts = [f":material/event: Premiere {premiere:%d.%m.%Y}" if premiere else ":material/event: Premiere unbekannt"]
+    facts = [
+        f":material/event: Premiere {premiere_label(production)}"
+        if premiere or production.get("premiere_year")
+        else ":material/event: Premiere unbekannt"
+    ]
     if production.get("age_rating") is not None:
         facts.append(f":material/family_restroom: Ab {production['age_rating']} Jahren")
     if production.get("duration") is not None:
@@ -205,8 +223,15 @@ def filter_productions(
         ):
             continue
         premiere = parse_date(production.get("premiere"))
-        if len(premiere_range) == 2 and (premiere is None or not premiere_range[0] <= premiere <= premiere_range[1]):
-            continue
+        if len(premiere_range) == 2:
+            if premiere is not None:
+                if not premiere_range[0] <= premiere <= premiere_range[1]:
+                    continue
+            elif year := production.get("premiere_year"):
+                if not premiere_range[0].year <= year <= premiere_range[1].year:
+                    continue
+            else:
+                continue
         matching.append(production)
     return matching
 
@@ -236,6 +261,11 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         ages = st.multiselect("Altersempfehlung", age_options, key=f"production_ages_{organization_id}")
         dated, _ = production_dates(productions)
         dates = [premiere for premiere, _ in dated]
+        dates.extend(
+            date(row["premiere_year"], 12, 31)
+            for row in productions
+            if row.get("premiere_year") and parse_date(row.get("premiere")) is None
+        )
         premiere_range = st.date_input(
             "Premiere im Zeitraum",
             value=[],

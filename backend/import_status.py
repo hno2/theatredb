@@ -105,7 +105,7 @@ def _production_stats(
         row["own_website"] += bool(hosts & own_hosts.get(production.organization_id, set()))
         filled = {
             "description": bool(production.description and production.description.strip()),
-            "premiere": production.premiere is not None,
+            "premiere": production.premiere is not None or production.premiere_year is not None,
             "director": "director" in roles[production.id],
             "cast": "actor" in roles[production.id],
             "text": production.text_id is not None,
@@ -123,7 +123,10 @@ def _own_hosts(organizations: dict[uuid.UUID, Organization], runs: list[ImportRu
     for run in runs:
         if not (organizations[run.organization_id].url or organizations[run.organization_id].url_plays) and run.website:
             hosts[run.organization_id].add(run.website)
-    return hosts
+    return {
+        org_id: {host for host in values if host != "theapolis.de" and not host.endswith(".theapolis.de")}
+        for org_id, values in hosts.items()
+    }
 
 
 def _open_conflicts(session: Session) -> dict[str, int]:

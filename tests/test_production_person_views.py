@@ -135,6 +135,21 @@ def test_empty_production_and_invalid_data_are_explicit(credits) -> None:
     assert not app.get("link_button")
 
 
+def test_year_only_premiere_and_legacy_theapolis_links_are_not_official(credits) -> None:
+    current, *_ = credits
+    current.update(premiere=None, premiere_year=2026, url="https://www2.theapolis.de/de/produktionen/123")
+    current["organization"]["url"] = "https://www.theapolis.de/de/organization/theater"
+    app = AppTest.from_string(PRODUCTION_SCRIPT)
+    app.session_state.profile = current
+    app.run()
+    assert not app.exception
+    assert "2026" in [element.value for element in app.text]
+    assert not any("01.01.2026" in element.value for element in app.text)
+    buttons = app.get("link_button")
+    assert sum(button.proto.label == "Theapolis-Quelle" for button in buttons) == 2
+    assert not any(button.proto.label in {"Offizielle Seite", "Theater-Website"} for button in buttons)
+
+
 def test_production_preserves_sources_tags_and_critics(credits) -> None:
     current, *_ = credits
     current["organization"]["url"] = "https://theatre.example"

@@ -309,6 +309,7 @@ class Production(SourceMixin, SQLModel, table=True):
     name: str = Field(index=True)
     description: str | None = None
     premiere: dt.datetime | None = None
+    premiere_year: int | None = Field(default=None, ge=1, le=9999)
 
     organization_id: uuid.UUID | None = Field(default=None, foreign_key="organization.id")
     organization: Organization | None = Relationship(back_populates="productions")
