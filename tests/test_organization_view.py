@@ -55,7 +55,7 @@ def profile(monkeypatch: pytest.MonkeyPatch) -> ProfileFixture:
     source = Source(name="Theaterarchiv")
     monkeypatch.setattr(organization, "list_entities", lambda model: [source])
     links = Mock()
-    monkeypatch.setattr(organization.st, "page_link", links)
+    monkeypatch.setattr(organization, "entity_link", links)
     data = {
         "id": "theater-1",
         "name": "Bühne & Haus",
@@ -114,18 +114,18 @@ def test_profile_has_map_address_and_readable_sources(profile: ProfileFixture) -
     assert "Geprüft · Erfasst am 05.11.2026" in captions
     assert "90 Minuten · Ab 0 Jahren" in captions
     assert not any("source_id" in value or "external_url" in value for value in text)
-    assert links.call_args_list[0].kwargs["query_params"] == {"kind": "production", "id": "new"}
+    assert links.call_args_list[0].args == ("Produktion ansehen", "production", "new")
 
 
 def test_timeline_order_and_undated_entries(profile: ProfileFixture) -> None:
     app, _, links = profile
     app.run()
-    assert [call.kwargs["query_params"]["id"] for call in links.call_args_list] == ["new", "old", "invalid", "none"]
+    assert [call.args[2] for call in links.call_args_list] == ["new", "old", "invalid", "none"]
     assert any("Ungültiges Premierendatum" in element.value for element in app.warning)
     links.reset_mock()
     app.radio[0].set_value("Älteste zuerst").run()
     assert not app.exception
-    assert [call.kwargs["query_params"]["id"] for call in links.call_args_list] == ["old", "new", "invalid", "none"]
+    assert [call.args[2] for call in links.call_args_list] == ["old", "new", "invalid", "none"]
     assert [element.value for element in app.markdown if element.value.startswith("####")] == [
         "#### 2022",
         "#### 2025",
@@ -193,7 +193,7 @@ def test_search_filters_timeline_without_hiding_sources(profile: ProfileFixture)
     links.reset_mock()
     app.text_input[0].set_value("NEU").run()
     assert not app.exception
-    assert [call.kwargs["query_params"]["id"] for call in links.call_args_list] == ["new"]
+    assert [call.args[2] for call in links.call_args_list] == ["new"]
     assert any(element.value == "1 von 4 Produktionen" for element in app.caption)
     assert any(element.value == "Theaterarchiv" for element in app.text)
     links.reset_mock()

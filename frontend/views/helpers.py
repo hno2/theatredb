@@ -1,4 +1,6 @@
 import math
+from html import escape
+from urllib.parse import urlencode
 
 import streamlit as st
 
@@ -17,7 +19,17 @@ def has_coordinates(lat: float | None, lon: float | None) -> bool:
 
 def entity_link(label: str, kind: str, entity_id: str) -> None:
     """Link to an entity within the current detail page."""
+    query = urlencode({"kind": kind, "id": str(entity_id)})
     st.markdown(
-        f'<a href="?kind={kind}&id={entity_id}" target="_self">{label}</a>',
+        f'<a href="?{escape(query, quote=True)}" target="_self">{escape(label)}</a>',
         unsafe_allow_html=True,
     )
+
+
+def production_people(production: dict) -> dict[str, dict]:
+    """Index credited people by identity, not role or display name."""
+    return {
+        str(membership["person"]["id"]): membership["person"]
+        for membership in production.get("memberships") or []
+        if (membership.get("person") or {}).get("id")
+    }

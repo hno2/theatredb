@@ -27,6 +27,7 @@ if params.get("id"):
                 data = get_entity_graph(KIND_CONFIG[kind][1], params["id"])
             except ValueError:
                 st.error("Not found")
+                st.stop()
             else:
                 render_fn(data)
 else:
