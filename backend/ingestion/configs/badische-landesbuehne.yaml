@@ -1,0 +1,67 @@
+source_id: badische-landesbuehne.de
+organization_name: Badische Landesbühne
+base_url: https://www.badische-landesbuehne.de/de/
+request_delay: 1
+listing:
+  urls:
+    - https://www.badische-landesbuehne.de/de/seiten/programm-2627.html
+  selector: main a[href]
+  include: /de/produktionen/[^/?]+\.html(?:\?[^#]*)?$
+production:
+  title:
+    selector: main h1
+    required: true
+  description:
+    selector: main h1 ~ .row > .col-md-8 > p
+    format: markdown
+    stop_tag: hr
+    join: "\n\n"
+  author:
+    selector: main p.supraline
+    match: \b(von|nach)\b
+    strip: '^.*\b(?:von|nach)\s+'
+  premiere:
+    selector: '.termin:has(img[alt="Premiere"]) > .row > .tabnum:first-child > strong'
+    format: date_de
+  duration:
+    selector: main h1 ~ .row > .col-md-4 p
+    match: '^Dauer\b.*\d'
+    format: duration
+  age_rating:
+    selector: main h1 ~ .row > .col-md-4 p
+    extract: ab\s+(\d+)\s+Jahren?
+    format: integer
+credits:
+  - selector: main .text-white > .container > .row > div:nth-child(2) > p
+    name:
+      selector: span.fw-semibold
+      required: true
+    role:
+      selector: p
+      extract: '^(.*):'
+    url:
+      selector: a[href*="personen/"]
+      attribute: href
+      format: url
+    default_type: other
+  - selector: main .text-white > .container > .row > div:nth-child(3) > p
+    infer_type: false
+    actor_labels: [Mit]
+    name:
+      selector: span.fw-semibold
+      required: true
+    role:
+      selector: p
+      extract: '^(.*):'
+    url:
+      selector: a[href*="personen/"]
+      attribute: href
+      format: url
+person:
+  name:
+    selector: main h1
+    required: true
+  description:
+    selector: main .col-md-8 > .col-xl-10
+    format: markdown
+    strip: '(?:\*{1,2})?(?:Mehr\s+Informationen\s+folgen\.?(?:\*{1,2})?|Auf\s+der\s+Bühne\b.*$)'
