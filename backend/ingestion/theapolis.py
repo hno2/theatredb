@@ -16,8 +16,10 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 import aiohttp
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from sqlmodel import select
+from tqdm import tqdm
 
 from backend.config import IMAGE_SIGNATURES
+from backend.date_precision import parse_date
 from backend.ingestion.snapshots import digest, snapshot_path
 from backend.ingestion.staging import validate_records
 from backend.models import EntityType, Source
@@ -31,13 +33,26 @@ ACTOR = "theapolis-ingestion"
 LOG = logging.getLogger(__name__)
 
 
-async def _parallel[T, R](values: Iterable[T], action: Callable[[T], Awaitable[R]], concurrency: int) -> list[R]:
+async def _parallel[T, R](
+    values: Iterable[T],
+    action: Callable[[T], Awaitable[R]],
+    concurrency: int,
+    *,
+    progress: tqdm | None = None,
+) -> list[R]:
     if concurrency < 1:
         raise ValueError("Concurrency must be positive")
     iterator = iter(values)
     results = []
+
+    async def run(value: T) -> R:
+        result = await action(value)
+        if progress is not None:
+            progress.update()
+        return result
+
     while batch := list(islice(iterator, concurrency)):
-        results.extend(await asyncio.gather(*(action(value) for value in batch)))
+        results.extend(await asyncio.gather(*(run(value) for value in batch)))
     return results
 
 
@@ -91,35 +106,34 @@ def _write_json(path: Path, data: object) -> None:
     temporary.replace(path)
 
 
+def _premiere_year(year: object) -> int | None:
+    if year is not None:
+        if isinstance(year, bool) or not re.fullmatch(r"\d{4}", str(year)) or not 1 <= int(str(year)) <= 9999:
+            raise ValueError(f"Invalid premiere year: {year!r}")
+        return int(str(year))
+    return None
+
+
 def premiere_fields(item: dict) -> dict:
-    """Keep year precision separate; accept legacy API dates and German page dates."""
+    """Convert partial API dates without inventing their precision."""
     value = item.get("premierDate") or item.get("premiere")
-    year = next(
-        (item.get(key) for key in ("premierYear", "year", "premiere_year") if item.get(key) not in (None, "")),
-        None,
+    year = _premiere_year(
+        next((item.get(key) for key in ("premierYear", "year", "premiere_year") if item.get(key) not in (None, "")), None)
     )
-    premiere = None
+    result = None
     if value not in (None, ""):
         text = str(value).strip()
-        if re.fullmatch(r"\d{4}", text):
-            if year is not None and (isinstance(year, bool) or int(year) != int(text)):
-                raise ValueError(f"Conflicting premiere date/year for production {item.get('id')}")
-            year = int(text)
-        else:
-            if re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4}", text):
-                premiere = dt.datetime.strptime(text, "%d.%m.%Y").replace(tzinfo=dt.UTC)
-            else:
-                premiere = dt.datetime.fromisoformat(text)
-                if premiere.tzinfo is None:
-                    premiere = premiere.replace(tzinfo=dt.UTC)
-            if year and int(year) != premiere.year:
-                raise ValueError(f"Conflicting premiere date/year for production {item.get('id')}")
-            year = premiere.year
-    if year is not None:
-        if isinstance(year, bool) or not re.fullmatch(r"\d{4}", str(year)) or not 1 <= int(year) <= 9999:
-            raise ValueError(f"Invalid premiere year: {year!r}")
-        year = int(year)
-    return {"premiere": premiere.isoformat() if premiere else None, "premiere_year": year}
+        if re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4}", text):
+            text = dt.datetime.strptime(text, "%d.%m.%Y").date().isoformat()
+        result = parse_date(text)
+        if year is not None and year != result[0].year:
+            raise ValueError(f"Conflicting premiere date/year for production {item.get('id')}")
+    elif year is not None:
+        result = parse_date(f"{year:04d}")
+    return {
+        "premiere": result[0].isoformat() if result else None,
+        "premiere_precision": result[1] if result else None,
+    }
 
 
 def staged_records(items: list[dict]) -> list[dict]:
@@ -172,8 +186,9 @@ async def download(output: Path | None = None, *, concurrency: int = 10, max_pag
         if max_pages:
             pages = min(pages, max_pages)
         items = list(first["items"])
-        for result in await _parallel(range(2, pages + 1), page, concurrency):
-            items.extend(result["items"])
+        with tqdm(total=pages, initial=1, desc="Production pages", unit="page") as progress:
+            for result in await _parallel(range(2, pages + 1), page, concurrency, progress=progress):
+                items.extend(result["items"])
         records = staged_records(items)
         _write_json(
             _source_path(output),
@@ -239,10 +254,12 @@ async def _profile_pages(session: aiohttp.ClientSession, concurrency: int, limit
     async def locations(url: str) -> list[str]:
         return _sitemap_locations(await _fetch(session, url))
 
+    with tqdm(total=len(maps), desc="Sitemaps", unit="sitemap") as progress:
+        sitemap_groups = await _parallel(maps, locations, concurrency, progress=progress)
     pages = list(
         dict.fromkeys(
             _site_url(url)
-            for group in await _parallel(maps, locations, concurrency)
+            for group in sitemap_groups
             for url in group
             if re.fullmatch(r"/de/(?:profil|organization)/[^/]+", urlsplit(url).path)
         )
@@ -301,11 +318,14 @@ async def download_images(output: Path = DEFAULT_IMAGES, *, concurrency: int = 1
                 }
 
         failures = 0
-        for start in range(0, len(pages), concurrency):
-            for result in await _parallel(pages[start : start + concurrency], image, concurrency):
-                failures += result["status"] == "failed"
-                manifest[f"{result['kind']}/{result['id']}"] = result
-            _write_json(manifest_path, manifest)
+        with tqdm(total=len(pages), desc="Profile images", unit="profile") as progress:
+            for start in range(0, len(pages), concurrency):
+                for result in await _parallel(
+                    pages[start : start + concurrency], image, concurrency, progress=progress
+                ):
+                    failures += result["status"] == "failed"
+                    manifest[f"{result['kind']}/{result['id']}"] = result
+                _write_json(manifest_path, manifest)
         if failures:
             raise RuntimeError(f"{failures} image downloads failed; see {manifest_path}")
     LOG.info("Image manifest: %s", output / "manifest.json")
@@ -434,10 +454,13 @@ def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
 
     org_cases = {
         key: propose(EntityType.ORGANIZATION, payload, external_id=key, external_url=url)
-        for key, (payload, url) in organizations.items()
+        for key, (payload, url) in tqdm(organizations.items(), desc="Organizations", unit="organization")
     }
-    person_cases = {key: propose(EntityType.PERSON, payload, external_id=key) for key, payload in people.items()}
-    for production_id, org_id, payload, raw_credits in productions:
+    person_cases = {
+        key: propose(EntityType.PERSON, payload, external_id=key)
+        for key, payload in tqdm(people.items(), desc="People", unit="person")
+    }
+    for production_id, org_id, payload, raw_credits in tqdm(productions, desc="Productions", unit="production"):
         credits = [{"case_id": person_cases[key], "role": role} for key, role in raw_credits]
         authors = [people[key]["name"] for key, role in raw_credits if role == "author"]
         text_case = propose(

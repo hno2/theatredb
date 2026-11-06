@@ -308,12 +308,21 @@ def update_entity[ModelT: SQLModel](
 ) -> ModelT:
     """Update an existing entity by id, recording the operation in SCD2 history."""
     with get_session() as session:
-        entity = session.get(model_cls, entity_id)
+        entity = session.get(model_cls, UUID(entity_id))
         if entity is None:
             raise ValueError(f"{model_cls.__name__} not found")
 
-        for key, value in payload.items():
-            setattr(entity, key, value)
+        data = entity.model_dump(mode="python")
+        for field in getattr(model_cls, "date_fields", ()):
+            if field in payload and f"{field}_precision" not in payload:
+                data.pop(f"{field}_precision", None)
+        validated = model_cls.model_validate({**data, **payload})
+        changed_fields = set(payload)
+        changed_fields.update(
+            f"{field}_precision" for field in getattr(model_cls, "date_fields", ()) if field in payload
+        )
+        for key in changed_fields:
+            setattr(entity, key, getattr(validated, key))
         session.add(entity)
 
         add_scd2_event(

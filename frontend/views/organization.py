@@ -1,5 +1,5 @@
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from html import escape
 from textwrap import shorten
 from urllib.parse import urlsplit
@@ -8,6 +8,8 @@ import pandas as pd
 import streamlit as st
 
 from backend.config import canonical_role
+from backend.date_precision import DatePrecision, date_interval, format_date, intervals_overlap
+from backend.date_precision import parse_date as parse_domain_date
 from backend.entity_management import list_entities
 from backend.models import Source
 from frontend.views.helpers import entity_link, has_coordinates, role_label
@@ -21,6 +23,32 @@ def parse_date(value: str | None) -> date | None:
         return datetime.fromisoformat(value).date()
     except ValueError:
         return None
+
+
+def domain_date_interval(record: dict, field: str) -> tuple[datetime, datetime | None] | None:
+    """Resolve a domain date without treating its start as an exact date."""
+    value = record.get(field)
+    if not value:
+        return None
+    try:
+        parsed, inferred = parse_domain_date(value)
+        return date_interval(parsed, DatePrecision(record.get(f"{field}_precision") or inferred))
+    except ValueError:
+        return None
+
+
+def domain_date_label(record: dict, field: str) -> str:
+    """Display only the precision recorded for a date."""
+    value = record.get(field)
+    if not value:
+        return "Nicht hinterlegt"
+    try:
+        parsed, inferred = parse_domain_date(value)
+        if f"{field}_precision" not in record and inferred == DatePrecision.MINUTE:
+            inferred = DatePrecision.DAY
+        return format_date(parsed, DatePrecision(record.get(f"{field}_precision") or inferred))
+    except ValueError:
+        return "Ungültiges Datum"
 
 
 def web_url(value: str | None) -> str | None:
@@ -54,9 +82,9 @@ def production_dates(productions: list[dict]) -> tuple[list[tuple[date, dict]], 
 
 def premiere_label(production: dict) -> str:
     """Display actual precision, never a made-up day for a year-only premiere."""
-    premiere = parse_date(production.get("premiere"))
-    if premiere:
-        return premiere.strftime("%d.%m.%Y")
+    if production.get("premiere"):
+        label = domain_date_label(production, "premiere")
+        return "Nicht hinterlegt" if label == "Ungültiges Datum" else label
     return str(production["premiere_year"]) if production.get("premiere_year") else "Nicht hinterlegt"
 
 
@@ -222,10 +250,15 @@ def filter_productions(
             for contribution in contributors
         ):
             continue
-        premiere = parse_date(production.get("premiere"))
+        premiere = domain_date_interval(production, "premiere")
         if len(premiere_range) == 2:
             if premiere is not None:
-                if not premiere_range[0] <= premiere <= premiere_range[1]:
+                start = datetime.combine(premiere_range[0], time.min)
+                end = (
+                    datetime.combine(premiere_range[1] + timedelta(days=1), time.min)
+                    if premiere_range[1] < date.max else None
+                )
+                if not intervals_overlap(premiere, (start, end)):
                     continue
             elif year := production.get("premiere_year"):
                 if not premiere_range[0].year <= year <= premiere_range[1].year:
@@ -261,6 +294,11 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         ages = st.multiselect("Altersempfehlung", age_options, key=f"production_ages_{organization_id}")
         dated, _ = production_dates(productions)
         dates = [premiere for premiere, _ in dated]
+        dates.extend(
+            (interval[1] - timedelta(microseconds=1)).date() if interval[1] else date.max
+            for row in productions
+            if (interval := domain_date_interval(row, "premiere"))
+        )
         dates.extend(
             date(row["premiere_year"], 12, 31)
             for row in productions
@@ -346,9 +384,13 @@ def render_organization(data: dict) -> None:
     if context:
         st.text(" · ".join(context))
     history = []
-    if data.get("founded_year") is not None:
+    if data.get("founded"):
+        history.append(f"Gegründet {domain_date_label(data, 'founded')}")
+    elif data.get("founded_year") is not None:
         history.append(f"Gegründet {data['founded_year']}")
-    if data.get("closed_year") is not None:
+    if data.get("closed"):
+        history.append(f"Geschlossen {domain_date_label(data, 'closed')}")
+    elif data.get("closed_year") is not None:
         history.append(f"Geschlossen {data['closed_year']}")
     if history:
         st.caption(" · ".join(history))
@@ -412,7 +454,7 @@ def render_membership(membership: dict) -> None:
         if membership.get(field):
             value = parse_date(membership[field])
             if value:
-                dates.append(f"{label}: {value:%d.%m.%Y}")
+                dates.append(f"{label}: {domain_date_label(membership, field)}")
             else:
                 st.warning(f"Ungültiges Datum: {membership[field]}")
     if dates:

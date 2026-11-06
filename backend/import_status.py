@@ -98,7 +98,7 @@ def _production_stats(
         row["own_website"] += bool(hosts & own_hosts.get(production.organization_id, set()))
         filled = {
             "description": bool(production.description and production.description.strip()),
-            "premiere": production.premiere is not None or production.premiere_year is not None,
+            "premiere": production.premiere is not None,
             "director": "director" in roles[production.id],
             "cast": "actor" in roles[production.id],
             "text": production.text_id is not None,

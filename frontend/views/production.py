@@ -3,6 +3,7 @@ import streamlit as st
 from backend.entity_management import get_people_productions
 from frontend.views.helpers import entity_link, production_people, role_label
 from frontend.views.organization import (
+    domain_date_label,
     parse_date,
     premiere_label,
     render_production_card,
@@ -67,7 +68,9 @@ def render_text(text: dict) -> None:
     st.text(text["title"])
     context = [
         f"Sprache: {text['language']}" if text.get("language") else "",
-        f"Erschienen: {text['published_year']}" if text.get("published_year") is not None else "",
+        f"Erschienen: {domain_date_label(text, 'published')}" if text.get("published") else (
+            f"Erschienen: {text['published_year']}" if text.get("published_year") is not None else ""
+        ),
     ]
     if any(context):
         st.caption(" · ".join(filter(None, context)))

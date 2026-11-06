@@ -437,7 +437,9 @@ class ConfigurableScraper:
                     for member in record["memberships"]:
                         profile = profiles.get(member["url"])
                         if profile:
-                            for field in ("description", "born", "died", "nationality", "urls"):
+                            for field in (
+                                "description", "born", "born_precision", "died", "died_precision", "nationality", "urls"
+                            ):
                                 member[field] = profile[field]
             return validate_records(records)
 

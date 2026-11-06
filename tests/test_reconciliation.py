@@ -270,7 +270,7 @@ def test_person_merge_rewires_all_links_and_deduplicates_roles(db, source) -> No
         ProductionMembership(production_id=prod.id, person_id=right.id, role="Regie"),
         TextContribution(text_id=text.id, person_id=right.id, role="author"),
         OrganizationMembership(organization_id=org.id, person_id=right.id, role="actor"),
-        AwardNomination(award_id=award.id, person_id=right.id, category="Actor", year=2026, result=AwardResult.WON),
+        AwardNomination(award_id=award.id, person_id=right.id, category="Actor", date=dt.datetime(2026, 1, 1), date_precision="year", result=AwardResult.WON),
         EntitySource(source_id=source.id, entity_type=EntityType.PERSON, entity_id=left.id, external_id="1"),
         EntitySource(source_id=source.id, entity_type=EntityType.PERSON, entity_id=right.id, external_id="2"),
     )
@@ -451,7 +451,7 @@ def test_org_and_production_merges_rewire_graph(db) -> None:
         OrganizationMembership(organization_id=right.id, person_id=person.id, role="actor"),
         ProductionMembership(production_id=prod_right.id, person_id=person.id, role="actor", character="King"),
         AwardNomination(
-            award_id=award.id, production_id=prod_right.id, category="Show", year=2026, result=AwardResult.WON
+            award_id=award.id, production_id=prod_right.id, category="Show", date=dt.datetime(2026, 1, 1), date_precision="year", result=AwardResult.WON
         ),
     )
     approve(queue_duplicate("organization", left.id, right.id, reason="Same theatre"))
@@ -471,7 +471,7 @@ def test_award_merge_deduplicates_identical_nominations(db) -> None:
         save(
             db,
             AwardNomination(
-                award_id=award.id, person_id=person.id, category="Actor", year=2026, result=AwardResult.WON
+                award_id=award.id, person_id=person.id, category="Actor", date=dt.datetime(2026, 1, 1), date_precision="year", result=AwardResult.WON
             ),
         )
     approve(queue_duplicate("award", left.id, right.id, reason="Same award"))
@@ -700,7 +700,7 @@ def test_bulk_people_merge_rewires_every_reference_and_preserves_audit(db, sourc
             TextContribution(person_id=person.id, text_id=text.id, role="author"),
             OrganizationMembership(person_id=person.id, organization_id=org.id, role="actor"),
             AwardNomination(
-                person_id=person.id, award_id=award.id, category="Actor", year=2026, result=AwardResult.WON
+                person_id=person.id, award_id=award.id, category="Actor", date=dt.datetime(2026, 1, 1), date_precision="year", result=AwardResult.WON
             ),
             EntitySource(
                 source_id=source.id, entity_type=EntityType.PERSON, entity_id=person.id, external_id=str(person.id)

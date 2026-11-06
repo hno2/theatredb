@@ -19,6 +19,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlmodel import Session, SQLModel, col, select
 
 from backend.config import ENTITY_MODELS, LINK_IDENTITY_FIELDS, canonical_role
+from backend.date_precision import DatePrecision, date_interval, intervals_overlap, parse_date
 from backend.models import (
     Award,
     EntityRedirect,
@@ -238,7 +239,11 @@ def _candidate_evidence(
         conflicts.extend(
             f"Abweichend: {field}"
             for field in ("born", "died")
-            if incoming.get(field) and getattr(row, field) and str(incoming[field]) != str(getattr(row, field))
+            if incoming.get(field) and getattr(row, field)
+            and not _dates_overlap(
+                incoming[field], incoming.get(f"{field}_precision"),
+                getattr(row, field), getattr(row, f"{field}_precision"),
+            )
         )
     elif isinstance(row, Organization):
         conflicts.extend(
@@ -290,17 +295,19 @@ def _production_evidence(
 def _premiere_evidence(row: Production, incoming: dict, evidence: list[str], conflicts: list[str]) -> None:
     premiere = incoming.get("premiere")
     if premiere and row.premiere:
-        if str(premiere)[:10] == row.premiere.date().isoformat():
+        if _dates_overlap(premiere, incoming.get("premiere_precision"), row.premiere, row.premiere_precision):
             evidence.append("Gleiche Premiere")
         else:
             conflicts.append("Abweichende Premiere")
-    elif (premiere or incoming.get("premiere_year")) and (row.premiere or row.premiere_year):
-        incoming_year = int(str(premiere)[:4]) if premiere else incoming["premiere_year"]
-        current_year = row.premiere.year if row.premiere else row.premiere_year
-        if incoming_year == current_year:
-            evidence.append("Gleiches Premierenjahr")
-        else:
-            conflicts.append("Abweichende Premiere")
+
+
+def _dates_overlap(left: object, left_precision: object, right: object, right_precision: object) -> bool:
+    left_date, left_inferred = parse_date(left)
+    right_date, right_inferred = parse_date(right)
+    return intervals_overlap(
+        date_interval(left_date, DatePrecision(left_precision or left_inferred)),
+        date_interval(right_date, DatePrecision(right_precision or right_inferred)),
+    )
 
 
 def _candidates(
@@ -378,10 +385,12 @@ def validate_payload(kind: EntityType, payload: dict, *, complete: bool = False)
     data = model.model_validate(
         payload if complete else {"title" if kind == EntityType.TEXT else "name": "validation", **payload}
     )
-    if isinstance(data, Production) and data.premiere and data.premiere.tzinfo is None:
-        data.premiere = data.premiere.replace(tzinfo=dt.UTC)
     clean = data.model_dump(mode="json")
-    return {field: clean[field] for field in payload}
+    fields = set(payload)
+    for field in getattr(model, "date_fields", ()):
+        if field in fields:
+            fields.add(f"{field}_precision")
+    return {field: clean[field] for field in fields}
 
 
 def propose_record(
@@ -698,12 +707,17 @@ def _preview(session: Session, case: ReconciliationCase, target_id: uuid.UUID | 
         incoming = entity_snapshot(duplicate)
         incoming.pop("id")
     fields = []
+    date_fields = getattr(ENTITY_MODELS[case.entity_type], "date_fields", ())
     for field, value in incoming.items():
-        if value in EMPTY or current.get(field) == value:
+        if field.endswith("_precision") and field.removesuffix("_precision") in date_fields:
+            continue
+        precision_name = f"{field}_precision" if field in date_fields else None
+        same_precision = not precision_name or incoming.get(precision_name) == current.get(precision_name)
+        if value in EMPTY or (current.get(field) == value and same_precision):
             continue
         old = current.get(field)
         merged = union_values(old or [], value) if isinstance(value, list) else value
-        if merged == old:
+        if merged == old and same_precision:
             continue
         fields.append(
             {
@@ -712,6 +726,10 @@ def _preview(session: Session, case: ReconciliationCase, target_id: uuid.UUID | 
                 "incoming": value,
                 "value": merged,
                 "selected": old in EMPTY or isinstance(value, list),
+                **(
+                    {"precision": incoming.get(precision_name), "current_precision": current.get(precision_name)}
+                    if precision_name else {}
+                ),
             }
         )
     target_state = _state(session, case.entity_type, target) if target else None
@@ -945,6 +963,42 @@ def _merge(
     session.flush()
 
 
+def _people_merge_fields(states: list[dict]) -> tuple[dict, list[dict]]:
+    result = dict(states[0]["record"])
+    fields = []
+    for field in Person.model_fields:
+        if field == "id" or field in {f"{name}_precision" for name in Person.date_fields}:
+            continue
+        options = {}
+        for state in states:
+            value = state["record"][field]
+            if value not in EMPTY:
+                option = {"person_id": state["record"]["id"], "value": value}
+                if field in Person.date_fields:
+                    option["precision"] = state["record"][f"{field}_precision"]
+                options.setdefault(stable_digest([value, option.get("precision")]), option)
+        values = list(options.values())
+        if not values:
+            continue
+        value = values[0]["value"]
+        if isinstance(value, list):
+            value = []
+            for option in values:
+                value = union_values(value, option["value"])
+        result[field] = value
+        if field in Person.date_fields:
+            result[f"{field}_precision"] = values[0]["precision"]
+        fields.append(
+            {
+                "field": field,
+                "value": value,
+                "options": values,
+                "conflict": len(values) > 1 and not isinstance(value, list),
+            }
+        )
+    return result, fields
+
+
 def _people_merge_preview(
     session: Session, person_ids: Collection[uuid.UUID | str], target_id: uuid.UUID | str
 ) -> dict:
@@ -959,33 +1013,7 @@ def _people_merge_preview(
         raise ValueError("Selected people no longer exist. Refresh and review again.")
     ordered = sorted(people, key=lambda person: (person.id != target_id, person.id))
     states = [_state(session, EntityType.PERSON, person) for person in ordered]
-    result = dict(states[0]["record"])
-    fields = []
-    for field in Person.model_fields:
-        if field == "id":
-            continue
-        options = {}
-        for state in states:
-            value = state["record"][field]
-            if value not in EMPTY:
-                options.setdefault(stable_digest(value), {"person_id": state["record"]["id"], "value": value})
-        values = list(options.values())
-        if not values:
-            continue
-        value = values[0]["value"]
-        if isinstance(value, list):
-            value = []
-            for option in values:
-                value = union_values(value, option["value"])
-        result[field] = value
-        fields.append(
-            {
-                "field": field,
-                "value": value,
-                "options": values,
-                "conflict": len(values) > 1 and not isinstance(value, list),
-            }
-        )
+    result, fields = _people_merge_fields(states)
     return {
         "target_id": str(target_id),
         "people": states,
@@ -1001,6 +1029,19 @@ def preview_people_merge(person_ids: Collection[uuid.UUID | str], *, target_id: 
         return _people_merge_preview(session, person_ids, target_id)
 
 
+def _people_merge_choices(preview: dict, choices: dict[str, str] | None) -> dict:
+    result = dict(preview["result"])
+    conflicts = {field["field"]: field for field in preview["fields"] if field["conflict"]}
+    for field, person_id in (choices or {}).items():
+        options = {option["person_id"]: option for option in conflicts.get(field, {}).get("options", [])}
+        if person_id not in options:
+            raise ValueError("Selected fields are not in the preview")
+        result[field] = options[person_id]["value"]
+        if field in Person.date_fields:
+            result[f"{field}_precision"] = options[person_id]["precision"]
+    return result
+
+
 def merge_people(
     person_ids: Collection[uuid.UUID | str],
     *,
@@ -1014,13 +1055,7 @@ def merge_people(
         preview = _people_merge_preview(session, person_ids, target_id)
         if preview["revision"] != revision:
             raise ValueError("Data changed since preview. Refresh and review again.")
-        result = dict(preview["result"])
-        conflicts = {field["field"]: field for field in preview["fields"] if field["conflict"]}
-        for field, person_id in (choices or {}).items():
-            options = {option["person_id"]: option["value"] for option in conflicts.get(field, {}).get("options", [])}
-            if person_id not in options:
-                raise ValueError("Selected fields are not in the preview")
-            result[field] = options[person_id]
+        result = _people_merge_choices(preview, choices)
         target = session.get(Person, uuid.UUID(preview["target_id"]))
         if target is None:
             raise ValueError("Merge target no longer exists")
@@ -1156,6 +1191,14 @@ def _apply_credits(session: Session, case: ReconciliationCase, entity: Entity, a
         ensure_credit(session, entity, person_id, credit.get("role"), credit.get("character"), actor_id)
 
 
+def _selected_changes(entity: Entity, options: dict, selected: list[str]) -> dict:
+    changes = {field: options[field]["value"] for field in selected}
+    for field in selected:
+        if field in getattr(type(entity), "date_fields", ()):
+            changes[f"{field}_precision"] = options[field]["precision"]
+    return changes
+
+
 def approve_case(
     case_id: uuid.UUID | str,
     *,
@@ -1191,7 +1234,7 @@ def approve_case(
         if target_id:
             entity = _get(session, case.entity_type, target_id)
             before = entity_snapshot(entity)
-            changes = {field: options[field]["value"] for field in selected}
+            changes = _selected_changes(entity, options, selected)
             validated = revalidate(entity, changes)
             for field in changes:
                 setattr(entity, field, getattr(validated, field))

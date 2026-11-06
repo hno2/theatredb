@@ -47,13 +47,6 @@ venue configs, theatre uploads or their automatic matching/import rules.
 API export and image downloads do not connect to the database. The separate
 Theapolis import queues generic reconciliation cases only.
 
-For an existing PostgreSQL database, back it up and apply this additive schema
-change **before starting the updated app or importing** (fresh databases already
-include the column; `init_db()` does not alter existing tables):
-
-```sql
-ALTER TABLE production ADD COLUMN IF NOT EXISTS premiere_year INTEGER;
-```
 
 Re-export and reimport from the repository root:
 
@@ -91,18 +84,12 @@ For example:
 uv run python -m backend.ingestion.theapolis import --json productions_new.json
 ```
 
-Staged records use normalized `premiere`/`premiere_year`; raw API IDs, dates,
-logos, attribution and the timezone-aware capture timestamp stay in the sidecar.
-The shared schema accepts optional integer `premiere_year` (1–9999) for every
-scraper, and the shared importer preserves it. This keeps year-only dates valid
-without adding Theapolis-specific keys to the staging contract.
-`premierDate` accepts ISO date/datetime, German `DD.MM.YYYY`, or a four-digit year;
-`premierYear` (or detail API `year`) supplies year-only premieres.
-Known full dates go into `Production.premiere`; year-only values go into
-`Production.premiere_year` with `premiere = NULL`, never an invented January 1.
-The UI shows the recorded precision, includes year-only productions in sorting,
-and matches them to date filters overlapping that year. Conflicting date/year
-values fail validation before any review cases are written.
+Staged dates are normalized to a datetime plus a precision field; raw API IDs,
+dates, logos, attribution and the timezone-aware capture timestamp stay in the
+sidecar. `premierDate` accepts ISO year, month, day, or time, as well as
+German `DD.MM.YYYY`. `premierYear` (or detail API `year`) supplies year-only
+premieres. Conflicting date/year values fail validation before any review cases
+are written. Old staging snapshots with `premiere_year` remain accepted.
 
 Review under **Verwaltung → Datenabgleich & Duplikate → Weitere Prüffälle**.
 Approve organizations and people, then texts, then productions. Match existing
@@ -190,6 +177,21 @@ may be omitted; nullable fields may be `null`. Person `type` accepts the current
 `Person.type` list (non-empty), or a legacy scalar such as `"director"`.
 An omitted/null type retains the importer's role-derived type (or `actor` when
 both type and role are absent).
+
+`premiere`, `born`, and `died` accept `YYYY`, `YYYY-MM`, `YYYY-MM-DD`,
+`YYYY-MM-DDTHH`, or `YYYY-MM-DDTHH:MM`. Hour-only inputs become minute
+precision with minutes set to `00`. Precision is inferred from the input.
+Normalized output contains an interval-start datetime and `premiere_precision`,
+`born_precision`, or `died_precision` (`year`, `month`, `day`, `minute`).
+Snapshots created with the earlier `hour` precision must replace it with
+`minute` and use `:00` minutes before upload.
+Explicit precision must not be finer than the supplied date. A date represents a
+half-open interval, not a claim that the event happened at its start; filters and
+matching use overlap. Seconds and fractions in existing inputs are truncated to
+minutes. Domain datetimes retain the source's local wall clock without a timezone;
+any supplied UTC offset is discarded with a warning. Technical timestamps such
+as capture and audit times remain timezone-aware. The manual upload sample at
+`data/date-precision-example.json` illustrates each supported precision.
 Generated scrape snapshots, page output (files and stdout), and page-check
 baselines omit null-valued and empty-array fields recursively, including nested
 memberships. Empty strings, empty objects, numeric zero and false are preserved;
@@ -211,7 +213,7 @@ Mapping to current [domain models](../models.py):
 | Staging | Domain / review behavior |
 | --- | --- |
 | `title` | `Production.name` and a proposed `Text.title` |
-| `description`, `premiere`, `duration`, `age_rating`, `tags`, `critics`, `url` | Production fields; premiere accepts ISO date or RFC3339 datetime with timezone |
+| `description`, `premiere`, `premiere_precision`, `duration`, `age_rating`, `tags`, `critics`, `url` | Production fields; date inputs support year through minute precision |
 | membership `name`, `type`, `description`, `born`, `died`, `nationality` | Person fields |
 | membership `url`, `urls` | Combined into `Person.urls`; first URL identifies the source profile |
 | membership `role`, `character` | Canonical production credit; actor character stays separate |

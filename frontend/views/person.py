@@ -2,7 +2,13 @@ import streamlit as st
 
 from backend.entity_management import get_people_productions
 from frontend.views.helpers import entity_link, production_people
-from frontend.views.organization import parse_date, render_production_card, render_sources, render_web_link
+from frontend.views.organization import (
+    domain_date_label,
+    parse_date,
+    render_production_card,
+    render_sources,
+    render_web_link,
+)
 
 
 def collaboration_groups(productions: list[dict], person_id: str) -> tuple[dict[str, dict], dict[str, dict]]:
@@ -32,7 +38,7 @@ def render_person_header(data: dict) -> None:
         if data.get(field):
             value = parse_date(data[field])
             if value:
-                st.caption(f"{label}: {value:%d.%m.%Y}")
+                st.caption(f"{label}: {domain_date_label(data, field)}")
             else:
                 st.warning(f"{label}: Ungültiges Datum: {data[field]}")
     for index, url in enumerate(data.get("urls") or [], start=1):

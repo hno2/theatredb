@@ -15,7 +15,7 @@ Subclasses may override:
 Output schema (all fields optional except name):
   name, type, url, url_plays,
   street, zip_code, city, country, lat, lon,
-  description, founded_year, closed_year,
+  description, founded, founded_precision, closed, closed_precision,
   venues:      [{venue_name: seat_count}, ...]
   cast:        [{person_name: role}, ...]
   memberships: [{person_name: role}, ...]

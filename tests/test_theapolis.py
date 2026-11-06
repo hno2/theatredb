@@ -50,20 +50,23 @@ def item():
 
 
 @pytest.mark.parametrize(
-    ("raw", "date", "year"),
+    ("raw", "date", "precision"),
     [
-        ({"premierDate": "2026-10-03"}, "2026-10-03T00:00:00+00:00", 2026),
-        ({"premierDate": "3.10.2026"}, "2026-10-03T00:00:00+00:00", 2026),
-        ({"premierDate": "2026-10-03T19:00:00+02:00"}, "2026-10-03T19:00:00+02:00", 2026),
-        ({"premierDate": "2026"}, None, 2026),
-        ({"premierYear": 2026}, None, 2026),
-        ({"year": "2026"}, None, 2026),
+        ({"premierDate": "2026-10-03"}, "2026-10-03T00:00:00", "day"),
+        ({"premierDate": "3.10.2026"}, "2026-10-03T00:00:00", "day"),
+        ({"premierDate": "2026-10-03T19"}, "2026-10-03T19:00:00", "minute"),
+        ({"premierDate": "2026-10-03T19:00:00+02:00"}, "2026-10-03T19:00:00", "minute"),
+        ({"premierDate": "2026"}, "2026-01-01T00:00:00", "year"),
+        ({"premierDate": "2026-01"}, "2026-01-01T00:00:00", "month"),
+        ({"premierDate": "2026-12", "premierYear": "2026"}, "2026-12-01T00:00:00", "month"),
+        ({"premierYear": 2026}, "2026-01-01T00:00:00", "year"),
+        ({"year": "2026"}, "2026-01-01T00:00:00", "year"),
         ({}, None, None),
     ],
 )
-def test_premiere_precision(raw, date, year):
+def test_premiere_precision(raw, date, precision):
     fields = theapolis.premiere_fields(raw)
-    assert fields == {"premiere": date, "premiere_year": year}
+    assert fields == {"premiere": date, "premiere_precision": precision}
     Production.model_validate({"name": "Test", **fields})
 
 
@@ -71,6 +74,11 @@ def test_premiere_precision(raw, date, year):
     "raw",
     [
         {"premierDate": "2026-02-31"},
+        {"premierDate": "2026-00"},
+        {"premierDate": "2026-13"},
+        {"premierDate": "0000-01"},
+        {"premierDate": "2026-01", "premierYear": 2025},
+        {"premierDate": "2026-01", "premierYear": False},
         {"premierYear": "unknown"},
         {"premierYear": True},
         {"premierYear": False},
@@ -104,7 +112,7 @@ def test_export_paginates_parallel_and_preserves_dates(monkeypatch, tmp_path, it
         active -= 1
         record = {**item, "id": page}
         if page == 2:
-            record["premierDate"] = None
+            record["premierDate"] = "2026-01"
         return json.dumps(
             {"success": True, "data": {"totalCount": 1500, "numItemsPerPage": 500, "items": [record]}}
         ).encode()
@@ -125,8 +133,9 @@ def test_export_paginates_parallel_and_preserves_dates(monkeypatch, tmp_path, it
     assert "id" not in data[0]
     assert "organization" not in data[0]
     assert data[0]["memberships"][0]["role"] == "director"
-    assert data[1]["premiere"] is None
-    assert data[1]["premiere_year"] == 2026
+    assert data[1]["premiere"] == "2026-01-01T00:00:00"
+    assert data[1]["premiere_precision"] == "month"
+    assert source["items"][1]["premierDate"] == "2026-01"
     requested.clear()
     asyncio.run(theapolis.download(path, max_pages=1))
     assert requested == [1]
@@ -171,7 +180,8 @@ def test_review_import_is_idempotent_and_approval_preserves_source_only_urls(db,
     with Session(db) as session:
         productions = session.exec(select(Production).order_by(col(Production.premiere))).all()
         assert len(productions) == 2
-        assert productions[0].premiere is None and productions[0].premiere_year == 2026
+        assert productions[0].premiere == dt.datetime(2026, 1, 1)
+        assert productions[0].premiere_precision == "year"
         assert productions[1].premiere is not None
         assert productions[1].premiere.date() == dt.date(2026, 10, 3)
         assert all(p.url is None for p in productions)
@@ -198,6 +208,7 @@ def test_legacy_api_envelope_accepted(db, tmp_path, item):
 
 
 def test_staged_export_reimports_using_source_ids(db, tmp_path, item):
+    item["premierDate"] = "2026-01"
     path = tmp_path / "productions.json"
     path.write_text(json.dumps(theapolis.staged_records([item])))
     path.with_suffix(".source.json").write_text(json.dumps({"items": [item]}))
@@ -207,6 +218,8 @@ def test_staged_export_reimports_using_source_ids(db, tmp_path, item):
         case = session.get(ReconciliationCase, uuid.UUID(result["production"][0]))
         assert case is not None
         assert case.context["external_id"] == str(item["id"])
+        assert case.incoming["premiere"] == "2026-01-01T00:00:00"
+        assert case.incoming["premiere_precision"] == "month"
         assert "url" not in case.incoming
 
 
@@ -257,13 +270,13 @@ def test_default_import_does_not_select_limited_snapshot(db, monkeypatch, tmp_pa
 
 def test_year_matching_and_display_do_not_invent_date(db):
     with Session(db) as session:
-        session.add(Production(name="Hamlet", premiere_year=2026))
+        session.add(Production.model_validate({"name": "Hamlet", "premiere": "2026"}))
         session.commit()
     candidate = find_candidates("production", {"name": "Hamlet", "premiere": "2026-10-03"})[0]
-    assert "Gleiches Premierenjahr" in candidate["evidence"]
-    candidate = find_candidates("production", {"name": "Hamlet", "premiere_year": 2025})[0]
+    assert "Gleiche Premiere" in candidate["evidence"]
+    candidate = find_candidates("production", {"name": "Hamlet", "premiere": "2025"})[0]
     assert "Abweichende Premiere" in candidate["conflicts"]
-    record = {"name": "Hamlet", "premiere_year": 2026}
+    record = {"name": "Hamlet", "premiere": "2026-01-01T00:00:00", "premiere_precision": "year"}
     assert premiere_label(record) == "2026"
     assert production_dates([record])[1] == []
     assert filter_productions([record], "", "", [], (dt.date(2026, 6, 1), dt.date(2026, 6, 30))) == [record]
@@ -276,12 +289,10 @@ def test_year_counts_as_premiere_but_theapolis_never_counts_as_own_website(db):
         session.add(organization)
         session.flush()
         session.add(
-            Production(
-                name="Hamlet",
-                organization_id=organization.id,
-                premiere_year=2026,
-                url="https://www.theapolis.de/de/produktionen/123",
-            )
+            Production.model_validate({
+                "name": "Hamlet", "organization_id": organization.id, "premiere": "2026",
+                "url": "https://www.theapolis.de/de/produktionen/123",
+            })
         )
         session.commit()
         organization_id = organization.id

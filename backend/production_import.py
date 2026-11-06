@@ -26,6 +26,7 @@ from sqlmodel import Session, col, select
 
 from backend.config import CREDIT_ROLES, canonical_role
 from backend.config import PRODUCTION_FIELD_LABELS as FIELD_LABELS
+from backend.date_precision import DatePrecision, date_interval, intervals_overlap, parse_date
 from backend.ingestion.staging import validate_records
 from backend.models import (
     EntitySource,
@@ -63,7 +64,7 @@ TITLE_THRESHOLD = 0.8
 LIST_FIELDS = frozenset({"tags", "critics"})
 # Every source has its own page; a different URL is stored as source link, never a conflict.
 FILL_ONLY_FIELDS = frozenset({"url"})
-PERSON_FILL_FIELDS = ("description", "born", "died", "nationality")
+PERSON_FILL_FIELDS = ("description", "born", "born_precision", "died", "died_precision", "nationality")
 
 
 def title_similarity(left: str, right: str) -> float:
@@ -128,7 +129,7 @@ def prepare_record(record: dict) -> dict:
             "name": record["title"].strip(),
             "description": _clean(record.get("description")),
             "premiere": dt.datetime.fromisoformat(premiere).isoformat() if premiere else None,
-            **({"premiere_year": record["premiere_year"]} if record.get("premiere_year") is not None else {}),
+            "premiere_precision": record.get("premiere_precision"),
             "duration": record.get("duration"),
             "age_rating": record.get("age_rating"),
             "url": record["url"],
@@ -149,8 +150,6 @@ def prepare_record(record: dict) -> dict:
 
 
 def _same(field: str, left: object, right: object) -> bool:
-    if field == "premiere":
-        return str(left)[:10] == str(right)[:10]
     if isinstance(left, str) and isinstance(right, str):
         return normalize(left) == normalize(right) if field == "name" else left.split() == right.split()
     return left == right
@@ -367,6 +366,21 @@ def _text_row(session: Session, production: Production | None, item: dict) -> di
     }
 
 
+def _production_updates(comparison: dict, item: dict, choices: dict[str, str]) -> dict:
+    updates = {
+        row["field"]: row["incoming"] if row["status"] == "conflict" else row["result"]
+        for row in comparison["fields"]
+        if row["field"] in FIELD_LABELS
+        and (
+            row["status"] in {"new", "extended"}
+            or (row["status"] == "conflict" and choices.get(row["field"]) == "incoming")
+        )
+    }
+    if "premiere" in updates:
+        updates["premiere_precision"] = item["incoming"].get("premiere_precision")
+    return updates
+
+
 def _compare(
     session: Session,
     production: Production | None,
@@ -376,6 +390,21 @@ def _compare(
 ) -> dict:
     current = entity_snapshot(production) if production else {}
     fields = [_field_row(field, current.get(field), item["incoming"].get(field)) for field in FIELD_LABELS]
+    date_row = next(row for row in fields if row["field"] == "premiere")
+    old, new = current.get("premiere"), item["incoming"].get("premiere")
+    old_precision, new_precision = current.get("premiere_precision"), item["incoming"].get("premiere_precision")
+    date_row["existing_precision"], date_row["incoming_precision"] = old_precision, new_precision
+    if old and new:
+        old_interval = date_interval(parse_date(old)[0], DatePrecision(old_precision or "day"))
+        new_interval = date_interval(parse_date(new)[0], DatePrecision(new_precision or "day"))
+        if intervals_overlap(old_interval, new_interval):
+            more_precise = list(DatePrecision).index(DatePrecision(new_precision or "day")) > list(DatePrecision).index(
+                DatePrecision(old_precision or "day")
+            )
+            date_row["status"] = "extended" if more_precise else "same"
+            date_row["result"] = new if more_precise else old
+        else:
+            date_row["status"], date_row["result"] = "conflict", old
     fields.append(_text_row(session, production, item))
     people = _people_rows(session, production, item["credits"], organization_id, source_id)
     conflicts = [row["field"] for row in fields if row["status"] == "conflict"]
@@ -466,6 +495,7 @@ def _resolve_person(
                 field: credit[field]
                 for field in PERSON_FILL_FIELDS
                 if credit.get(field) not in EMPTY and before.get(field) in EMPTY
+                and (not field.endswith("_precision") or before.get(field.removesuffix("_precision")) in EMPTY)
             },
         }
         validated = revalidate(person, updates)
@@ -552,15 +582,7 @@ def _apply(
     else:
         before = entity_snapshot(production)
         comparison = _compare(session, production, item, organization_id, source_id)
-        updates = {
-            row["field"]: row["incoming"] if row["status"] == "conflict" else row["result"]
-            for row in comparison["fields"]
-            if row["field"] in FIELD_LABELS
-            and (
-                row["status"] in {"new", "extended"}
-                or (row["status"] == "conflict" and choices.get(row["field"]) == "incoming")
-            )
-        }
+        updates = _production_updates(comparison, item, choices)
         validated = revalidate(production, updates)
         for field in updates:
             setattr(production, field, getattr(validated, field))

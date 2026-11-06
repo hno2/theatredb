@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, cast, get_args, get_origin
 
@@ -11,6 +12,7 @@ from sqlmodel import SQLModel
 from streamlit import session_state, user
 
 from backend.config import FORM_FIELD_KINDS
+from backend.date_precision import DatePrecision, iso_date, parse_date
 from backend.entity_management import create_entity, delete_entity, list_entities, list_entities_where, update_entity
 from backend.models import EntitySource, Person, Source, TextContribution
 
@@ -126,11 +128,14 @@ def _build_fields(model_cls: type[SQLModel], *, field_overrides: dict | None = N
     field_overrides = field_overrides or {}
     fields = []
     for name, field in model_cls.model_fields.items():
+        date_fields = getattr(model_cls, "date_fields", ())
+        if name.endswith("_precision") and name.removesuffix("_precision") in date_fields:
+            continue
         ov: dict = field_overrides.get(name, {})
         if ov.get("exclude"):
             continue
         base_type, optional = _unwrap_optional(field.annotation)
-        kind = str(ov.get("kind") or _guess_kind(base_type))
+        kind = str(ov.get("kind") or ("domain_date" if name in date_fields else _guess_kind(base_type)))
         if kind == "uuid" and name == "id":
             continue
         fields.append(
@@ -238,6 +243,13 @@ def _render_datetime(field: _FieldUI, d: dt.datetime | dt.date | None) -> FormVa
     return picked or None
 
 
+def _domain_date_input(value: object, precision: object) -> str:
+    if value is None or value is pd.NaT or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    parsed, inferred = parse_date(value)
+    return iso_date(parsed, DatePrecision(precision if isinstance(precision, str) else inferred))
+
+
 def _render_multiselect(field: _FieldUI, d: list[str] | None, key: str, accept_new: bool = True) -> FormValue:
     return st.multiselect(
         field.label,
@@ -291,6 +303,12 @@ def _render_field(field: _FieldUI, defaults: dict[str, Any], *, form_key: str, e
             val = _render_numeric(field, d, key)
         case "datetime":
             val = _render_datetime(field, d)
+        case "domain_date":
+            initial = _domain_date_input(d, defaults.get(f"{field.name}_precision"))
+            val = st.text_input(
+                field.label, value=initial, key=key,
+                help="YYYY, YYYY-MM, YYYY-MM-DD, YYYY-MM-DDTHH or YYYY-MM-DDTHH:MM; hours default to :00",
+            ).strip() or None
         case "multiselect":
             val = _render_multiselect(field, d, key)
         case "list_text":
@@ -381,6 +399,8 @@ def _render_member_rows(
         row_cols = st.columns([*[3] * len(fields), 1])
         for col, f in zip(row_cols[:-1], fields, strict=False):
             val = m_dict.get(f.name)
+            if f.kind == "domain_date" and val is not None:
+                val = _domain_date_input(val, m_dict.get(f"{f.name}_precision"))
             if f.kind == "fk_select" and f.name in fk_lookups:
                 val = fk_lookups[f.name].get(str(val) if val is not None else "", str(val) or "—")
             col.write(str(val) if val is not None else "—")
@@ -406,13 +426,15 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
     rows: list[dict] = []
     for member in members:
         m_dict = member.model_dump(mode="python")
-        row = {"__id": str(m_dict["id"])}
+        entry: dict[str, Any] = {"__id": str(m_dict["id"])}
         for f in fields:
             val = m_dict.get(f.name)
+            if f.kind == "domain_date" and val is not None:
+                val = _domain_date_input(val, m_dict.get(f"{f.name}_precision"))
             if f.kind == "fk_select" and f.name in fk_lookups:
                 val = fk_lookups[f.name].get(str(val) if val is not None else "", "")
-            row[f.name] = val
-        rows.append(row)
+            entry[f.name] = val
+        rows.append(entry)
     if not rows:
         rows.append({"__id": "", **{f.name: None for f in fields}})
 
@@ -597,6 +619,11 @@ def _load_df(model_cls: type[SQLModel]) -> pd.DataFrame:
 
 def _render_table(df: pd.DataFrame, fields: list[_FieldUI], name: str) -> dict | None:
     df_view = df.drop(columns=["id"], errors="ignore").copy()
+    for f in fields:
+        if f.kind == "domain_date" and f.name in df_view.columns:
+            precision_field = f"{f.name}_precision"
+            df_view[f.name] = list(map(_domain_date_input, df_view[f.name], df_view[precision_field], strict=True))
+            df_view = df_view.drop(columns=[precision_field], errors="ignore")
     for f in fields:
         if f.kind != "fk_select" or f.fk_model is None or f.name not in df_view.columns:
             continue

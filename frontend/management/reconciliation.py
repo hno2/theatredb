@@ -22,6 +22,7 @@ from backend.config import ENTITY_LABELS as KINDS
 from backend.config import ROLE_LABELS as ROLES
 from backend.config import SCRAPE_FRESHNESS as FRESHNESS
 from backend.config import SCRAPE_SCOPES as SCOPES
+from backend.date_precision import DatePrecision, format_date, parse_date
 from backend.entity_management import list_entities
 from backend.import_status import FIELDS, scrape_overview, theatre_status
 from backend.models import Organization, Source
@@ -61,8 +62,7 @@ def _label(record: dict) -> str:
     name = record.get("name") or record.get("title") or "Ohne Titel"
     details = [
         record.get("city")
-        or (record.get("premiere") or "")[:10]
-        or str(record.get("premiere_year") or "")
+        or (_format("premiere", record["premiere"], record.get("premiere_precision")) if record.get("premiere") else "")
         or record.get("born")
         or ""
     ]
@@ -281,11 +281,12 @@ def _scrape_overview() -> None:
     st.caption("Älteste zuerst. 🟢 ≤ 30 Tage · 🟡 ≤ 90 Tage · 🔴 älter. Stand = Erfassungsdatum der Daten.")
 
 
-def _format(field: str, value: object) -> str:
+def _format(field: str, value: object, precision: str | None = None) -> str:
     if value in (None, "", [], {}):
         return "—"
     if field == "premiere":
-        return dt.date.fromisoformat(str(value)[:10]).strftime("%d.%m.%Y")
+        parsed, inferred = parse_date(value)
+        return format_date(parsed, DatePrecision(precision or inferred))
     if isinstance(value, list):
         return ", ".join(map(str, value))
     if field == "duration":
@@ -310,8 +311,8 @@ def _field_table(review: dict) -> None:
         [
             {
                 "Feld": row["label"],
-                "Bestand": _format(row["field"], row["existing"]) if review["target"] else "—",
-                "Upload": _format(row["field"], row["incoming"]),
+                "Bestand": _format(row["field"], row["existing"], row.get("existing_precision")) if review["target"] else "—",
+                "Upload": _format(row["field"], row["incoming"], row.get("incoming_precision")),
                 "Ergebnis": FIELD_STATUS[row["status"]] if review["target"] else "🆕 neu",
             }
             for row in rows
@@ -355,7 +356,10 @@ def _conflict_choices(review: dict) -> dict[str, str]:
         else:
             row = rows[field]
             label = row["label"]
-            values = {"existing": _format(field, row["existing"]), "incoming": _format(field, row["incoming"])}
+            values = {
+                "existing": _format(field, row["existing"], row.get("existing_precision")),
+                "incoming": _format(field, row["incoming"], row.get("incoming_precision")),
+            }
         with st.container(border=True):
             st.markdown(f"**⚠️ {label}**")
             left, right = st.columns(2)
@@ -493,15 +497,21 @@ def _people_merge_review(preview: dict) -> None:
     for field in preview["fields"]:
         if not field["conflict"]:
             continue
-        options = {option["person_id"]: option["value"] for option in field["options"]}
+        options = {option["person_id"]: option for option in field["options"]}
         choice = st.selectbox(
             f"{field['field']}: Wert behalten",
             list(options),
-            format_func=lambda person_id, options=options: f"{options[person_id]} · {labels[person_id]}",
+            format_func=lambda person_id, options=options: (
+                f"{_review_value(options[person_id]['value'], options[person_id]['precision'])}"
+                f" · {labels[person_id]}" if "precision" in options[person_id]
+                else f"{options[person_id]['value']} · {labels[person_id]}"
+            ),
             key=f"people_choice_{preview['revision']}_{field['field']}",
         )
         choices[field["field"]] = choice
-        result[field["field"]] = options[choice]
+        result[field["field"]] = options[choice]["value"]
+        if "precision" in options[choice]:
+            result[f"{field['field']}_precision"] = options[choice]["precision"]
     with st.expander("Ergebnis und betroffene Verknüpfungen"):
         st.json({"Ergebnis": result, "Personen": preview["people"]})
     st.warning(
@@ -691,6 +701,13 @@ def _select_target(case: dict, initial: dict) -> str | None:
     return choice
 
 
+def _review_value(value: object, precision: str | None) -> str:
+    if not value:
+        return "—"
+    parsed, inferred = parse_date(value)
+    return format_date(parsed, DatePrecision(precision or inferred))
+
+
 def _comparison(case: dict, preview: dict, target_id: str | None) -> list[str]:
     case_id = case["id"]
     if preview["candidates"]:
@@ -728,7 +745,14 @@ def _comparison(case: dict, preview: dict, target_id: str | None) -> list[str]:
     selected = []
     for row in preview["fields"]:
         with st.expander(row["field"], expanded=False):
-            st.json({"Datenbank": row["current"], "Quelle / Duplikat": row["incoming"], "Ergebnis": row["value"]})
+            if "precision" in row:
+                st.json({
+                    "Datenbank": _review_value(row["current"], row["current_precision"]),
+                    "Quelle / Duplikat": _review_value(row["incoming"], row["precision"]),
+                    "Ergebnis": _review_value(row["value"], row["precision"]),
+                })
+            else:
+                st.json({"Datenbank": row["current"], "Quelle / Duplikat": row["incoming"], "Ergebnis": row["value"]})
             if st.checkbox(
                 "Wert übernehmen",
                 value=row["selected"],

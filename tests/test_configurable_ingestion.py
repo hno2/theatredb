@@ -88,11 +88,11 @@ def test_published_schema_matches_models_and_current_domain_fields(record: dict)
     assert json.loads(schema_file.read_text()) == schema
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema, format_checker=FormatChecker()).validate([record])
-    assert set(StagedProduction.model_fields) - {"title", "author", "memberships"} <= set(Production.model_fields)
+    assert set(StagedProduction.model_fields) - {"title", "author", "memberships", "premiere_year"} <= set(Production.model_fields)
     assert set(StagedMembership.model_fields) - {"url", "role", "character"} <= set(Person.model_fields)
     for field in ("description",):
         assert StagedProduction.model_fields[field].annotation == Production.model_fields[field].annotation
-    for field in ("description", "born", "died", "nationality"):
+    for field in ("description", "nationality"):
         assert StagedMembership.model_fields[field].annotation == Person.model_fields[field].annotation
 
 
@@ -112,7 +112,6 @@ def test_reject_invalid_snapshot_shape(value: object) -> None:
         ("duration", "90"),
         ("age_rating", -1),
         ("premiere", "2026-02-31"),
-        ("premiere", "2026-10-16T19:00:00"),
         ("premiere", "123"),
         ("premiere", 123),
         ("premiere_year", 0),
@@ -134,8 +133,10 @@ def test_legacy_and_current_person_fields(record: dict) -> None:
     member = record["memberships"][0]
     member.update(type=["actor", "director"], born="1980-01-02", nationality="Example", urls=[KARLSRUHE_URL])
     result = validate_records([record])[0]
-    assert result["premiere"] == "2026-10-03"
-    assert result["memberships"][0]["born"] == "1980-01-02"
+    assert result["premiere"] == "2026-10-03T00:00:00"
+    assert result["premiere_precision"] == "day"
+    assert result["memberships"][0]["born"] == "1980-01-02T00:00:00"
+    assert result["memberships"][0]["born_precision"] == "day"
     assert result["memberships"][0]["type"] == ["actor", "director"]
     member["url"] = "javascript:alert(1)"
     with pytest.raises(ValidationError):
@@ -184,7 +185,8 @@ def test_karlsruhe_selectors_and_continuation_roles() -> None:
     scraper = ConfigurableScraper(load_config("karlsruhe"))
     record = scraper.parse_page(KARLSRUHE_HTML, KARLSRUHE_URL, "production")
     assert record["title"] == "Example Play"
-    assert record["premiere"] == "2026-10-03"
+    assert record["premiere"] == "2026-10-03T00:00:00"
+    assert record["premiere_precision"] == "day"
     assert record["duration"] == 90
     assert record["age_rating"] == 15
     assert record["author"] == "Example Author"
@@ -261,7 +263,8 @@ def test_nonempty_credit_row_without_person_still_fails() -> None:
 def test_stuttgart_selectors_short_dates_durations_and_multiple_people() -> None:
     scraper = ConfigurableScraper(load_config("stuttgart"))
     record = scraper.parse_page(STUTTGART_HTML, STUTTGART_URL, "production")
-    assert record["premiere"] == "2026-10-16"
+    assert record["premiere"] == "2026-10-16T00:00:00"
+    assert record["premiere_precision"] == "day"
     assert record["duration"] == 170
     assert record["age_rating"] is None  # School grade is not an age.
     assert record["author"] == "Example Author"
@@ -327,7 +330,8 @@ def test_badische_landesbuehne_production_and_listing(color: str) -> None:
     record = scraper.parse_page(html, url, "production")
     assert record["title"] == "Example Play"
     assert record["author"] == "Example Author"
-    assert record["premiere"] == "2026-09-18"
+    assert record["premiere"] == "2026-09-18T00:00:00"
+    assert record["premiere_precision"] == "day"
     assert record["duration"] == 65
     assert record["age_rating"] == 13
     assert record["description"] == ("A synthetic **description** of this production.\n\nSecond paragraph.")

@@ -3,11 +3,26 @@ import uuid
 from enum import StrEnum
 from typing import Any, ClassVar, Protocol, cast
 
-from sqlalchemy import JSON, Column, select
+from pydantic import model_validator
+from sqlalchemy import JSON, Column, DateTime, event, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstanceState
 from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
+
+from backend.date_precision import DatePrecision, normalize_dates
+
+
+class DomainModel(SQLModel):
+    """Validate calendar-domain dates together with their precision."""
+
+    date_fields: ClassVar[tuple[str, ...]] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_domain_dates(cls, value: object) -> object:
+        """Normalize input dates to their interval starts."""
+        return normalize_dates(value, cls.date_fields)
 
 
 class User(SQLModel, table=True):
@@ -175,10 +190,11 @@ class EntityRedirect(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("entity_type", "old_id"),)
 
 
-class Organization(SourceMixin, SQLModel, table=True):
+class Organization(SourceMixin, DomainModel, table=True):
     """Represents a theater organization."""
 
     _entity_type: ClassVar[EntityType] = EntityType.ORGANIZATION
+    date_fields: ClassVar[tuple[str, ...]] = ("founded", "closed")
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str = Field(index=True)
@@ -194,8 +210,10 @@ class Organization(SourceMixin, SQLModel, table=True):
     description: str | None = None
     productions: list[Production] = Relationship(back_populates="organization")
     memberships: list[OrganizationMembership] = Relationship(back_populates="organization")
-    founded_year: int | None = None
-    closed_year: int | None = None
+    founded: dt.datetime | None = Field(default=None, sa_type=DateTime)
+    founded_precision: DatePrecision | None = None
+    closed: dt.datetime | None = Field(default=None, sa_type=DateTime)
+    closed_precision: DatePrecision | None = None
     venues: dict[str, int] | None = Field(default=None, sa_column=Column(JSON))  # format {"Name": "Seats"}
 
 
@@ -216,16 +234,19 @@ class ProductionRole(StrEnum):
     #    "author",
 
 
-class Person(SourceMixin, SQLModel, table=True):
+class Person(SourceMixin, DomainModel, table=True):
     """Represents a person involved in theater productions (e.g., actor, director, author, ...)."""
 
     _entity_type: ClassVar[EntityType] = EntityType.PERSON
+    date_fields: ClassVar[tuple[str, ...]] = ("born", "died")
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str = Field(index=True)
     type: list[str] = Field(default_factory=list, sa_column=Column(JSON))
-    born: dt.date | None = None
-    died: dt.date | None = None
+    born: dt.datetime | None = Field(default=None, sa_type=DateTime)
+    born_precision: DatePrecision | None = None
+    died: dt.datetime | None = Field(default=None, sa_type=DateTime)
+    died_precision: DatePrecision | None = None
     nationality: str | None = None
     description: str | None = None
     urls: list[str] = Field(default_factory=list, sa_column=Column(JSON))
@@ -234,29 +255,35 @@ class Person(SourceMixin, SQLModel, table=True):
     organization_memberships: list[OrganizationMembership] = Relationship(back_populates="person")
 
 
-class OrganizationMembership(SQLModel, table=True):
+class OrganizationMembership(DomainModel, table=True):
     """Represents the involvement of a person in an organization with a specific role and time period."""
+
+    date_fields: ClassVar[tuple[str, ...]] = ("start_date", "end_date")
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     organization_id: uuid.UUID = Field(foreign_key="organization.id")
     person_id: uuid.UUID = Field(foreign_key="person.id")
     role: str | None = None  # e.g. "artistic director", "ensemble member", etc.
-    start_date: dt.date | None = None
-    end_date: dt.date | None = None
+    start_date: dt.datetime | None = Field(default=None, sa_type=DateTime)
+    start_date_precision: DatePrecision | None = None
+    end_date: dt.datetime | None = Field(default=None, sa_type=DateTime)
+    end_date_precision: DatePrecision | None = None
 
     organization: Organization = Relationship(back_populates="memberships")
     person: Person = Relationship(back_populates="organization_memberships")
 
 
-class Text(SourceMixin, SQLModel, table=True):
+class Text(SourceMixin, DomainModel, table=True):
     """Represents a text, such as a play, that can be used in productions."""
 
     _entity_type: ClassVar[EntityType] = EntityType.TEXT
+    date_fields: ClassVar[tuple[str, ...]] = ("published",)
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     title: str
     language: str | None = None  # ISO 639-1
-    published_year: int | None = None
+    published: dt.datetime | None = Field(default=None, sa_type=DateTime)
+    published_precision: DatePrecision | None = None
     contributions: list[TextContribution] = Relationship(back_populates="text")
     productions: list[Production] = Relationship(back_populates="text")
     # lineage edges where this text is the source / the derivative
@@ -301,16 +328,17 @@ class TextLineage(SQLModel, table=True):
     )
 
 
-class Production(SourceMixin, SQLModel, table=True):
+class Production(SourceMixin, DomainModel, table=True):
     """Represents a specific production of a play at an organization and time, with specific people involved (e.g. the 2022 production of "Hamlet" at "Theater XYZ", directed by Person ABC)."""
 
     _entity_type: ClassVar[EntityType] = EntityType.PRODUCTION
+    date_fields: ClassVar[tuple[str, ...]] = ("premiere",)
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str = Field(index=True)
     description: str | None = None
-    premiere: dt.datetime | None = None
-    premiere_year: int | None = Field(default=None, ge=1, le=9999)
+    premiere: dt.datetime | None = Field(default=None, sa_type=DateTime)
+    premiere_precision: DatePrecision | None = None
 
     organization_id: uuid.UUID | None = Field(default=None, foreign_key="organization.id")
     organization: Organization | None = Relationship(back_populates="productions")
@@ -361,17 +389,38 @@ class Award(SourceMixin, SQLModel, table=True):
     nominations: list[AwardNomination] = Relationship(back_populates="award")
 
 
-class AwardNomination(SQLModel, table=True):
+class AwardNomination(DomainModel, table=True):
     """Represents a nomination of a person and/or production for a theater award in a specific category and year."""
+
+    date_fields: ClassVar[tuple[str, ...]] = ("date",)
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     award_id: uuid.UUID = Field(foreign_key="award.id")
     production_id: uuid.UUID | None = Field(default=None, foreign_key="production.id")  # optional: ties to a production
     person_id: uuid.UUID | None = Field(default=None, foreign_key="person.id")  # optional: ties to a person
     category: str  # e.g. "Best Director", "Best Set Design"
-    year: int
+    date: dt.datetime = Field(sa_type=DateTime)
+    date_precision: DatePrecision
     result: AwardResult
 
     award: Award = Relationship(back_populates="nominations")
     production: Production | None = Relationship()
     person: Person | None = Relationship()
+
+
+def _normalize_domain_row(_mapper: object, _connection: object, target: DomainModel) -> None:
+    data = {
+        key: getattr(target, key, None)
+        for field in target.date_fields
+        for key in (field, f"{field}_precision")
+    }
+    normalized = normalize_dates(data, target.date_fields)
+    if not isinstance(normalized, dict):
+        raise TypeError("Expected normalized date fields")
+    for key, value in normalized.items():
+        setattr(target, key, value)
+
+
+for _model in (Organization, Person, OrganizationMembership, Text, Production, AwardNomination):
+    event.listen(_model, "before_insert", _normalize_domain_row)
+    event.listen(_model, "before_update", _normalize_domain_row)

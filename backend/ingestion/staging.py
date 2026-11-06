@@ -2,22 +2,23 @@
 
 import datetime as dt
 import json
-import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, ClassVar
 from urllib.parse import urlsplit
 
 from pydantic import (
     AfterValidator,
-    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
     RootModel,
     StrictInt,
     StringConstraints,
-    field_validator,
+    WithJsonSchema,
+    model_validator,
 )
+
+from backend.date_precision import DatePrecision, normalize_dates, parse_date
 
 type NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, pattern=r"\S")]
 
@@ -37,8 +38,42 @@ type HttpURL = Annotated[
 ]
 type NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 
+_YEAR = r"(?:000[1-9]|00[1-9]\d|0[1-9]\d{2}|[1-9]\d{3})"
+_LEAP_YEAR = r"(?:\d{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)"
+_DATE = (
+    rf"(?:{_YEAR}-(?:(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12]\d|3[01])"
+    rf"|(?:04|06|09|11)-(?:0[1-9]|[12]\d|30)|02-(?:0[1-9]|1\d|2[0-8]))"
+    rf"|{_LEAP_YEAR}-02-29)"
+)
+type DomainDate = Annotated[
+    dt.datetime | None,
+    WithJsonSchema({
+        "anyOf": [
+            {"type": "string", "pattern": rf"^{_YEAR}(?:-(?:0[1-9]|1[0-2]))?$"},
+            {"type": "string", "format": "date"},
+            {"type": "string", "pattern": (
+                rf"^{_DATE}[Tt ](?:[01]\d|2[0-3])(?::[0-5]\d(?::[0-5]\d(?:\.\d{{1,6}})?)?)?"
+                r"(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)?$"
+            )},
+            {"type": "null"},
+        ]
+    }),
+]
 
-class StagedMembership(BaseModel):
+
+class StagedDomainModel(BaseModel):
+    """Validate staged date/precision pairs."""
+
+    date_fields: ClassVar[tuple[str, ...]] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_domain_dates(cls, value: object) -> object:
+        """Store normalized interval starts with their precision."""
+        return normalize_dates(value, cls.date_fields)
+
+
+class StagedMembership(StagedDomainModel):
     """Person fields from Person, plus the source's production credit.
 
     A scalar type remains accepted for existing Karlsruhe snapshots; new
@@ -47,39 +82,34 @@ class StagedMembership(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    date_fields: ClassVar[tuple[str, ...]] = ("born", "died")
 
     name: NonEmptyText
     type: NonEmptyText | Annotated[list[NonEmptyText], Field(min_length=1)] | None = None
     url: HttpURL | None = None
     urls: list[HttpURL] = Field(default_factory=list)
     description: str | None = None
-    born: dt.date | None = None
-    died: dt.date | None = None
+    born: DomainDate = None
+    born_precision: DatePrecision | None = None
+    died: DomainDate = None
+    died_precision: DatePrecision | None = None
     nationality: str | None = None
     role: str | None = None
     character: str | None = None
 
-    @field_validator("born", "died", mode="before")
-    @classmethod
-    def validate_date_input(cls, value: object) -> object:
-        """Do not accept Unix timestamps or basic dates absent from the JSON Schema."""
-        if value is not None and not (
-            isinstance(value, dt.date) or (isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value))
-        ):
-            raise ValueError("Expected an ISO date (YYYY-MM-DD)")
-        return value
 
-
-class StagedProduction(BaseModel):
+class StagedProduction(StagedDomainModel):
     """Source-facing Production fields; title maps to Production.name and Text.title."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    date_fields: ClassVar[tuple[str, ...]] = ("premiere",)
 
     title: NonEmptyText
     url: HttpURL
     description: str | None = None
-    premiere: dt.date | AwareDatetime | None = None
-    premiere_year: Annotated[StrictInt, Field(ge=1, le=9999)] | None = None
+    premiere: DomainDate = None
+    premiere_precision: DatePrecision | None = None
+    premiere_year: Annotated[StrictInt, Field(ge=1, le=9999)] | None = Field(default=None, exclude=True)
     duration: NonNegativeInt | None = None
     age_rating: NonNegativeInt | None = None
     tags: list[NonEmptyText] = Field(default_factory=list)
@@ -87,19 +117,22 @@ class StagedProduction(BaseModel):
     author: str | None = None
     memberships: list[StagedMembership] = Field(default_factory=list)
 
-    @field_validator("premiere", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def validate_premiere_input(cls, value: object) -> object:
-        """Match JSON Schema's date/RFC3339 strings rather than coercing timestamps."""
-        if isinstance(value, str):
-            if not re.fullmatch(
-                r"\d{4}-\d{2}-\d{2}(?:[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2}))?",
-                value,
-            ):
-                raise ValueError("Expected an ISO date or RFC3339 datetime with timezone")
-        elif value is not None and not isinstance(value, dt.date):
-            raise ValueError("Expected an ISO date or RFC3339 datetime with timezone")
-        return value
+    def legacy_year(cls, value: object) -> object:
+        """Accept existing snapshots with a separate premiere year."""
+        if not isinstance(value, dict) or value.get("premiere_year") is None:
+            return value
+        data = dict(value)
+        year = data["premiere_year"]
+        if isinstance(year, bool) or not isinstance(year, int) or not 1 <= year <= 9999:
+            raise ValueError(f"Invalid premiere year: {year!r}")
+        if data.get("premiere"):
+            if parse_date(data["premiere"])[0].year != year:
+                raise ValueError("Conflicting premiere date/year")
+        else:
+            data["premiere"] = f"{year:04d}"
+        return data
 
 
 class StagedProductions(RootModel[list[StagedProduction]]):
@@ -115,10 +148,34 @@ def validate_records(records: object) -> list[dict]:
 
 def staging_schema() -> dict:
     """Generate the published schema from the same BaseModels used at runtime."""
-    return {
+    schema: dict = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         **StagedProductions.model_json_schema(),
     }
+    for model, fields in (("StagedProduction", ("premiere",)), ("StagedMembership", ("born", "died"))):
+        definitions = schema["$defs"][model]
+        definitions["allOf"] = []
+        for field in fields:
+            for precision, suffix in (
+                ("year", r"^\d{4}"),
+                ("month", r"^\d{4}-\d{2}"),
+                ("day", r"^\d{4}-\d{2}-\d{2}"),
+                ("minute", r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}"),
+            ):
+                then: dict = {"properties": {field: {"type": "string", "pattern": suffix}}, "required": [field]}
+                if field == "premiere" and precision == "year":
+                    then = {
+                        "anyOf": [
+                            then,
+                            {"properties": {"premiere_year": {"type": "integer"}}, "required": ["premiere_year"]},
+                        ]
+                    }
+                definitions["allOf"].append({
+                    "if": {"properties": {f"{field}_precision": {"const": precision}},
+                           "required": [f"{field}_precision"]},
+                    "then": then,
+                })
+    return schema
 
 
 def write_schema(path: Path) -> None:

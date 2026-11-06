@@ -43,8 +43,8 @@ def test_shared_staging_year_survives_upload(db, theatre) -> None:
     record = {"title": "Year only", "url": "https://theatre.example/year-only", "premiere_year": 2026}
     upload(theatre, record)
     production = rows(db, Production)[0]
-    assert production.premiere is None
-    assert production.premiere_year == 2026
+    assert production.premiere == dt.datetime(2026, 1, 1)
+    assert production.premiere_precision == "year"
 
 
 @pytest.fixture
@@ -302,7 +302,8 @@ def test_person_and_production_fields_survive_import(db, theatre) -> None:
     )
     person = rows(db, Person, Person.name == "Multi-role Person")[0]
     assert person.type == ["actor", "director"]
-    assert person.born == dt.date(1980, 1, 2)
+    assert person.born == dt.datetime(1980, 1, 2)
+    assert person.born_precision == "day"
     assert person.urls == ["https://theatre.example/people/1", "https://profile.example/1"]
     assert rows(db, ProductionMembership, ProductionMembership.person_id == person.id)[0].role == "director"
     assert rows(db, ProductionMembership, ProductionMembership.role == "actor")[0].character == "Hamlet"
