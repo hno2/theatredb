@@ -31,8 +31,16 @@ Do not delete the data directory to fix a missing database.
 
 See the separate [ingestion guide](backend/ingestion/README.md) for the staging
 JSON Schema, configurable Karlsruhe/Stuttgart scrapers, safe single-page tests,
-scrape diffs and persistent page-change checks. Scraping does not write to the
-database; uploads only auto-apply conflict-free changes.
+scrape diffs and persistent page-change checks. Standalone CLI scraping does not
+write to the database; uploads only auto-apply conflict-free changes.
+
+**Source-owned background crawls:** under **Verwaltung → Quellen → Crawler**,
+configure theatre YAML or a generic HTML crawler, start/stop jobs and inspect
+persisted run history. The separate Procrastinate worker uses existing PostgreSQL,
+revalidates cached pages and automatically submits only changed extracted records
+through existing theatre import/generic reconciliation rules. See
+[crawl architecture and worker setup](backend/crawling/README.md) before first use;
+the queue schema needs one-time initialization.
 
 #### Review-first reconciliation
 

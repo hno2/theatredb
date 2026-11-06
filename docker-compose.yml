@@ -21,14 +21,30 @@ services:
     env_file:
       - ./.env
     networks:
+      - default
       - web
 
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=web"
       - "traefik.http.routers.theater.rule=Host(`theater.simonklug.de`)"
       - "traefik.http.routers.theater.entrypoints=websecure"
       - "traefik.http.routers.theater.tls.certresolver=letsencrypt"
       - "traefik.http.services.theater.loadbalancer.server.port=8501"
+
+  crawl-worker:
+    build: .
+    restart: always
+    command: ["python", "-m", "backend.crawling.worker"]
+    depends_on:
+      - db
+    env_file:
+      - ./.env
+    volumes:
+      - crawl-data:/app/data/crawls
+
+volumes:
+  crawl-data:
 
 networks:
   web:

@@ -4,9 +4,10 @@ from enum import StrEnum
 from typing import Any, ClassVar, Protocol, cast
 
 from pydantic import model_validator
-from sqlalchemy import JSON, Column, DateTime, event, select
+from sqlalchemy import JSON, Column, DateTime, Index, event, select, text
+from sqlalchemy import Text as SQLText
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.orm import InstanceState
+from sqlalchemy.orm import InstanceState, relationship
 from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
@@ -45,6 +46,93 @@ class Source(SQLModel, table=True):
     base_url: str | None = None
     url_pattern: str | None = None  # "https://theaterkompass.de/theatre/{source_id}"
     description: str | None = None
+
+    crawl_config: SourceCrawl | None = Relationship(
+        sa_relationship=relationship("SourceCrawl", back_populates="source", uselist=False, passive_deletes="all")
+    )
+    crawl_runs: list[CrawlRun] = Relationship(
+        back_populates="source", sa_relationship_kwargs={"passive_deletes": "all"}
+    )
+    crawl_pages: list[CrawlPage] = Relationship(
+        back_populates="source", sa_relationship_kwargs={"passive_deletes": "all"}
+    )
+    crawl_records: list[CrawlRecord] = Relationship(
+        back_populates="source", sa_relationship_kwargs={"passive_deletes": "all"}
+    )
+
+
+class SourceCrawl(SQLModel, table=True):
+    """One validated, source-owned crawler definition; absent for non-web sources."""
+
+    source_id: uuid.UUID = Field(foreign_key="source.id", primary_key=True)
+    definition: dict = Field(sa_column=Column(JSON, nullable=False))
+    enabled: bool = True
+    updated_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
+    source: Source = Relationship(back_populates="crawl_config")
+
+
+class CrawlRun(SQLModel, table=True):
+    """Durable execution history, independent of browser sessions and queue retention."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    source_id: uuid.UUID = Field(foreign_key="source.id", index=True)
+    definition: dict = Field(sa_column=Column(JSON, nullable=False))
+    status: str = Field(default="queued", index=True)
+    phase: str = "queued"
+    job_id: int | None = None
+    actor_id: str | None = None
+    created_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
+    started_at: dt.datetime | None = None
+    finished_at: dt.datetime | None = None
+    heartbeat_at: dt.datetime | None = None
+    cancel_requested_at: dt.datetime | None = None
+    force_fetch: bool = False
+    limit: int | None = None
+    enrich_people: bool = True
+    stats: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    artifact_path: str | None = None
+    error: str | None = None
+    source: Source = Relationship(back_populates="crawl_runs")
+
+    __table_args__ = (
+        Index(
+            "uq_crawlrun_active_source",
+            "source_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running', 'cancelling')"),
+            sqlite_where=text("status IN ('queued', 'running', 'cancelling')"),
+        ),
+    )
+
+
+class CrawlPage(SQLModel, table=True):
+    """HTTP cache, not an import cursor; cached pages are still parsed and validated."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    source_id: uuid.UUID = Field(foreign_key="source.id", index=True)
+    variant: str
+    url: str
+    etag: str | None = None
+    last_modified: str | None = None
+    body: str = Field(sa_column=Column(SQLText, nullable=False))
+    checked_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
+    source: Source = Relationship(back_populates="crawl_pages")
+
+    __table_args__ = (UniqueConstraint("source_id", "variant", "url"),)
+
+
+class CrawlRecord(SQLModel, table=True):
+    """Last successfully submitted payload, separate from approved SourceRecord identities."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    source_id: uuid.UUID = Field(foreign_key="source.id", index=True)
+    namespace: str
+    record_key: str
+    payload_hash: str
+    run_id: uuid.UUID = Field(foreign_key="crawlrun.id")
+    source: Source = Relationship(back_populates="crawl_records")
+
+    __table_args__ = (UniqueConstraint("source_id", "namespace", "record_key"),)
 
 
 class EntityType(StrEnum):

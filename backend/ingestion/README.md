@@ -1,8 +1,14 @@
 # Theatre ingestion
 
 The pipeline is **website -> validated staged JSON -> theatre upload (automatic for
-conflict-free changes) -> review of conflicts**. Scraping, schema validation and change checks do not connect to
+conflict-free changes) -> review of conflicts**. Standalone CLI scraping, schema validation and change checks do not connect to
 the database. Never use the historical Scrapy/DB scripts for ongoing imports.
+
+For source-owned start/stop controls in Streamlit, persisted run history,
+conditional HTTP fetching and automatic changed-record imports, see the
+[background crawl architecture and setup](../crawling/README.md). Theatre YAML
+and standalone commands below remain compatible; generic review-source crawls
+use their own typed configuration and generic reconciliation rather than theatre uploads.
 
 ## Setup
 
