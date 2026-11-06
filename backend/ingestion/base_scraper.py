@@ -89,9 +89,11 @@ def parse_duration_minutes(text: str) -> int | None:
         return int(match[1]) * 60 + int(match[2])
     hours = 0
     minutes = 0
-    if m := re.search(r"(\d+)\s*(?:Std\.?|h)\b", text):
+    if m := re.search(r"(\d+)\s*(?:Stunden?|Std\.?|h)\b", text):
         hours = int(m.group(1))
-    if (m := re.search(r"(\d+)\s*(?:Min\.?|m)\b", text)) or (m := re.search(r"(?:Std\.?|h)\s*(\d+)\b", text)):
+    if (m := re.search(r"(\d+)\s*(?:Minuten?|Min\.?|m)\b", text)) or (
+        m := re.search(r"(?:Stunden?|Std\.?|h)\s*(\d+)\b", text)
+    ):
         minutes = int(m.group(1))
     total = hours * 60 + minutes
     return total or None

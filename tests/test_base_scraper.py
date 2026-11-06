@@ -41,6 +41,11 @@ def test_duration() -> None:
     assert parse_duration_minutes("invalid") is None
     assert parse_duration_minutes("") is None
     assert parse_duration_minutes("'Dauer:  1h 50, keine Pause'") == 110
+    assert parse_duration_minutes("1 Stunden 05 Minuten") == 65
+    assert parse_duration_minutes("1 Stunde 30") == 90
+    assert parse_duration_minutes("2 Stunden") == 120
+    assert parse_duration_minutes("45 Minuten") == 45
+    assert parse_duration_minutes("1 Minute") == 1
 
 
 def test_parse_date_dmy() -> None:

@@ -288,6 +288,65 @@ def test_stuttgart_selectors_short_dates_durations_and_multiple_people() -> None
     assert record["memberships"][0]["type"] == "actor"
 
 
+@pytest.mark.parametrize("color", ["primary", "green", "yellow", "purple"])
+def test_badische_landesbuehne_production_and_listing(color: str) -> None:
+    scraper = ConfigurableScraper(load_config("badische-landesbuehne"))
+    base = scraper.config.base_url
+    url = base + "produktionen/example.html?m=51"
+    listing = f"""
+    <base href="{base}"><main>
+    <a href="./produktionen/example.html?m=51">Premiere</a>
+    <a href="./produktionen/example.html?m=51">Production</a>
+    <a href="personen/actor.html">Person</a><a href="seiten/programm-2627.html">Programme</a>
+    </main><footer><a href="produktionen/unrelated.html">Unrelated</a></footer>
+    """
+    assert scraper.parse_list(listing, scraper.config.listing.urls[0]) == [url]
+    html = f"""
+    <base href="{base}"><main><h1>Example Play</h1>
+    <p class="supraline"><span>Schauspiel</span> nach der Novelle von Example Author</p>
+    <div class="row"><div class="col col-md-8">
+    <div class="mb-5"><p>Short summary, not the full description.</p></div>
+    <p>A synthetic <strong>description</strong> of this production.</p>
+    <p>Second paragraph.</p><hr><p>Unrelated adaptation notes.</p></div>
+    <div class="col col-md-4"><p>Dauer<br><strong>1 Stunden 05 Minuten</strong></p>
+    <p>Altersempfehlung<br><strong>ab 13 Jahren</strong></p></div></div>
+    <div id="naechste"><div class="termin"><div class="row">
+    <div class="tabnum"><strong>20.11.2026</strong></div></div></div></div>
+    <div id="vergangene"><div class="termin"><div class="row">
+    <div class="tabnum"><strong>18.09.2026</strong></div>
+    <div><img alt="Premiere"></div></div></div></div>
+    <div class="bg-{color} text-white"><div class="container"><div class="row">
+    <div><h2>Besetzung</h2></div>
+    <div><p>Inszenierung: <span class="fw-semibold">Example Director</span></p>
+    <p>Bühne &amp; Kostüm: <span class="fw-semibold">Example Designer</span></p></div>
+    <div><p>Spieler 1: Die Regisseurin: <span class="fw-semibold">
+    <a href="personen/actor.html">Example Actor</a></span></p>
+    <p>Mit: <span class="fw-semibold">Unlinked Actor</span></p></div>
+    </div></div></div></main>
+    """
+    record = scraper.parse_page(html, url, "production")
+    assert record["title"] == "Example Play"
+    assert record["author"] == "Example Author"
+    assert record["premiere"] == "2026-09-18"
+    assert record["duration"] == 65
+    assert record["age_rating"] == 13
+    assert record["description"] == ("A synthetic **description** of this production.\n\nSecond paragraph.")
+    members = record["memberships"]
+    assert [member["name"] for member in members] == [
+        "Example Director",
+        "Example Designer",
+        "Example Actor",
+        "Unlinked Actor",
+    ]
+    assert [member["type"] for member in members] == ["director", "set_designer", "actor", "actor"]
+    assert members[1]["role"] == "Bühne & Kostüm"
+    assert members[2]["role"] == "Spieler 1: Die Regisseurin"
+    assert members[2]["url"] == base + "personen/actor.html"
+    assert members[3]["url"] is None
+    assert not members[3]["role"]
+    assert scraper.parse_page(html.replace('alt="Premiere"', 'alt="Einführung"'), url, "production")["premiere"] is None
+
+
 @pytest.mark.parametrize(
     ("site", "html", "url"),
     [
@@ -301,6 +360,13 @@ def test_stuttgart_selectors_short_dates_durations_and_multiple_people() -> None
             '<main><h1>Person*</h1><div class="richtext">' + "Biography. " * 12 + "</div></main>",
             "https://www.schauspiel-stuttgart.de/people/1/",
         ),
+        (
+            "badische-landesbuehne",
+            '<main><div class="col-md-8"><h1>Person</h1><div class="col-xl-10"><p>'
+            + "Biography. " * 12
+            + "</p></div><h2>Produktionen von und mit</h2><p>Unrelated production.</p></div></main>",
+            "https://www.badische-landesbuehne.de/de/personen/example.html",
+        ),
     ],
 )
 def test_person_rules_do_not_use_modal_or_footer_text(site: str, html: str, url: str) -> None:
@@ -309,6 +375,54 @@ def test_person_rules_do_not_use_modal_or_footer_text(site: str, html: str, url:
     assert person["name"] == "Person"
     assert "Biography" in person["description"]
     assert "Unrelated" not in person["description"]
+
+
+@pytest.mark.parametrize("biography", ["", " \n ", "<p>&nbsp;</p>"])
+def test_badische_landesbuehne_profiles_without_biographies(biography: str) -> None:
+    scraper = ConfigurableScraper(load_config("badische-landesbuehne"))
+    url = scraper.config.base_url + "personen/example.html"
+    html = (
+        '<main><div class="col-md-8"><h1>Example Person</h1>'
+        f'<div class="col-xl-10">{biography}</div>'
+        '<h2>Produktionen von und mit</h2><div class="production">Unrelated play</div>'
+        "</div></main>"
+    )
+    person = scraper.parse_page(html, url, "person")
+    assert person["name"] == "Example Person"
+    assert person["url"] == url
+    assert person["description"] is None
+    with pytest.raises(ValueError, match="Required selector 'main h1'"):
+        scraper.parse_page(html.replace("<h1>Example Person</h1>", ""), url, "person")
+
+
+@pytest.mark.parametrize(
+    "placeholder", ["", "<p>Mehr Informationen folgen.</p>", "<p><strong>Mehr Informationen folgen.</strong></p>"]
+)
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "<p>Auf der Bühne in der Spielzeit 24|25:</p>",
+        "<h2>Auf der Bühne in der Spielzeit 26/27:</h2>",
+        "<p><strong>Auf der Bühne in der Spielzeit 24|25:</strong></p>",
+        "<p><em>Auf der Bühne in der Spielzeit 24|25:</em></p>",
+        "<p>Auf der Bühne:</p>",
+    ],
+)
+def test_badische_landesbuehne_biographies_stop_before_season_gallery(heading: str, placeholder: str) -> None:
+    scraper = ConfigurableScraper(load_config("badische-landesbuehne"))
+    url = scraper.config.base_url + "personen/example.html"
+    biography = "<p>Example <strong>biography</strong>.</p><p>Second paragraph.</p>"
+    gallery = '<ul><li><a href="/production.html"><img src="/photo.jpg" alt="Scene"></a></li></ul>'
+    html = (
+        '<main><div class="col-md-8"><h1>Example Person</h1>'
+        f'<div class="col-xl-10">{biography}{placeholder}{heading}{gallery}</div></div></main>'
+    )
+    person = scraper.parse_page(html, url, "person")
+    assert person["description"] == "Example **biography**.\n\nSecond paragraph."
+    person = scraper.parse_page(html.replace(biography, ""), url, "person")
+    assert person["description"] is None
+    person = scraper.parse_page(html.replace(heading + gallery, ""), url, "person")
+    assert person["description"] == "Example **biography**.\n\nSecond paragraph."
 
 
 @pytest.mark.parametrize(
