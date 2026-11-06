@@ -40,7 +40,7 @@ persisted run history. The separate Procrastinate worker uses existing PostgreSQ
 revalidates cached pages and automatically submits only changed extracted records
 through existing theatre import/generic reconciliation rules. See
 [crawl architecture and worker setup](backend/crawling/README.md) before first use;
-the queue schema needs one-time initialization.
+missing queue schema is initialized automatically by app and worker startup.
 
 #### Review-first reconciliation
 

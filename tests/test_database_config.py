@@ -106,6 +106,7 @@ def database_setup(load_config, monkeypatch):
     monkeypatch.setitem(config["init_db"].__globals__, "create_engine", create_engine)
     create_tables = Mock()
     monkeypatch.setattr(SQLModel.metadata, "create_all", create_tables)
+    monkeypatch.setitem(config["init_db"].__globals__, "ensure_queue_schema", Mock())
     return config["init_db"], engine, admin_engine, connection, create_engine, create_tables
 
 

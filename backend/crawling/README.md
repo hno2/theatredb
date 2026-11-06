@@ -186,11 +186,11 @@ States: `queued -> running -> succeeded | failed`, or
 
 New application tables are additive (`init_db()` creates missing tables); no
 existing domain column is changed by this feature. Back up the DB before deployment.
-Procrastinate owns its queue schema; initialize it **once**, before workers start:
+App and worker startup automatically initialize the Procrastinate queue schema
+when absent. No manual initialization command is required:
 
 ```bash
 uv sync --all-groups
-uv run python -m backend.crawling.worker --init-schema
 uv run python -m backend.crawling.worker
 ```
 
@@ -202,7 +202,6 @@ Docker:
 
 ```bash
 docker compose build
-docker compose run --rm crawl-worker python -m backend.crawling.worker --init-schema
 docker compose up -d app crawl-worker
 ```
 
@@ -212,7 +211,11 @@ artifacts under `/app/data/crawls`, owned by the non-root worker. Locally, overr
 the artifact directory with `THEATERDB_CRAWL_DIR`. Artifact paths shown in the UI
 refer to the worker filesystem; downloads are not exposed through a public URL.
 Existing DBs must still satisfy the repository's earlier domain migrations.
-Do not repeatedly apply `--init-schema` to an existing queue schema; follow
+Initialization is transactional and protected by a PostgreSQL advisory lock, so
+concurrent app/worker startups cannot create the queue schema twice. Existing
+queue data is preserved. `--init-schema` remains an idempotent setup-only command.
+An incomplete/incompatible installation fails with a migration message rather
+than overwriting existing objects. Automatic setup is not an upgrade migration; follow
 [Procrastinate migrations](https://procrastinate.readthedocs.io/en/stable/howto/production/migrations.html)
 when upgrading the dependency.
 

@@ -22,6 +22,7 @@ from streamlit.testing.v1 import AppTest
 from backend import user_management
 from backend.crawling import queue, runner, service
 from backend.crawling.config import DEFINITION
+from backend.crawling.schema import ensure_queue_schema
 from backend.models import (
     CrawlPage,
     CrawlRecord,
@@ -477,7 +478,7 @@ def test_streamlit_source_controls(db: Engine) -> None:
 
 
 @pytest.fixture
-def postgres(monkeypatch, tmp_path: Path) -> Iterator[tuple[Engine, procrastinate.App]]:
+def postgres(monkeypatch, tmp_path: Path, request) -> Iterator[tuple[Engine, procrastinate.App]]:
     if os.environ.get("THEATERDB_TEST_POSTGRES") != "1":
         pytest.skip("Set THEATERDB_TEST_POSTGRES=1 for disposable PostgreSQL queue integration")
     name = "theaterdb_crawl_test_" + uuid.uuid4().hex
@@ -493,8 +494,9 @@ def postgres(monkeypatch, tmp_path: Path) -> Iterator[tuple[Engine, procrastinat
         )
         try:
             SQLModel.metadata.create_all(engine)
-            with app.open():
-                app.schema_manager.apply_schema()
+            if getattr(request, "param", True):
+                with app.open():
+                    app.schema_manager.apply_schema()
             monkeypatch.setattr(user_management, "_get_engine", lambda: engine)
             client = procrastinate.App(
                 connector=procrastinate.SyncPsycopgConnector(
@@ -587,3 +589,65 @@ def test_postgres_concurrent_start_has_exactly_one_job(postgres) -> None:
     assert len(service.runs(source.id)) == 1
     with db.connect() as connection:
         assert connection.exec_driver_sql("SELECT count(*) FROM procrastinate_jobs").scalar_one() == 1
+
+
+@pytest.mark.parametrize("postgres", [False], indirect=True)
+def test_startup_creates_missing_queue_and_preserves_jobs(postgres) -> None:
+    db, _ = postgres
+    with db.connect() as connection:
+        assert connection.exec_driver_sql("SELECT to_regclass('procrastinate_jobs')").scalar_one() is None
+    user_management.init_db()
+    source, _ = setup_source(db)
+    service.save_config(source.id, record_config("https://example.org"))
+    run_id = service.start(source.id, actor_id="startup-test")
+    user_management.init_db()
+    with db.connect() as connection:
+        assert connection.exec_driver_sql("SELECT count(*) FROM procrastinate_jobs").scalar_one() == 1
+        assert (
+            connection.exec_driver_sql(
+                "SELECT to_regprocedure('procrastinate_prune_stalled_workers_v1(double precision)')"
+            ).scalar_one()
+            is not None
+        )
+    assert service.runs(source.id)[0].id == run_id
+
+
+@pytest.mark.parametrize("postgres", [False], indirect=True)
+def test_concurrent_queue_initialization_is_safe(postgres) -> None:
+    db, _ = postgres
+    barrier = threading.Barrier(2)
+
+    def initialize(_: int) -> None:
+        barrier.wait(timeout=5)
+        ensure_queue_schema(db)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(initialize, [1, 2]))
+    with db.connect() as connection:
+        assert connection.exec_driver_sql("SELECT count(*) FROM procrastinate_jobs").scalar_one() == 0
+
+
+@pytest.mark.parametrize("postgres", [False], indirect=True)
+def test_partial_queue_schema_fails_without_replacing_objects(postgres) -> None:
+    db, _ = postgres
+    with db.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE procrastinate_jobs (marker integer)")
+        connection.exec_driver_sql("INSERT INTO procrastinate_jobs VALUES (42)")
+    with pytest.raises(RuntimeError, match="documented schema migrations"):
+        user_management.init_db()
+    with db.connect() as connection:
+        assert connection.exec_driver_sql("SELECT marker FROM procrastinate_jobs").scalar_one() == 42
+
+
+def test_queue_initialization_skips_sqlite(db: Engine) -> None:
+    ensure_queue_schema(db)
+
+
+def test_existing_queue_missing_worker_function_requires_migration(postgres) -> None:
+    db, _ = postgres
+    with db.begin() as connection:
+        connection.exec_driver_sql("DROP FUNCTION procrastinate_prune_stalled_workers_v1(double precision)")
+    with pytest.raises(RuntimeError, match="existing queue data was not modified"):
+        ensure_queue_schema(db)
+    with db.connect() as connection:
+        assert connection.exec_driver_sql("SELECT count(*) FROM procrastinate_jobs").scalar_one() == 0
