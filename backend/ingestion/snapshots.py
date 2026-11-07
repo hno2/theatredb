@@ -21,9 +21,13 @@ def digest(value: object) -> str:
 
 
 def without_null_fields(data: object) -> object:
-    """Omit null and empty-array object fields recursively, retaining other values."""
+    """Omit null and empty-container object fields recursively, retaining other values."""
     if isinstance(data, dict):
-        return {key: without_null_fields(value) for key, value in data.items() if value is not None and value != []}
+        return {
+            key: without_null_fields(value)
+            for key, value in data.items()
+            if value is not None and value != [] and value != {}
+        }
     if isinstance(data, list):
         return [without_null_fields(value) for value in data]
     return data

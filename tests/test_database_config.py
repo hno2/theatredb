@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, Mock
 
 import dotenv
 import pytest
+import yaml
 from psycopg.errors import DuplicateDatabase, InsufficientPrivilege
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlmodel import SQLModel
@@ -94,6 +95,29 @@ def test_defaults_without_dotenv(load_config) -> None:
     assert url.database == "postgres"
 
 
+@pytest.mark.parametrize("service", [None, "app", "crawl-worker"])
+def test_local_and_compose_database_settings(load_config, monkeypatch, service) -> None:
+    if service is not None:
+        compose = yaml.safe_load((PROJECT_ROOT / "docker-compose.yml").read_text())
+        settings = compose["services"][service]
+        assert settings["depends_on"]["db"]["condition"] == "service_healthy"
+        assert "healthcheck" in compose["services"]["db"]
+        for key, value in settings["environment"].items():
+            monkeypatch.setenv(key, value)
+    config = load_config(
+        "POSTGRES_HOST=localhost\nPOSTGRES_PORT=6543\n"
+        "POSTGRES_USER=app\nPOSTGRES_PASSWORD='p@ss:/#word'\nPOSTGRES_DB=theater\n"
+        "THEATERDB_DATABASE_URL=postgresql://app:secret@localhost:6543/theater\n"
+        "DATABASE_URL=postgresql://app:secret@localhost:6543/theater\n"
+    )
+    url = config["DATABASE_URL"]
+    assert url.host == ("localhost" if service is None else "db")
+    assert url.port == (6543 if service is None else 5432)
+    assert url.username == "app"
+    assert url.database == "theater"
+    assert url.password == ("secret" if service is None else "p@ss:/#word")
+
+
 @pytest.fixture
 def database_setup(load_config, monkeypatch):
     config = load_config("DATABASE_URL=postgresql://app:secret@localhost/theatredb\n")
@@ -106,6 +130,7 @@ def database_setup(load_config, monkeypatch):
     monkeypatch.setitem(config["init_db"].__globals__, "create_engine", create_engine)
     create_tables = Mock()
     monkeypatch.setattr(SQLModel.metadata, "create_all", create_tables)
+    monkeypatch.setitem(config["init_db"].__globals__, "ensure_queue_schema", Mock())
     return config["init_db"], engine, admin_engine, connection, create_engine, create_tables
 
 

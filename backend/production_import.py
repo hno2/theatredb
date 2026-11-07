@@ -17,6 +17,7 @@ import datetime as dt
 import re
 import uuid
 from collections import Counter
+from contextlib import nullcontext
 from difflib import SequenceMatcher
 from operator import itemgetter
 from urllib.parse import urlsplit
@@ -494,7 +495,8 @@ def _resolve_person(
             **{
                 field: credit[field]
                 for field in PERSON_FILL_FIELDS
-                if credit.get(field) not in EMPTY and before.get(field) in EMPTY
+                if credit.get(field) not in EMPTY
+                and before.get(field) in EMPTY
                 and (not field.endswith("_precision") or before.get(field.removesuffix("_precision")) in EMPTY)
             },
         }
@@ -781,12 +783,17 @@ def ingest_records(
     captured_at: dt.datetime | None = None,
     source_base_url: str | None = None,
     file_name: str | None = None,
+    source_id: uuid.UUID | None = None,
+    session: Session | None = None,
+    scope: str | None = None,
 ) -> dict[str, list[str]]:
     """Import an uploaded theatre snapshot atomically; return production titles per outcome.
 
     Outcomes: ``merged`` (existing production enriched), ``unchanged``, ``created`` and
     ``review`` (conflict or similar title queued for :func:`production_review`).
     Every call is logged as an :class:`ImportRun` for the scraping overview.
+    A supplied session leaves commit ownership with the caller (crawl checkpoints
+    and imported data must commit together). ``source_id`` binds an existing source.
     """
     if not source_name.strip():
         raise ValueError("A source name is required")
@@ -796,11 +803,20 @@ def ingest_records(
     records = validate_records(records)
     items = [prepare_record(record) for record in records]
     result: dict[str, list[str]] = {"merged": [], "unchanged": [], "created": [], "review": []}
-    with get_session() as session:
+    owns_session = session is None
+    with get_session() if owns_session else nullcontext(session) as session:
+        if session is None:
+            raise TypeError("An active import session is required")
         organization = session.get(Organization, uuid.UUID(str(organization_id)))
         if organization is None:
             raise ValueError("Theatre not found")
-        source = session.exec(select(Source).where(Source.name == source_name.strip())).first()
+        source = (
+            session.get(Source, source_id)
+            if source_id is not None
+            else session.exec(select(Source).where(Source.name == source_name.strip())).first()
+        )
+        if source_id is not None and source is None:
+            raise ValueError("Source not found")
         if source is None:
             base_url = (
                 canonical_url(source_base_url)
@@ -828,7 +844,7 @@ def ingest_records(
                 organization_id=organization.id,
                 source_id=source.id,
                 file_name=file_name,
-                scope=scrape_scope(file_name),
+                scope=scope or scrape_scope(file_name),
                 website=hosts.most_common(1)[0][0] if hosts else None,
                 captured_at=captured_at,
                 actor_id=actor_id,
@@ -839,7 +855,10 @@ def ingest_records(
                 unchanged=len(result["unchanged"]),
             )
         )
-        session.commit()
+        if owns_session:
+            session.commit()
+        else:
+            session.flush()
     return result
 
 

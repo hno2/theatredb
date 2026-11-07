@@ -75,7 +75,13 @@ LINK_IDENTITY_FIELDS = {
     ProductionMembership: ("production_id", "person_id", "role", "character"),
     TextContribution: ("text_id", "person_id", "role"),
     OrganizationMembership: (
-        "organization_id", "person_id", "role", "start_date", "start_date_precision", "end_date", "end_date_precision"
+        "organization_id",
+        "person_id",
+        "role",
+        "start_date",
+        "start_date_precision",
+        "end_date",
+        "end_date_precision",
     ),
     TextLineage: ("source_text_id", "derived_text_id", "relation", "notes"),
     AwardNomination: ("award_id", "production_id", "person_id", "category", "date", "date_precision", "result"),

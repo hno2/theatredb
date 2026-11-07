@@ -16,6 +16,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlmodel import Session, SQLModel, create_engine
 
 from backend import models  # ruff: ignore[unused-import]
+from backend.crawling.schema import ensure_queue_schema
 from backend.scd2 import SCD2History  # ruff: ignore[unused-import]
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
@@ -77,6 +78,8 @@ def init_db() -> None:
                 if getattr(error.orig, "sqlstate", None) != "42P04":
                     raise
         SQLModel.metadata.create_all(engine)
+
+    ensure_queue_schema(engine)
 
 
 @contextmanager

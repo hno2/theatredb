@@ -48,10 +48,21 @@
     },
     "StagedMembership": {
       "additionalProperties": false,
-      "description": "Person fields from Person, plus the source's production credit.\n\nA scalar type remains accepted for existing Karlsruhe snapshots; new\nproducers may use Person.type's list form. IDs and database links are\ndeliberately excluded: reconciliation resolves them after review.",
+      "description": "Person fields from Person, plus the source's production credit.\n\nA scalar type remains accepted for existing Karlsruhe snapshots; new\nproducers may use Person.type's list form. external_id is source metadata,\nnot a database ID; database links are resolved by reconciliation after review.",
       "properties": {
         "name": {
           "$ref": "#/$defs/NonEmptyText"
+        },
+        "external_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "type": {
           "anyOf": [
