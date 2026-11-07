@@ -10,6 +10,12 @@ services:
       - ./db_data:/var/lib/postgresql/
     env_file:
       - ./.env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U \"$${POSTGRES_USER:-postgres}\" -d \"$${POSTGRES_DB:-postgres}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   app:
     build: .
@@ -17,18 +23,46 @@ services:
     ports:
       - 8501:8501
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     env_file:
       - ./.env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      THEATERDB_DATABASE_URL: ""
+      DATABASE_URL: ""
     networks:
+      - default
       - web
 
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=web"
       - "traefik.http.routers.theater.rule=Host(`theater.simonklug.de`)"
       - "traefik.http.routers.theater.entrypoints=websecure"
       - "traefik.http.routers.theater.tls.certresolver=letsencrypt"
       - "traefik.http.services.theater.loadbalancer.server.port=8501"
+
+  crawl-worker:
+    build: .
+    restart: always
+    command: ["python", "-m", "backend.crawling.worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      THEATERDB_DATABASE_URL: ""
+      DATABASE_URL: ""
+    volumes:
+      - crawl-data:/app/data/crawls
+
+volumes:
+  crawl-data:
 
 networks:
   web:

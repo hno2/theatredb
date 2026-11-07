@@ -9,6 +9,7 @@ import re
 import unicodedata
 import uuid
 from collections.abc import Collection
+from contextlib import nullcontext
 from difflib import SequenceMatcher
 from operator import itemgetter
 from typing import Any, get_origin
@@ -239,10 +240,13 @@ def _candidate_evidence(
         conflicts.extend(
             f"Abweichend: {field}"
             for field in ("born", "died")
-            if incoming.get(field) and getattr(row, field)
+            if incoming.get(field)
+            and getattr(row, field)
             and not _dates_overlap(
-                incoming[field], incoming.get(f"{field}_precision"),
-                getattr(row, field), getattr(row, f"{field}_precision"),
+                incoming[field],
+                incoming.get(f"{field}_precision"),
+                getattr(row, field),
+                getattr(row, f"{field}_precision"),
             )
         )
     elif isinstance(row, Organization):
@@ -405,6 +409,7 @@ def propose_record(
     captured_at: dt.datetime | None = None,
     actor_id: str | None = None,
     reason: str = "Quellimport",
+    session: Session | None = None,
 ) -> ReconciliationCase:
     """Queue an idempotent source proposal without creating people, texts or productions.
 
@@ -423,7 +428,10 @@ def propose_record(
         captured_at = captured_at.astimezone(dt.UTC)
     context = {**(context or {}), "external_id": external_id, "external_url": external_url, "record_key": record_key}
     key = stable_digest([kind, str(source_id), record_key, incoming, context, captured_at])
-    with get_session() as session:
+    owns_session = session is None
+    with get_session() if owns_session else nullcontext(session) as session:
+        if session is None:
+            raise TypeError("An active reconciliation session is required")
         if session.get(Source, source_id) is None:
             raise ValueError("Source not found")
         existing = session.exec(select(ReconciliationCase).where(ReconciliationCase.key == key)).first()
@@ -442,7 +450,10 @@ def propose_record(
             actor_id=actor_id,
         )
         session.add(case)
-        session.commit()
+        if owns_session:
+            session.commit()
+        else:
+            session.flush()
         session.refresh(case)
         return case
 
@@ -728,7 +739,8 @@ def _preview(session: Session, case: ReconciliationCase, target_id: uuid.UUID | 
                 "selected": old in EMPTY or isinstance(value, list),
                 **(
                     {"precision": incoming.get(precision_name), "current_precision": current.get(precision_name)}
-                    if precision_name else {}
+                    if precision_name
+                    else {}
                 ),
             }
         )

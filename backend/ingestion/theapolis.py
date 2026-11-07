@@ -9,20 +9,21 @@ import math
 import re
 from collections.abc import Awaitable, Callable, Iterable
 from email.utils import parsedate_to_datetime
-from itertools import islice
 from pathlib import Path
+from time import monotonic, time
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import aiohttp
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
-from sqlmodel import select
+from sqlalchemy.dialects.postgresql import insert
+from sqlmodel import SQLModel, select
 from tqdm import tqdm
 
 from backend.config import IMAGE_SIGNATURES
 from backend.date_precision import parse_date
-from backend.ingestion.snapshots import digest, snapshot_path
+from backend.ingestion.snapshots import digest, snapshot_path, without_null_fields
 from backend.ingestion.staging import validate_records
-from backend.models import EntityType, Source
+from backend.models import EntityType, Source, TheapolisProfileCache
 from backend.reconciliation import propose_record, validate_payload
 from backend.user_management import get_session, init_db
 
@@ -39,21 +40,33 @@ async def _parallel[T, R](
     concurrency: int,
     *,
     progress: tqdm | None = None,
+    checkpoint: Callable[[], None] | None = None,
 ) -> list[R]:
     if concurrency < 1:
         raise ValueError("Concurrency must be positive")
-    iterator = iter(values)
-    results = []
+    iterator = enumerate(values)
+    results: dict[int, R] = {}
 
-    async def run(value: T) -> R:
-        result = await action(value)
-        if progress is not None:
-            progress.update()
-        return result
+    async def worker() -> None:
+        for index, value in iterator:
+            results[index] = await action(value)
+            if progress is not None:
+                progress.update()
+            if checkpoint is not None and len(results) % concurrency == 0:
+                checkpoint()
+            await asyncio.sleep(0)
 
-    while batch := list(islice(iterator, concurrency)):
-        results.extend(await asyncio.gather(*(run(value) for value in batch)))
-    return results
+    tasks = [asyncio.create_task(worker()) for _ in range(concurrency)]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if checkpoint is not None:
+            checkpoint()
+    return [results[index] for index in sorted(results)]
 
 
 async def _response(session: aiohttp.ClientSession, url: str, attempt: int) -> bytes | float:
@@ -102,7 +115,10 @@ def _session(concurrency: int) -> aiohttp.ClientSession:
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(without_null_fields(data), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     temporary.replace(path)
 
 
@@ -118,7 +134,9 @@ def premiere_fields(item: dict) -> dict:
     """Convert partial API dates without inventing their precision."""
     value = item.get("premierDate") or item.get("premiere")
     year = _premiere_year(
-        next((item.get(key) for key in ("premierYear", "year", "premiere_year") if item.get(key) not in (None, "")), None)
+        next(
+            (item.get(key) for key in ("premierYear", "year", "premiere_year") if item.get(key) not in (None, "")), None
+        )
     )
     result = None
     if value not in (None, ""):
@@ -136,25 +154,198 @@ def premiere_fields(item: dict) -> dict:
     }
 
 
+def _production_tags(item: dict) -> list[str]:
+    tags = []
+    genre = item.get("genre") or {}
+    if isinstance(genre, dict) and isinstance(genre.get("name"), str) and genre["name"].strip():
+        tags.append(genre["name"].strip())
+    elif isinstance(genre, str) and genre.strip():
+        tags.append(genre.strip())
+    for tag in item.get("tags") or []:
+        value = tag.get("name") if isinstance(tag, dict) else tag
+        if isinstance(value, str) and value.strip():
+            tags.append(value.strip())
+    if item.get("independent") is True:
+        tags.append("Freie Darstellende Künste")
+    return list(dict.fromkeys(tags))
+
+
+def _profile_birthday(profile: dict) -> dict:
+    value = profile.get("birthDate")
+    if not value:
+        return {}
+    text = str(value).strip()
+    if re.fullmatch(r"_+", text):
+        return {}
+    try:
+        result = parse_date(text[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", text) else text)
+    except ValueError:
+        LOG.warning(
+            "Ignoring invalid Theapolis profile birthday %r for %s", value, profile.get("url") or profile.get("slug")
+        )
+        return {}
+    return {"born": result[0].isoformat(), "born_precision": result[1]}
+
+
 def staged_records(items: list[dict]) -> list[dict]:
     """Use the same validated production-array contract as venue scrapers."""
     records = []
     for item in items:
-        members = [
-            {"name": _name(person), "type": role, "role": role}
-            for group, role in (("directors", "director"), ("creators", "author"))
-            for person in item.get(group) or []
-        ]
+        members = []
+        for group, role in (("directors", "director"), ("creators", "author")):
+            for person in item.get(group) or []:
+                member: dict[str, object] = {
+                    "name": _name(person),
+                    "external_id": _identity(person),
+                    "type": role,
+                    "role": role,
+                }
+                if profile := person.get("profile"):
+                    member.update(_profile_birthday(profile))
+                    if profile.get("url"):
+                        member["url"] = profile["url"]
+                members.append(member)
         fields = premiere_fields(item)
+        tags = _production_tags(item)
         records.append(
             {
                 "title": _name(item),
                 "url": f"https://www2.theapolis.de/de/produktionen/{quote(_identity(item), safe='')}",
                 **fields,
+                "tags": tags,
                 "memberships": members,
             }
         )
     return validate_records(records)
+
+
+async def _profile_for_name(session: aiohttp.ClientSession, name: str) -> dict | None:
+    query = urlencode({"search": name, "items": 100})
+    result = json.loads(await _fetch(session, f"{SITE}/api/de/profiles?{query}"))
+    if result.get("success") is not True:
+        raise ValueError(f"Theapolis rejected profile search for {name!r}")
+    matches = [
+        profile
+        for profile in result.get("data", {}).get("items", [])
+        if isinstance(profile.get("name"), str) and profile["name"].strip() == name
+    ]
+    if len(matches) != 1:
+        return None
+    slug = matches[0].get("slug")
+    if not isinstance(slug, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", slug):
+        raise ValueError(f"Invalid Theapolis profile slug for {name!r}")
+    try:
+        details = json.loads(await _fetch(session, f"{SITE}/de/people/api/show/{quote(slug, safe='')}"))
+    except aiohttp.ClientResponseError as error:
+        if error.status != 404:
+            raise
+        return None
+    if details.get("error") is not False or details.get("code") != 200:
+        raise ValueError(f"Theapolis rejected profile {slug!r}")
+    profile = details.get("data", {}).get("profile")
+    if not isinstance(profile, dict) or profile.get("slug") != slug:
+        raise ValueError(f"Theapolis profile identity changed for {slug!r}")
+    personal_data = profile.get("personalData") or {}
+    return {
+        "slug": slug,
+        "url": f"{SITE}/de/profil/{quote(slug, safe='')}",
+        "birthDate": personal_data.get("birthDate") or personal_data.get("birthData"),
+    }
+
+
+class _ProfileCache:
+    def __init__(self, entries: dict[str, TheapolisProfileCache]) -> None:
+        self.entries = entries
+
+    @staticmethod
+    def _load() -> dict[str, TheapolisProfileCache]:
+        with get_session() as session:
+            SQLModel.metadata.tables["theapolisprofilecache"].create(session.get_bind(), checkfirst=True)
+            return {
+                entry.name: entry
+                for entry in session.exec(
+                    select(TheapolisProfileCache).where(TheapolisProfileCache.captured_at >= time() - 30 * 86400)
+                ).all()
+            }
+
+    @classmethod
+    async def load(cls) -> _ProfileCache:
+        return cls(await asyncio.to_thread(cls._load))
+
+    def get(self, name: str) -> tuple[bool, dict | None]:
+        entry = self.entries.get(name)
+        return (True, entry.profile) if entry and entry.captured_at >= time() - 30 * 86400 else (False, None)
+
+    @staticmethod
+    def _put(entry: TheapolisProfileCache) -> None:
+        table = SQLModel.metadata.tables["theapolisprofilecache"]
+        statement = insert(table).values(**entry.model_dump())
+        statement = statement.on_conflict_do_update(
+            index_elements=[table.c.name],
+            set_={"profile": statement.excluded.profile, "captured_at": statement.excluded.captured_at},
+            where=table.c.captured_at <= statement.excluded.captured_at,
+        )
+        with get_session() as session:
+            session.execute(statement)
+            session.commit()
+
+    async def put(self, name: str, profile: dict | None) -> None:
+        entry = TheapolisProfileCache(name=name, profile=profile, captured_at=time())
+        task = asyncio.create_task(asyncio.to_thread(self._put, entry))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+        self.entries[name] = entry
+
+
+async def _enrich_people(
+    session: aiohttp.ClientSession,
+    items: list[dict],
+    concurrency: int,
+    *,
+    checkpoint: Callable[[], None] | None = None,
+    cache: _ProfileCache | None = None,
+) -> None:
+    """Attach public profile details by their unique URL slug, not numeric person IDs."""
+    people: dict[tuple[str, str], str] = {}
+    by_name: dict[str, list[dict]] = {}
+    for item in items:
+        for group in ("directors", "creators"):
+            for person in item.get(group) or []:
+                name = _name(person)
+                people[group, _identity(person)] = name
+                by_name.setdefault(name, []).append(person)
+    names = list(by_name)
+    found = set()
+
+    async def enrich(name: str) -> None:
+        cached, profile = cache.get(name) if cache is not None else (False, None)
+        if not cached:
+            profile = await _profile_for_name(session, name)
+        if profile:
+            found.add(name)
+            for person in by_name[name]:
+                person["profile"] = profile
+        if not cached and cache is not None:
+            await cache.put(name, profile)
+
+    with tqdm(total=len(names), desc="People profiles", unit="profile") as progress:
+        await _parallel(
+            names,
+            enrich,
+            concurrency,
+            progress=progress,
+            checkpoint=checkpoint,
+        )
+    missing = sum(name not in found for name in people.values())
+    LOG.info(
+        "Theapolis profiles: %s/%s people missing (%.1f%%); all production credits retained",
+        missing,
+        len(people),
+        100 * missing / len(people) if people else 0,
+    )
 
 
 def _source_path(path: Path) -> Path:
@@ -166,40 +357,73 @@ def _export_scope(max_pages: int | None) -> str:
     return f"{'all' if max_pages is None else f'limit-{max_pages * 500}'}-people-{digest(config)[:12]}"
 
 
+def _periodic_checkpoint(checkpoint: Callable[[], None]) -> Callable[[], None]:
+    last_checkpoint = monotonic()
+
+    def save() -> None:
+        nonlocal last_checkpoint
+        if monotonic() - last_checkpoint >= 60:
+            checkpoint()
+            last_checkpoint = monotonic()
+
+    return save
+
+
 async def download(output: Path | None = None, *, concurrency: int = 10, max_pages: int | None = None) -> Path:
-    """Export shared-schema staged JSON and source metadata, without database writes."""
+    """Checkpoint staged JSON and raw source metadata without database writes."""
     if max_pages is not None and max_pages < 1:
         raise ValueError("max_pages must be positive")
     if output is None:
         output = snapshot_path(DEFAULT_EXPORT_DIR, _export_scope(max_pages))
+    items: list[dict] = []
+    page_items: dict[int, list[dict]] = {}
+    metadata = {
+        "success": False,
+        "captured_at": dt.datetime.now(dt.UTC).isoformat(),
+        "partial": True,
+        "items": items,
+    }
+
+    def checkpoint() -> None:
+        _write_json(_source_path(output), metadata)
+        _write_json(output, staged_records(items) if items else [])
+
+    def checkpoint_pages() -> None:
+        items[:] = [item for number in sorted(page_items) for item in page_items[number]]
+        checkpoint()
+
     async with _session(concurrency) as session:
+        if not output.exists():
+            checkpoint()
 
         async def page(number: int) -> dict:
             query = urlencode({"page": number, "items": 500, "status[0]": 2, "status[1]": 4, "search": ""})
             result = json.loads(await _fetch(session, f"{SITE}/api/de/productions?{query}"))
             if result.get("success") is not True:
                 raise ValueError(f"Theapolis rejected production page {number}")
+            page_items[number] = result["data"]["items"]
             return result["data"]
 
         first = await page(1)
-        pages = math.ceil(first["totalCount"] / first["numItemsPerPage"])
-        if max_pages:
-            pages = min(pages, max_pages)
-        items = list(first["items"])
+        checkpoint_pages()
+        total_pages = math.ceil(first["totalCount"] / first["numItemsPerPage"])
+        pages = min(total_pages, max_pages or total_pages)
         with tqdm(total=pages, initial=1, desc="Production pages", unit="page") as progress:
-            for result in await _parallel(range(2, pages + 1), page, concurrency, progress=progress):
-                items.extend(result["items"])
-        records = staged_records(items)
-        _write_json(
-            _source_path(output),
-            {
-                "success": True,
-                "captured_at": dt.datetime.now(dt.UTC).isoformat(),
-                "partial": pages < math.ceil(first["totalCount"] / first["numItemsPerPage"]),
-                "items": items,
-            },
-        )
-        _write_json(output, records)
+            await _parallel(range(2, pages + 1), page, concurrency, progress=progress, checkpoint=checkpoint_pages)
+        if not items:
+            raise ValueError("Theapolis returned no productions")
+        try:
+            await _enrich_people(
+                session,
+                items,
+                concurrency,
+                checkpoint=_periodic_checkpoint(checkpoint),
+                cache=await _ProfileCache.load(),
+            )
+        finally:
+            checkpoint()
+    metadata.update(success=True, partial=pages < total_pages)
+    _write_json(_source_path(output), metadata)
     LOG.info("Exported %s productions to %s", len(items), output)
     return output
 
@@ -349,10 +573,15 @@ def _add_people(item: dict, people: dict) -> list[tuple[str, str]]:
     credits = []
     for group, role in (("directors", "director"), ("creators", "author")):
         for person in item.get(group) or []:
-            person_id, person_name = _identity(person), _name(person)
+            person_name = _name(person)
+            profile = person.get("profile") or {}
+            person_id = f"{group}:{_identity(person)}"
             payload = people.setdefault(person_id, {"name": person_name, "type": []})
             if payload["name"] != person_name:
                 raise ValueError(f"Inconsistent name for person ID {person_id}")
+            if profile.get("url"):
+                payload["profile_url"] = profile["url"]
+            payload.update(_profile_birthday(profile))
             if role not in payload["type"]:
                 payload["type"].append(role)
             credits.append((person_id, role))
@@ -373,6 +602,8 @@ def _organization(item: dict) -> tuple[dict, str | None]:
 
 
 def _prepare_import(snapshot: dict) -> tuple[dict, dict, list, dt.datetime | None]:
+    if snapshot.get("success") is False:
+        raise ValueError("Theapolis export is incomplete; download again before importing")
     items = snapshot.get("items", snapshot.get("data", {}).get("items"))
     if not isinstance(items, list) or not items:
         raise ValueError("Expected a non-empty Theapolis items array")
@@ -388,33 +619,57 @@ def _prepare_import(snapshot: dict) -> tuple[dict, dict, list, dt.datetime | Non
         if org_id:
             organizations[org_id] = _organization(org)
         credits = _add_people(item, people)
-        payload = {"name": name, **premiere_fields(item)}
+        payload = {"name": name, **premiere_fields(item), "tags": _production_tags(item)}
         productions.append((production_id, org_id, payload, credits))
     for payload, _ in organizations.values():
         validate_payload(EntityType.ORGANIZATION, payload, complete=True)
     for payload in people.values():
-        validate_payload(EntityType.PERSON, payload, complete=True)
+        validate_payload(
+            EntityType.PERSON,
+            {key: value for key, value in payload.items() if key != "profile_url"},
+            complete=True,
+        )
     for _, _, payload, _ in productions:
         validate_payload(EntityType.PRODUCTION, payload, complete=True)
     return organizations, people, productions, captured_at
 
 
-def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
-    """Validate a whole export, then queue generic review cases, never venue uploads."""
-    if json_path is None:
-        snapshots = sorted(DEFAULT_EXPORT_DIR.glob(f"*_{_export_scope(None)}_productions.json"))
-        if not snapshots:
-            raise ValueError(f"No full Theapolis snapshot in {DEFAULT_EXPORT_DIR}; download first or pass --json")
-        json_path = snapshots[-1]
+def _latest_export() -> Path:
+    snapshots = sorted(DEFAULT_EXPORT_DIR.glob(f"*_{_export_scope(None)}_productions.json"), reverse=True)
+    for candidate in snapshots:
+        source_path = _source_path(candidate)
+        if source_path.exists() and json.loads(source_path.read_text(encoding="utf-8")).get("success") is False:
+            LOG.warning("Skipping incomplete Theapolis export: %s", candidate)
+            continue
+        return candidate
+    raise ValueError(f"No full Theapolis snapshot in {DEFAULT_EXPORT_DIR}; download first or pass --json")
+
+
+def _read_import_snapshot(json_path: Path) -> dict:
     snapshot = json.loads(json_path.read_text(encoding="utf-8"))
     if isinstance(snapshot, list):
         source_path = _source_path(json_path)
         if not source_path.exists():
             raise ValueError(f"Theapolis review import requires source metadata: {source_path}")
         source = json.loads(source_path.read_text(encoding="utf-8"))
-        if validate_records(snapshot) != staged_records(source["items"]):
+        if source.get("success") is False:
+            raise ValueError("Theapolis export is incomplete; download again before importing")
+        actual = validate_records(snapshot)
+        expected = staged_records(source["items"])
+        # Older snapshots lack person IDs; their source metadata still supplies them.
+        for record, source_record in zip(actual, expected, strict=False):
+            for member, source_member in zip(record["memberships"], source_record["memberships"], strict=False):
+                if member["external_id"] is None:
+                    source_member["external_id"] = None
+        if actual != expected:
             raise ValueError("Staged JSON differs from its Theapolis source metadata; re-export both files")
         snapshot = source
+    return snapshot
+
+
+def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
+    """Validate a whole export, then queue generic review cases, never venue uploads."""
+    snapshot = _read_import_snapshot(json_path if json_path is not None else _latest_export())
     organizations, people, productions, captured_at = _prepare_import(snapshot)
     init_db()
     with get_session() as session:
@@ -457,7 +712,12 @@ def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
         for key, (payload, url) in tqdm(organizations.items(), desc="Organizations", unit="organization")
     }
     person_cases = {
-        key: propose(EntityType.PERSON, payload, external_id=key)
+        key: propose(
+            EntityType.PERSON,
+            {field: value for field, value in payload.items() if field != "profile_url"},
+            external_id=key,
+            external_url=payload.get("profile_url"),
+        )
         for key, payload in tqdm(people.items(), desc="People", unit="person")
     }
     for production_id, org_id, payload, raw_credits in tqdm(productions, desc="Productions", unit="production"):

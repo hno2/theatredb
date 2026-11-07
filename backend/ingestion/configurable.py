@@ -34,6 +34,7 @@ from backend.ingestion.base_scraper import (
 from backend.ingestion.staging import HttpURL, NonEmptyText, StagedMembership, StagedProduction, validate_records
 
 CONFIG_DIR = Path(__file__).with_name("configs")
+_CONFIG_ALIASES = {"karlsruhe": "staatstheater-karlsruhe", "stuttgart": "staatstheater-stuttgart"}
 _GERMAN_MONTHS = {name[:3].casefold(): number for number, name in get_month_names(locale="de").items()}
 # Retain the ASCII March spelling accepted by earlier snapshots.
 _GERMAN_MONTHS["mar"] = _GERMAN_MONTHS["mär"]
@@ -158,7 +159,8 @@ def load_config(path_or_name: str | Path) -> ScraperConfig:
     """Load a checked JSON/YAML file or one of the bundled venue names."""
     path = Path(path_or_name)
     if not path.exists() and not path.suffix:
-        path = CONFIG_DIR / f"{path.name.casefold()}.yaml"
+        name = path.name.casefold()
+        path = CONFIG_DIR / f"{_CONFIG_ALIASES.get(name, name)}.yaml"
     text = path.read_text(encoding="utf-8")
     data = json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
     return ScraperConfig.model_validate(data)
@@ -438,7 +440,13 @@ class ConfigurableScraper:
                         profile = profiles.get(member["url"])
                         if profile:
                             for field in (
-                                "description", "born", "born_precision", "died", "died_precision", "nationality", "urls"
+                                "description",
+                                "born",
+                                "born_precision",
+                                "died",
+                                "died_precision",
+                                "nationality",
+                                "urls",
                             ):
                                 member[field] = profile[field]
             return validate_records(records)

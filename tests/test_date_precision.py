@@ -111,8 +111,12 @@ def test_hour_input_defaults_to_zero_minutes():
 
 
 def test_hour_precision_is_not_valid():
-    record = {"title": "Play", "url": "https://example.org/play", "premiere": "2026-01-03T08",
-              "premiere_precision": "hour"}
+    record = {
+        "title": "Play",
+        "url": "https://example.org/play",
+        "premiere": "2026-01-03T08",
+        "premiere_precision": "hour",
+    }
     assert list(Draft202012Validator(staging_schema(), format_checker=FormatChecker()).iter_errors([record]))
     with pytest.raises(ValidationError):
         validate_records([record])
@@ -219,8 +223,10 @@ def test_hour_input_roundtrips_as_minute_in_database_and_review(db):
         assert saved.born == dt.datetime(1980, 5, 1, 8, 0)
         assert saved.born_precision == DatePrecision.MINUTE
     case = propose_record(
-        EntityType.PERSON, {"name": "Person", "born": "1980-05-01T09"},
-        source_id=source_id, external_id="person",
+        EntityType.PERSON,
+        {"name": "Person", "born": "1980-05-01T09"},
+        source_id=source_id,
+        external_id="person",
     )
     preview = preview_case(case.id, target_id=person_id)
     approve_case(case.id, revision=preview["revision"], target_id=person_id, fields=["born"], actor_id="test")
@@ -243,8 +249,11 @@ def test_people_merge_selects_date_and_precision_together(db):
     assert date_field["conflict"]
     assert not any(field["field"] == "born_precision" for field in preview["fields"])
     merge_people(
-        [first_id, second_id], target_id=first_id, revision=preview["revision"],
-        choices={"born": str(second_id)}, actor_id="test",
+        [first_id, second_id],
+        target_id=first_id,
+        revision=preview["revision"],
+        choices={"born": str(second_id)},
+        actor_id="test",
     )
     with Session(db) as session:
         saved = session.get(Person, first_id)

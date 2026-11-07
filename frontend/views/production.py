@@ -68,9 +68,9 @@ def render_text(text: dict) -> None:
     st.text(text["title"])
     context = [
         f"Sprache: {text['language']}" if text.get("language") else "",
-        f"Erschienen: {domain_date_label(text, 'published')}" if text.get("published") else (
-            f"Erschienen: {text['published_year']}" if text.get("published_year") is not None else ""
-        ),
+        f"Erschienen: {domain_date_label(text, 'published')}"
+        if text.get("published")
+        else (f"Erschienen: {text['published_year']}" if text.get("published_year") is not None else ""),
     ]
     if any(context):
         st.caption(" · ".join(filter(None, context)))
