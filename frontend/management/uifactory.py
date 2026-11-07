@@ -305,10 +305,15 @@ def _render_field(field: _FieldUI, defaults: dict[str, Any], *, form_key: str, e
             val = _render_datetime(field, d)
         case "domain_date":
             initial = _domain_date_input(d, defaults.get(f"{field.name}_precision"))
-            val = st.text_input(
-                field.label, value=initial, key=key,
-                help="YYYY, YYYY-MM, YYYY-MM-DD, YYYY-MM-DDTHH or YYYY-MM-DDTHH:MM; hours default to :00",
-            ).strip() or None
+            val = (
+                st.text_input(
+                    field.label,
+                    value=initial,
+                    key=key,
+                    help="YYYY, YYYY-MM, YYYY-MM-DD, YYYY-MM-DDTHH or YYYY-MM-DDTHH:MM; hours default to :00",
+                ).strip()
+                or None
+            )
         case "multiselect":
             val = _render_multiselect(field, d, key)
         case "list_text":

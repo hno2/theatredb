@@ -79,5 +79,10 @@ For a bounded export check, add `--max-pages 1`; partial exports are not selecte
 by the default import.
 
 Review cases under **Verwaltung → Datenabgleich & Duplikate → Weitere Prüffälle**.
+Director and creator IDs use separate source namespaces, so the same person may
+have separate review cases in each role. Check suggested matches when approving
+them. Older cases using unqualified numeric person IDs are not reused; review
+them separately to avoid duplicate approvals. Existing exports remain importable;
+download again to look up profiles skipped due to cross-role ID collisions.
 Approve organizations and people before texts and productions. Image downloads
 do not grant publication rights.

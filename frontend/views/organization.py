@@ -256,7 +256,8 @@ def filter_productions(
                 start = datetime.combine(premiere_range[0], time.min)
                 end = (
                     datetime.combine(premiere_range[1] + timedelta(days=1), time.min)
-                    if premiere_range[1] < date.max else None
+                    if premiere_range[1] < date.max
+                    else None
                 )
                 if not intervals_overlap(premiere, (start, end)):
                     continue

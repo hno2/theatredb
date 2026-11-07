@@ -88,7 +88,9 @@ def test_published_schema_matches_models_and_current_domain_fields(record: dict)
     assert json.loads(schema_file.read_text()) == schema
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema, format_checker=FormatChecker()).validate([record])
-    assert set(StagedProduction.model_fields) - {"title", "author", "memberships", "premiere_year"} <= set(Production.model_fields)
+    assert set(StagedProduction.model_fields) - {"title", "author", "memberships", "premiere_year"} <= set(
+        Production.model_fields
+    )
     assert set(StagedMembership.model_fields) - {"url", "role", "character", "external_id"} <= set(Person.model_fields)
     for field in ("description",):
         assert StagedProduction.model_fields[field].annotation == Production.model_fields[field].annotation
@@ -207,6 +209,17 @@ def test_karlsruhe_selectors_and_continuation_roles() -> None:
 def test_bundled_config_names_are_case_insensitive() -> None:
     assert load_config("Karlsruhe") == load_config("karlsruhe")
     assert load_config("STUTTGART") == load_config("stuttgart")
+    assert load_config("karlsruhe") == load_config("staatstheater-karlsruhe")
+    assert load_config("stuttgart") == load_config("staatstheater-stuttgart")
+    assert load_config("BADISCHE-LANDESBUEHNE") == load_config("badische-landesbuehne")
+
+
+def test_existing_config_path_takes_precedence_over_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_config("staatstheater-karlsruhe").model_dump(mode="json")
+    config["organization_name"] = "Custom"
+    (tmp_path / "karlsruhe").write_text(yaml.safe_dump(config))
+    monkeypatch.chdir(tmp_path)
+    assert load_config("karlsruhe").organization_name == "Custom"
 
 
 @pytest.mark.parametrize("role", ["Vermittlung", "VERMITTLUNG", "Theaterpädagogik"])

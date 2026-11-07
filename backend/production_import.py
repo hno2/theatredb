@@ -495,7 +495,8 @@ def _resolve_person(
             **{
                 field: credit[field]
                 for field in PERSON_FILL_FIELDS
-                if credit.get(field) not in EMPTY and before.get(field) in EMPTY
+                if credit.get(field) not in EMPTY
+                and before.get(field) in EMPTY
                 and (not field.endswith("_precision") or before.get(field.removesuffix("_precision")) in EMPTY)
             },
         }

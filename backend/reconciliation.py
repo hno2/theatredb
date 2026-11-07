@@ -240,10 +240,13 @@ def _candidate_evidence(
         conflicts.extend(
             f"Abweichend: {field}"
             for field in ("born", "died")
-            if incoming.get(field) and getattr(row, field)
+            if incoming.get(field)
+            and getattr(row, field)
             and not _dates_overlap(
-                incoming[field], incoming.get(f"{field}_precision"),
-                getattr(row, field), getattr(row, f"{field}_precision"),
+                incoming[field],
+                incoming.get(f"{field}_precision"),
+                getattr(row, field),
+                getattr(row, f"{field}_precision"),
             )
         )
     elif isinstance(row, Organization):
@@ -736,7 +739,8 @@ def _preview(session: Session, case: ReconciliationCase, target_id: uuid.UUID | 
                 "selected": old in EMPTY or isinstance(value, list),
                 **(
                     {"precision": incoming.get(precision_name), "current_precision": current.get(precision_name)}
-                    if precision_name else {}
+                    if precision_name
+                    else {}
                 ),
             }
         )

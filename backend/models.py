@@ -505,11 +505,7 @@ class AwardNomination(DomainModel, table=True):
 
 
 def _normalize_domain_row(_mapper: object, _connection: object, target: DomainModel) -> None:
-    data = {
-        key: getattr(target, key, None)
-        for field in target.date_fields
-        for key in (field, f"{field}_precision")
-    }
+    data = {key: getattr(target, key, None) for field in target.date_fields for key in (field, f"{field}_precision")}
     normalized = normalize_dates(data, target.date_fields)
     if not isinstance(normalized, dict):
         raise TypeError("Expected normalized date fields")

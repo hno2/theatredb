@@ -47,17 +47,22 @@ _DATE = (
 )
 type DomainDate = Annotated[
     dt.datetime | None,
-    WithJsonSchema({
-        "anyOf": [
-            {"type": "string", "pattern": rf"^{_YEAR}(?:-(?:0[1-9]|1[0-2]))?$"},
-            {"type": "string", "format": "date"},
-            {"type": "string", "pattern": (
-                rf"^{_DATE}[Tt ](?:[01]\d|2[0-3])(?::[0-5]\d(?::[0-5]\d(?:\.\d{{1,6}})?)?)?"
-                r"(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)?$"
-            )},
-            {"type": "null"},
-        ]
-    }),
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string", "pattern": rf"^{_YEAR}(?:-(?:0[1-9]|1[0-2]))?$"},
+                {"type": "string", "format": "date"},
+                {
+                    "type": "string",
+                    "pattern": (
+                        rf"^{_DATE}[Tt ](?:[01]\d|2[0-3])(?::[0-5]\d(?::[0-5]\d(?:\.\d{{1,6}})?)?)?"
+                        r"(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)?$"
+                    ),
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
 ]
 
 
@@ -171,11 +176,15 @@ def staging_schema() -> dict:
                             {"properties": {"premiere_year": {"type": "integer"}}, "required": ["premiere_year"]},
                         ]
                     }
-                definitions["allOf"].append({
-                    "if": {"properties": {f"{field}_precision": {"const": precision}},
-                           "required": [f"{field}_precision"]},
-                    "then": then,
-                })
+                definitions["allOf"].append(
+                    {
+                        "if": {
+                            "properties": {f"{field}_precision": {"const": precision}},
+                            "required": [f"{field}_precision"],
+                        },
+                        "then": then,
+                    }
+                )
     return schema
 
 

@@ -311,7 +311,9 @@ def _field_table(review: dict) -> None:
         [
             {
                 "Feld": row["label"],
-                "Bestand": _format(row["field"], row["existing"], row.get("existing_precision")) if review["target"] else "—",
+                "Bestand": _format(row["field"], row["existing"], row.get("existing_precision"))
+                if review["target"]
+                else "—",
                 "Upload": _format(row["field"], row["incoming"], row.get("incoming_precision")),
                 "Ergebnis": FIELD_STATUS[row["status"]] if review["target"] else "🆕 neu",
             }
@@ -502,8 +504,8 @@ def _people_merge_review(preview: dict) -> None:
             f"{field['field']}: Wert behalten",
             list(options),
             format_func=lambda person_id, options=options: (
-                f"{_review_value(options[person_id]['value'], options[person_id]['precision'])}"
-                f" · {labels[person_id]}" if "precision" in options[person_id]
+                f"{_review_value(options[person_id]['value'], options[person_id]['precision'])} · {labels[person_id]}"
+                if "precision" in options[person_id]
                 else f"{options[person_id]['value']} · {labels[person_id]}"
             ),
             key=f"people_choice_{preview['revision']}_{field['field']}",
@@ -746,11 +748,13 @@ def _comparison(case: dict, preview: dict, target_id: str | None) -> list[str]:
     for row in preview["fields"]:
         with st.expander(row["field"], expanded=False):
             if "precision" in row:
-                st.json({
-                    "Datenbank": _review_value(row["current"], row["current_precision"]),
-                    "Quelle / Duplikat": _review_value(row["incoming"], row["precision"]),
-                    "Ergebnis": _review_value(row["value"], row["precision"]),
-                })
+                st.json(
+                    {
+                        "Datenbank": _review_value(row["current"], row["current_precision"]),
+                        "Quelle / Duplikat": _review_value(row["incoming"], row["precision"]),
+                        "Ergebnis": _review_value(row["value"], row["precision"]),
+                    }
+                )
             else:
                 st.json({"Datenbank": row["current"], "Quelle / Duplikat": row["incoming"], "Ergebnis": row["value"]})
             if st.checkbox(

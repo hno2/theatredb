@@ -8,6 +8,7 @@ from enum import StrEnum
 
 LOG = logging.getLogger(__name__)
 
+
 class DatePrecision(StrEnum):
     """Resolution of a calendar-domain date."""
 
@@ -37,10 +38,15 @@ def parse_date(value: object) -> tuple[dt.datetime, DatePrecision]:
         raise ValueError(f"Invalid calendar date: {value!r}")
     parts = match.groupdict()
     precision = next(
-        (precision for key, precision in (
-            ("hour", DatePrecision.MINUTE),
-            ("day", DatePrecision.DAY), ("month", DatePrecision.MONTH),
-        ) if parts[key] is not None),
+        (
+            precision
+            for key, precision in (
+                ("hour", DatePrecision.MINUTE),
+                ("day", DatePrecision.DAY),
+                ("month", DatePrecision.MONTH),
+            )
+            if parts[key] is not None
+        ),
         DatePrecision.YEAR,
     )
     if parts["second"] is not None and int(parts["second"]) > 59:
@@ -52,8 +58,11 @@ def parse_date(value: object) -> tuple[dt.datetime, DatePrecision]:
     if parts["offset"]:
         LOG.warning("Calendar date timezone offset discarded; retaining source-local wall time: %s", value)
     parsed = dt.datetime(
-        int(parts["year"]), int(parts["month"] or 1), int(parts["day"] or 1),
-        int(parts["hour"] or 0), int(parts["minute"] or 0),
+        int(parts["year"]),
+        int(parts["month"] or 1),
+        int(parts["day"] or 1),
+        int(parts["hour"] or 0),
+        int(parts["minute"] or 0),
     )
     return parsed, precision
 
@@ -120,10 +129,14 @@ def format_date(value: dt.datetime, precision: DatePrecision) -> str:
 
 def iso_date(value: dt.datetime, precision: DatePrecision) -> str:
     """Format a domain date as a precision-preserving ISO input."""
-    return value.isoformat(timespec="minutes")[:{
-        DatePrecision.YEAR: 4, DatePrecision.MONTH: 7, DatePrecision.DAY: 10,
-        DatePrecision.MINUTE: 16,
-    }[DatePrecision(precision)]]
+    return value.isoformat(timespec="minutes")[
+        : {
+            DatePrecision.YEAR: 4,
+            DatePrecision.MONTH: 7,
+            DatePrecision.DAY: 10,
+            DatePrecision.MINUTE: 16,
+        }[DatePrecision(precision)]
+    ]
 
 
 def intervals_overlap(

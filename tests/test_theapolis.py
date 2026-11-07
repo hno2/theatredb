@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import uuid
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
 import aiohttp
@@ -181,23 +182,19 @@ def test_production_tags_and_profile_birthday_preserve_source_identity(db, tmp_p
     with Session(db) as session:
         person_case = next(
             case
-            for case in session.exec(
-                select(ReconciliationCase).where(ReconciliationCase.entity_type == "person")
-            ).all()
-            if case.context["external_id"] == "9"
+            for case in session.exec(select(ReconciliationCase).where(ReconciliationCase.entity_type == "person")).all()
+            if case.context["external_id"] == "directors:9"
         )
         production_case = session.exec(
             select(ReconciliationCase).where(ReconciliationCase.entity_type == "production")
         ).one()
-        assert person_case.context["external_id"] == "9"
+        assert person_case.context["external_id"] == "directors:9"
         assert person_case.context["external_url"] == profile["url"]
         assert person_case.incoming["born"] == "1966-05-19T00:00:00"
         assert person_case.incoming["born_precision"] == "day"
-        assert person_case.incoming["type"] == ["director", "author"]
+        assert person_case.incoming["type"] == ["director"]
         assert "tags" not in person_case.incoming
-        assert production_case.incoming["tags"] == [
-            "Schauspiel", "UA", "Musical", "Freie Darstellende Künste"
-        ]
+        assert production_case.incoming["tags"] == ["Schauspiel", "UA", "Musical", "Freie Darstellende Künste"]
         assert result["person"]
 
 
@@ -212,7 +209,11 @@ def test_invalid_profile_birthday_is_logged_and_omitted(item, caplog, birthday):
     assert item["directors"][0]["profile"]["birthDate"] == birthday
     assert "Ignoring invalid Theapolis profile birthday" in caplog.text
     assert profile["url"] in caplog.text
-    assert theapolis._add_people(item, {}) == [("9", "director"), ("9", "author"), ("10", "author")]
+    assert theapolis._add_people(item, {}) == [
+        ("directors:9", "director"),
+        ("creators:9", "author"),
+        ("creators:10", "author"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -231,12 +232,10 @@ def test_valid_profile_birthday_keeps_precision(birthday, born, precision):
 def test_profile_lookup_uses_unique_slug_in_person_url(monkeypatch):
     calls = []
 
-    async def fetch(session, url):
+    def fetch(session, url):
         calls.append(url)
         if "/api/de/profiles?" in url:
-            return json.dumps(
-                {"success": True, "data": {"items": [{"name": "Alex", "slug": "alex-profile"}]}}
-            ).encode()
+            return json.dumps({"success": True, "data": {"items": [{"name": "Alex", "slug": "alex-profile"}]}}).encode()
         assert url.endswith("/de/people/api/show/alex-profile")
         return json.dumps(
             {
@@ -252,7 +251,7 @@ def test_profile_lookup_uses_unique_slug_in_person_url(monkeypatch):
             }
         ).encode()
 
-    monkeypatch.setattr(theapolis, "_fetch", fetch)
+    monkeypatch.setattr(theapolis, "_fetch", AsyncMock(side_effect=fetch))
 
     async def run():
         async with theapolis._session(1) as session:
@@ -268,7 +267,7 @@ def test_profile_lookup_uses_unique_slug_in_person_url(monkeypatch):
 
 
 def test_missing_profile_details_do_not_abort_export(monkeypatch, caplog):
-    async def fetch(session, url):
+    def fetch(session, url):
         if "/api/de/profiles?" in url:
             return json.dumps(
                 {"success": True, "data": {"items": [{"name": "Bertolt Brecht", "slug": "bertolt-brecht"}]}}
@@ -277,7 +276,7 @@ def test_missing_profile_details_do_not_abort_export(monkeypatch, caplog):
         info = aiohttp.RequestInfo(URL(url), "GET", CIMultiDictProxy(CIMultiDict()))
         raise aiohttp.ClientResponseError(info, (), status=404)
 
-    monkeypatch.setattr(theapolis, "_fetch", fetch)
+    monkeypatch.setattr(theapolis, "_fetch", AsyncMock(side_effect=fetch))
 
     async def run():
         async with theapolis._session(1) as session:
@@ -289,12 +288,12 @@ def test_missing_profile_details_do_not_abort_export(monkeypatch, caplog):
 
 @pytest.mark.parametrize("with_people", [True, False])
 def test_profile_summary_and_missing_authors_keep_source_id(db, monkeypatch, tmp_path, item, caplog, with_people):
-    async def lookup(session, name):
+    def lookup(session, name):
         if name == "Other Alex":
             return {"slug": "other-alex", "url": f"{theapolis.SITE}/de/profil/other-alex"}
         return None
 
-    monkeypatch.setattr(theapolis, "_profile_for_name", lookup)
+    monkeypatch.setattr(theapolis, "_profile_for_name", AsyncMock(side_effect=lookup))
     if not with_people:
         item["directors"] = []
         item["creators"] = []
@@ -307,9 +306,9 @@ def test_profile_summary_and_missing_authors_keep_source_id(db, monkeypatch, tmp
         asyncio.run(run())
     messages = [record.getMessage() for record in caplog.records]
     assert messages == [
-        "Theapolis profiles: 1/2 people missing (50.0%); all production credits retained"
-        if with_people else
-        "Theapolis profiles: 0/0 people missing (0.0%); all production credits retained"
+        "Theapolis profiles: 2/3 people missing (66.7%); all production credits retained"
+        if with_people
+        else "Theapolis profiles: 0/0 people missing (0.0%); all production credits retained"
     ]
     path = tmp_path / "people.json"
     theapolis._write_json(path, theapolis.staged_records([item]))
@@ -324,13 +323,13 @@ def test_profile_summary_and_missing_authors_keep_source_id(db, monkeypatch, tmp
     assert "url" not in author and "born" not in author
     with Session(db) as session:
         cases = session.exec(select(ReconciliationCase).where(ReconciliationCase.entity_type == "person")).all()
-        assert {case.context["external_id"] for case in cases} == {"9", "10"}
+        assert {case.context["external_id"] for case in cases} == {"directors:9", "creators:9", "creators:10"}
     for identity in result["person"]:
         preview = preview_case(identity)
         approve_case(identity, revision=preview["revision"], allow_create=True, actor_id="test")
     with Session(db) as session:
         sources = session.exec(select(EntitySource).where(EntitySource.entity_type == "person")).all()
-        assert {source.external_id for source in sources} == {"9", "10"}
+        assert {source.external_id for source in sources} == {"directors:9", "creators:9", "creators:10"}
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -345,7 +344,7 @@ def test_staged_person_source_ids_are_checked_and_legacy_ids_remain_optional(db,
     theapolis._write_json(path, records)
     theapolis._write_json(path.with_suffix(".source.json"), {"items": [item]})
     if legacy:
-        assert len(theapolis.import_all(path)["person"]) == 2
+        assert len(theapolis.import_all(path)["person"]) == 3
     else:
         with pytest.raises(ValueError, match="differs"):
             theapolis.import_all(path)
@@ -738,7 +737,7 @@ def test_review_import_is_idempotent_and_approval_preserves_source_only_urls(db,
     assert result == theapolis.import_all(path)
     assert {key: len(value) for key, value in result.items()} == {
         "organization": 1,
-        "person": 2,
+        "person": 3,
         "text": 2,
         "production": 2,
     }
@@ -746,7 +745,10 @@ def test_review_import_is_idempotent_and_approval_preserves_source_only_urls(db,
         for model in (Organization, Person, Production, Text):
             assert not session.exec(select(model)).all()
         persons = session.exec(select(ReconciliationCase).where(ReconciliationCase.entity_type == "person")).all()
-        assert next(p.incoming for p in persons if p.incoming["name"] == "Alex")["type"] == ["director", "author"]
+        assert {tuple(p.incoming["type"]) for p in persons if p.incoming["name"] == "Alex"} == {
+            ("director",),
+            ("author",),
+        }
     for kind in ("organization", "person", "text", "production"):
         for identity in result[kind]:
             preview = preview_case(identity)
@@ -764,6 +766,71 @@ def test_review_import_is_idempotent_and_approval_preserves_source_only_urls(db,
         assert organization.url is None
         assert organization.lat == pytest.approx(52.5) and organization.lon == pytest.approx(13.4)
         assert any("produktionen/123" in (s.external_url or "") for s in session.exec(select(EntitySource)).all())
+
+
+def test_role_scoped_person_ids_keep_colliding_credits_separate(db, tmp_path, item):
+    item["directors"] = [{"id": 15696, "name": "Director"}]
+    item["creators"] = [{"id": 15696, "name": "Author"}]
+    path = tmp_path / "colliding-ids.json"
+    theapolis._write_json(path, theapolis.staged_records([item]))
+    theapolis._write_json(path.with_suffix(".source.json"), {"items": [item]})
+
+    result = theapolis.import_all(path)
+    assert result == theapolis.import_all(path)
+    with Session(db) as session:
+        cases = {
+            case.context["external_id"]: case
+            for case in session.exec(select(ReconciliationCase).where(ReconciliationCase.entity_type == "person"))
+        }
+        assert {key: case.incoming["name"] for key, case in cases.items()} == {
+            "directors:15696": "Director",
+            "creators:15696": "Author",
+        }
+        production = session.get(ReconciliationCase, uuid.UUID(result["production"][0]))
+        text = session.get(ReconciliationCase, uuid.UUID(result["text"][0]))
+        assert production is not None and text is not None
+        assert production.context["credits"] == [
+            {"case_id": str(cases["directors:15696"].id), "role": "director"},
+            {"case_id": str(cases["creators:15696"].id), "role": "author"},
+        ]
+        assert text.context["authors"] == ["Author"]
+
+
+def test_same_role_person_id_name_conflicts_fail_before_writes(db, tmp_path, item):
+    other = copy.deepcopy(item)
+    other["id"] = 124
+    other["directors"][0]["name"] = "Different"
+    path = tmp_path / "conflicting-names.json"
+    path.write_text(json.dumps({"items": [item, other]}))
+    with pytest.raises(ValueError, match="Inconsistent name for person ID directors:9"):
+        theapolis.import_all(path)
+    with Session(db) as session:
+        assert not session.exec(select(Source)).all()
+        assert not session.exec(select(ReconciliationCase)).all()
+
+
+def test_enrichment_looks_up_names_with_colliding_role_ids(monkeypatch, item, caplog):
+    item["directors"] = [{"id": 15696, "name": "Director"}]
+    item["creators"] = [{"id": 15696, "name": "Author"}]
+    looked_up = []
+
+    async def lookup(session, name):
+        looked_up.append(name)
+        await asyncio.sleep(0)
+        return {"url": f"{theapolis.SITE}/de/profil/{name.lower()}"}
+
+    monkeypatch.setattr(theapolis, "_profile_for_name", lookup)
+
+    async def run():
+        async with theapolis._session(1) as session:
+            await theapolis._enrich_people(session, [item], 2)
+
+    with caplog.at_level("INFO", logger=theapolis.__name__):
+        asyncio.run(run())
+    assert set(looked_up) == {"Director", "Author"}
+    assert item["directors"][0]["profile"]["url"].endswith("/director")
+    assert item["creators"][0]["profile"]["url"].endswith("/author")
+    assert "0/2 people missing (0.0%)" in caplog.text
 
 
 def test_all_items_validated_before_database_writes(db, tmp_path, item):
@@ -869,10 +936,14 @@ def test_year_counts_as_premiere_but_theapolis_never_counts_as_own_website(db):
         session.add(organization)
         session.flush()
         session.add(
-            Production.model_validate({
-                "name": "Hamlet", "organization_id": organization.id, "premiere": "2026",
-                "url": "https://www.theapolis.de/de/produktionen/123",
-            })
+            Production.model_validate(
+                {
+                    "name": "Hamlet",
+                    "organization_id": organization.id,
+                    "premiere": "2026",
+                    "url": "https://www.theapolis.de/de/produktionen/123",
+                }
+            )
         )
         session.commit()
         organization_id = organization.id

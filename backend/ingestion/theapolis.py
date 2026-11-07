@@ -134,7 +134,9 @@ def premiere_fields(item: dict) -> dict:
     """Convert partial API dates without inventing their precision."""
     value = item.get("premierDate") or item.get("premiere")
     year = _premiere_year(
-        next((item.get(key) for key in ("premierYear", "year", "premiere_year") if item.get(key) not in (None, "")), None)
+        next(
+            (item.get(key) for key in ("premierYear", "year", "premiere_year") if item.get(key) not in (None, "")), None
+        )
     )
     result = None
     if value not in (None, ""):
@@ -178,7 +180,9 @@ def _profile_birthday(profile: dict) -> dict:
     try:
         result = parse_date(text[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", text) else text)
     except ValueError:
-        LOG.warning("Ignoring invalid Theapolis profile birthday %r for %s", value, profile.get("url") or profile.get("slug"))
+        LOG.warning(
+            "Ignoring invalid Theapolis profile birthday %r for %s", value, profile.get("url") or profile.get("slug")
+        )
         return {}
     return {"born": result[0].isoformat(), "born_precision": result[1]}
 
@@ -191,7 +195,10 @@ def staged_records(items: list[dict]) -> list[dict]:
         for group, role in (("directors", "director"), ("creators", "author")):
             for person in item.get(group) or []:
                 member: dict[str, object] = {
-                    "name": _name(person), "external_id": _identity(person), "type": role, "role": role
+                    "name": _name(person),
+                    "external_id": _identity(person),
+                    "type": role,
+                    "role": role,
                 }
                 if profile := person.get("profile"):
                     member.update(_profile_birthday(profile))
@@ -302,18 +309,15 @@ async def _enrich_people(
     cache: _ProfileCache | None = None,
 ) -> None:
     """Attach public profile details by their unique URL slug, not numeric person IDs."""
-    people = {
-        _identity(person): _name(person)
-        for item in items
-        for group in ("directors", "creators")
-        for person in item.get(group) or []
-    }
-    names = list(dict.fromkeys(people.values()))
+    people: dict[tuple[str, str], str] = {}
     by_name: dict[str, list[dict]] = {}
     for item in items:
         for group in ("directors", "creators"):
             for person in item.get(group) or []:
-                by_name.setdefault(_name(person), []).append(person)
+                name = _name(person)
+                people[group, _identity(person)] = name
+                by_name.setdefault(name, []).append(person)
+    names = list(by_name)
     found = set()
 
     async def enrich(name: str) -> None:
@@ -338,7 +342,9 @@ async def _enrich_people(
     missing = sum(name not in found for name in people.values())
     LOG.info(
         "Theapolis profiles: %s/%s people missing (%.1f%%); all production credits retained",
-        missing, len(people), 100 * missing / len(people) if people else 0,
+        missing,
+        len(people),
+        100 * missing / len(people) if people else 0,
     )
 
 
@@ -403,9 +409,7 @@ async def download(output: Path | None = None, *, concurrency: int = 10, max_pag
         total_pages = math.ceil(first["totalCount"] / first["numItemsPerPage"])
         pages = min(total_pages, max_pages or total_pages)
         with tqdm(total=pages, initial=1, desc="Production pages", unit="page") as progress:
-            await _parallel(
-                range(2, pages + 1), page, concurrency, progress=progress, checkpoint=checkpoint_pages
-            )
+            await _parallel(range(2, pages + 1), page, concurrency, progress=progress, checkpoint=checkpoint_pages)
         if not items:
             raise ValueError("Theapolis returned no productions")
         try:
@@ -571,7 +575,7 @@ def _add_people(item: dict, people: dict) -> list[tuple[str, str]]:
         for person in item.get(group) or []:
             person_name = _name(person)
             profile = person.get("profile") or {}
-            person_id = _identity(person)
+            person_id = f"{group}:{_identity(person)}"
             payload = people.setdefault(person_id, {"name": person_name, "type": []})
             if payload["name"] != person_name:
                 raise ValueError(f"Inconsistent name for person ID {person_id}")
@@ -641,10 +645,7 @@ def _latest_export() -> Path:
     raise ValueError(f"No full Theapolis snapshot in {DEFAULT_EXPORT_DIR}; download first or pass --json")
 
 
-def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
-    """Validate a whole export, then queue generic review cases, never venue uploads."""
-    if json_path is None:
-        json_path = _latest_export()
+def _read_import_snapshot(json_path: Path) -> dict:
     snapshot = json.loads(json_path.read_text(encoding="utf-8"))
     if isinstance(snapshot, list):
         source_path = _source_path(json_path)
@@ -656,13 +657,19 @@ def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
         actual = validate_records(snapshot)
         expected = staged_records(source["items"])
         # Older snapshots lack person IDs; their source metadata still supplies them.
-        for record, source_record in zip(actual, expected):
-            for member, source_member in zip(record["memberships"], source_record["memberships"]):
+        for record, source_record in zip(actual, expected, strict=False):
+            for member, source_member in zip(record["memberships"], source_record["memberships"], strict=False):
                 if member["external_id"] is None:
                     source_member["external_id"] = None
         if actual != expected:
             raise ValueError("Staged JSON differs from its Theapolis source metadata; re-export both files")
         snapshot = source
+    return snapshot
+
+
+def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
+    """Validate a whole export, then queue generic review cases, never venue uploads."""
+    snapshot = _read_import_snapshot(json_path if json_path is not None else _latest_export())
     organizations, people, productions, captured_at = _prepare_import(snapshot)
     init_db()
     with get_session() as session:
