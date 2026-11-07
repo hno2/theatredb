@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import html
 import json
 import os
 import threading
@@ -146,7 +147,7 @@ async def site() -> AsyncGenerator[tuple[str, dict]]:
         else:
             title = state["titles"].get(path, "Test play " + path)
             body = (
-                f'<h1>{title}</h1><div class="review">A test review</div>'
+                f'<h1>{html.escape(title)}</h1><div class="review">A test review</div>'
                 '<div class="cast"><a href="/person/1"><span class="name">Test Actor</span></a>'
                 '<span class="role">Mit</span></div>'
             )
