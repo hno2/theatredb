@@ -77,14 +77,15 @@ class StagedMembership(StagedDomainModel):
     """Person fields from Person, plus the source's production credit.
 
     A scalar type remains accepted for existing Karlsruhe snapshots; new
-    producers may use Person.type's list form. IDs and database links are
-    deliberately excluded: reconciliation resolves them after review.
+    producers may use Person.type's list form. external_id is source metadata,
+    not a database ID; database links are resolved by reconciliation after review.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     date_fields: ClassVar[tuple[str, ...]] = ("born", "died")
 
     name: NonEmptyText
+    external_id: NonEmptyText | None = None
     type: NonEmptyText | Annotated[list[NonEmptyText], Field(min_length=1)] | None = None
     url: HttpURL | None = None
     urls: list[HttpURL] = Field(default_factory=list)

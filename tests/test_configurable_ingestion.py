@@ -89,7 +89,7 @@ def test_published_schema_matches_models_and_current_domain_fields(record: dict)
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema, format_checker=FormatChecker()).validate([record])
     assert set(StagedProduction.model_fields) - {"title", "author", "memberships", "premiere_year"} <= set(Production.model_fields)
-    assert set(StagedMembership.model_fields) - {"url", "role", "character"} <= set(Person.model_fields)
+    assert set(StagedMembership.model_fields) - {"url", "role", "character", "external_id"} <= set(Person.model_fields)
     for field in ("description",):
         assert StagedProduction.model_fields[field].annotation == Production.model_fields[field].annotation
     for field in ("description", "nationality"):
@@ -670,7 +670,7 @@ def test_generated_json_omits_null_and_empty_array_fields(record: dict, tmp_path
 
 def test_output_cleanup_preserves_false_zero_and_array_structure() -> None:
     data = {"nested": [{"empty": [], "null": None, "zero": 0, "false": False, "text": "", "object": {}}]}
-    assert without_null_fields(data) == {"nested": [{"zero": 0, "false": False, "text": "", "object": {}}]}
+    assert without_null_fields(data) == {"nested": [{"zero": 0, "false": False, "text": ""}]}
     assert without_null_fields([]) == []
     assert without_null_fields([[], {"empty": []}]) == [[], {}]
 

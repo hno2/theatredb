@@ -135,6 +135,14 @@ class CrawlRecord(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("source_id", "namespace", "record_key"),)
 
 
+class TheapolisProfileCache(SQLModel, table=True):
+    """Unapproved directory lookup results, never authoritative person records."""
+
+    name: str = Field(primary_key=True)
+    profile: dict | None = Field(default=None, sa_column=Column(JSON, nullable=False))
+    captured_at: float = Field(index=True)
+
+
 class EntityType(StrEnum):
     """Represents the type of an entity."""
 

@@ -1,8 +1,10 @@
 # Theatre ingestion
 
 The pipeline is **website -> validated staged JSON -> theatre upload (automatic for
-conflict-free changes) -> review of conflicts**. Standalone CLI scraping, schema validation and change checks do not connect to
-the database. Never use the historical Scrapy/DB scripts for ongoing imports.
+conflict-free changes) -> review of conflicts**. Standalone venue CLI scraping,
+schema validation and change checks do not connect to the database. Theapolis
+export uses the central database for its profile cache only. Never use the
+historical Scrapy/DB scripts for ongoing imports.
 
 For source-owned start/stop controls in Streamlit, persisted run history,
 conditional HTTP fetching and automatic changed-record imports, see the
@@ -19,8 +21,9 @@ uv sync --group ingest --group dev
 uv run python -m backend.ingestion.scrape --help
 ```
 
-Bundled configs: [Karlsruhe](configs/karlsruhe.yaml) and
-[Stuttgart](configs/stuttgart.yaml). `--config` accepts either venue name or a
+Bundled configs: [Karlsruhe](configs/staatstheater-karlsruhe.yaml),
+[Stuttgart](configs/staatstheater-stuttgart.yaml) and
+[Badische Landesbühne](configs/badische-landesbuehne.yaml). `--config` accepts either venue name or a
 path to a YAML/JSON file. Bundled venue names are case-insensitive (`Karlsruhe`
 and `karlsruhe` are equivalent). YAML is loaded with `safe_load`; configuration is data,
 not executable Python.
@@ -50,9 +53,17 @@ Theapolis has one independent entry point, `backend.ingestion.theapolis`. It
 uses the **same staging JSON schema** as all venue scrapers: a root array of
 productions with `title`, `url`, `premiere`, and `memberships`. It does not use
 venue configs, theatre uploads or their automatic matching/import rules.
-API export and image downloads do not connect to the database. The separate
-Theapolis import queues generic reconciliation cases only.
+API export uses the configured central PostgreSQL database only for profile
+lookup caching; it never writes domain entities or reconciliation cases. Image
+downloads do not connect to the database. The separate Theapolis import queues
+generic reconciliation cases only.
 
+People without public profiles remain in production memberships, including
+authors. Each membership retains its Theapolis person ID as `external_id`;
+profile URLs use their slugs. The review import preserves the person ID in
+source references even when a profile is available. Missing profiles are
+summarized once after enrichment as a count and percentage of distinct person
+IDs, rather than logged individually.
 
 Re-export and reimport from the repository root:
 
@@ -63,7 +74,7 @@ uv run python -m backend.ingestion.theapolis images --concurrency 10
 uv run python -m backend.ingestion.theapolis import
 ```
 
-To **create JSON only**, without downloading images or writing to the database:
+To **export JSON**, without downloading images or importing domain records:
 
 ```bash
 uv run --group ingest python -m backend.ingestion.theapolis download --concurrency 10
@@ -79,6 +90,29 @@ Image manifest:
 `data/theapolis/images/manifest.json`. `--json PATH` selects another export/import
 file. A sibling `<timestamp-and-scope>_productions.source.json` keeps raw IDs, organization metadata,
 capture time and partial-export status outside the shared staging records.
+Bounded workers immediately take the next request instead of waiting for the
+slowest request in a batch. Both JSON files are atomically checkpointed after
+each group of completed production pages. During profile enrichment, full JSON
+rewrites occur at most once per minute and always on completion, error, or
+cancellation. Failed runs retain `success: false` and `partial: true` in the
+sidecar; errors still propagate. New exports start with an empty JSON array,
+so even a failure before the first page leaves a JSON file. If an explicit
+output already exists, a first-page failure leaves it untouched. Incomplete
+exports are skipped by default import and rejected when selected explicitly.
+If production validation fails, the raw sidecar retains the fetched page while
+staged JSON keeps its last valid checkpoint.
+Each completed profile lookup is saved immediately in the central PostgreSQL
+`theapolisprofilecache` table, separate from person and reconciliation tables.
+The additive cache table is created automatically if missing; existing domain
+tables are not modified. Database settings come from the same project-root
+`.env` and environment variables as the app. Both found profiles and
+confirmed missing/ambiguous profiles are cached for 30 days; request failures
+are not cached. Reruns reuse fresh entries, including results from interrupted
+runs, across machines and output directories, while still fetching production
+pages anew. Database queries run outside the event loop; cache entries are
+loaded once per run and each new result uses a separate committed upsert.
+Cache database failures propagate; there is no local fallback. Existing local
+SQLite cache files are no longer used or migrated.
 Keep both files together for the separate Theapolis review import; it checks
 that staged JSON matches its source metadata before writing any cases.
 `images --output DIRECTORY` selects another image directory. Existing flat
@@ -96,6 +130,9 @@ sidecar. `premierDate` accepts ISO year, month, day, or time, as well as
 German `DD.MM.YYYY`. `premierYear` (or detail API `year`) supplies year-only
 premieres. Conflicting date/year values fail validation before any review cases
 are written. Old staging snapshots with `premiere_year` remain accepted.
+Underscore birthday placeholders for non-premium profiles are treated as missing
+without warnings. Other invalid public-profile birthdays are logged and omitted
+from normalized person fields; raw values remain in the sidecar.
 
 Review under **Verwaltung → Datenabgleich & Duplikate → Weitere Prüffälle**.
 Approve organizations and people, then texts, then productions. Match existing
@@ -198,11 +235,12 @@ minutes. Domain datetimes retain the source's local wall clock without a timezon
 any supplied UTC offset is discarded with a warning. Technical timestamps such
 as capture and audit times remain timezone-aware. The manual upload sample at
 `data/date-precision-example.json` illustrates each supported precision.
-Generated scrape snapshots, page output (files and stdout), and page-check
-baselines omit null-valued and empty-array fields recursively, including nested
-memberships. Empty strings, empty objects, numeric zero and false are preserved;
-input files with explicit nulls or empty arrays remain accepted. Array elements
-and top-level arrays are not removed.
+Generated scrape snapshots, page output (files and stdout), page-check
+baselines, and Theapolis exports omit null-valued and empty-container object
+fields recursively, including nested memberships and source metadata. Empty
+strings, numeric zero and false are preserved; input files with explicit nulls
+or empty containers remain accepted. Array elements and top-level arrays are
+not removed.
 
 Extracted text removes discretionary soft hyphens (`U+00AD`, including HTML
 `&shy;`), zero-width spaces and byte-order marks. Non-breaking spaces become
@@ -219,8 +257,9 @@ Mapping to current [domain models](../models.py):
 | Staging | Domain / review behavior |
 | --- | --- |
 | `title` | `Production.name` and a proposed `Text.title` |
-| `description`, `premiere`, `premiere_precision`, `duration`, `age_rating`, `tags`, `critics`, `url` | Production fields; date inputs support year through minute precision |
+| `description`, `premiere`, `premiere_precision`, `duration`, `age_rating`, `tags`, `critics`, `url` | Production fields; Theapolis tags collect genre, explicit source tags, and the independent-production label |
 | membership `name`, `type`, `description`, `born`, `died`, `nationality` | Person fields |
+| membership `external_id` | Source-specific person ID, not a database ID; Theapolis import retains it in source references |
 | membership `url`, `urls` | Combined into `Person.urls`; first URL identifies the source profile |
 | membership `role`, `character` | Canonical production credit; actor character stays separate |
 | `author` | An author credit if not already represented in memberships |
@@ -251,7 +290,23 @@ uv run python -m backend.ingestion.scrape page --config stuttgart \
 
 uv run python -m backend.ingestion.scrape page --config stuttgart --kind person \
   --url https://www.schauspiel-stuttgart.de/spielplan/premieren/koenig-richard-der-dritte/max-simonischek/
+
+uv run python -m backend.ingestion.scrape page --config badische-landesbuehne \
+  --url 'https://www.badische-landesbuehne.de/de/produktionen/mario-und-der-zauberer.html?m=51'
 ```
+
+Badische Landesbühne discovers productions from the 2026/27 programme, including
+reprises and extras. It extracts cast and crew separately, preserves character
+labels containing colons and fetches linked biographies during `scrape`.
+Some linked profiles have empty biography blocks; descriptions remain unknown
+for those people while their names and production credits are retained.
+Biographies stop before the `Auf der Bühne` season section and its photo gallery,
+regardless of the listed season. The placeholder `Mehr Informationen folgen.`
+is also removed.
+Premiere dates come only from performances explicitly marked as premieres,
+including past performances, not from the next scheduled date. Missing dates
+remain unknown. Combined crew labels such as `Bühne & Kostüm` retain their full
+label and use the shared role inference.
 
 URLs are examples checked during implementation; a venue may later remove them.
 Use a current detail/profile URL when that happens. Missing required selectors,

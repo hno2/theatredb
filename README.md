@@ -1,6 +1,32 @@
 ## Install
 ### Docker
+
+Use the same project-root `.env` for local runs and Compose. Set
+`POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` there; for local access,
+use `POSTGRES_HOST=localhost` and `POSTGRES_PORT=5432`.
+
+Compose overrides the app and crawl worker to connect to `db:5432`, using
+those same credentials. It clears `THEATERDB_DATABASE_URL` and `DATABASE_URL`
+inside both containers so local URL settings cannot override the Docker host.
+Both services wait for PostgreSQL's health check before starting.
+
+```bash
+docker compose up -d --build
+```
+
+The configured external `web` network must already exist (for Traefik).
+If needed, create it once with `docker network create web`.
+
 ### Local Usage
+
+Start PostgreSQL (Compose publishes it on localhost port 5432), then run the
+app locally:
+
+```bash
+docker compose up -d --wait db
+uv run streamlit run frontend/app.py
+```
+
 The app loads database settings from the project-root `.env` file, regardless of
 the working directory. Existing environment variables are not overwritten.
 Set `THEATERDB_DATABASE_URL` (highest priority), `DATABASE_URL`, or individual
@@ -239,8 +265,3 @@ dependencies, including all dependency groups. `prek` selects files changed
 between the PR base and head; hooks configured with `pass_filenames: false`
 (including Pyrefly) still run their repository-wide checks. The full pytest suite
 runs even if hooks fail, provided dependency installation succeeded.
-
-## Planned Features
-- [ ]
-- [ ] Actual Dates of performances
-- [ ] Crawl all Staatstheater/Stadttheater for new info weekly
