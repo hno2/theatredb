@@ -222,7 +222,12 @@ def _render_bool(field: _FieldUI, d: bool | None, key: str) -> FormValue:
     return st.checkbox(field.label, value=bool(d), key=key)
 
 
-def _render_numeric(field: _FieldUI, d: float | str | None, key: str) -> FormValue:
+def _render_numeric(field: _FieldUI, d: int | float | str | None, key: str) -> FormValue:
+    if field.kind == "int" and isinstance(d, float):
+        if math.isnan(d):
+            d = None
+        elif d.is_integer():
+            d = int(d)
     raw = st.text_input(field.label, value="" if d is None else str(d), key=key).strip()
     if not raw:
         return None
