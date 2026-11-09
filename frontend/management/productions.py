@@ -9,7 +9,7 @@ def main() -> None:
     render_sqlmodel_crud(
         model_cls=Production,
         field_overrides={
-            "venue_id": {
+            "organization_id": {
                 "kind": "fk_select",
                 "fk_model": Organization,
                 "fk_display": "name",
