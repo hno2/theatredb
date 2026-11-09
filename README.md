@@ -21,9 +21,26 @@ docker network create web  # if the configured Traefik network is missing
 docker compose up -d --build
 ```
 
-Startup creates missing tables, but does not migrate existing domain tables.
-Back up existing databases and ensure their schema matches the current models
-before upgrading.
+## Database
+
+App and worker startup create a missing database and apply pending Alembic
+migrations ([backend/migrations](backend/migrations)). Databases created before
+Alembic are stamped as the baseline revision, so their schema must match it;
+back up before upgrading.
+
+```bash
+uv run python -m backend.db migrate              # apply pending migrations
+uv run python -m backend.db status               # current vs head, model drift
+uv run python -m backend.db revision -m "msg"    # autogenerate after model changes
+uv run python -m backend.db reset                # drop ALL data, recreate at head
+```
+
+After changing models in `backend/models.py`, run `migrate` and then
+`revision`, review the generated file (autogenerate misses renames, enum value
+changes and data migrations), and commit it. `reset` asks for the database name
+(`--yes` skips); stop the app and worker first, as open connections block it.
+Crawl files under `data/crawls` are kept. In Docker, run commands as
+`docker compose run --rm app python -m backend.db ...`.
 
 ## Data
 

@@ -8,10 +8,13 @@ from contextlib import ExitStack, contextmanager
 from functools import lru_cache
 from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
 from dotenv import load_dotenv
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.engine.base import Engine
+from sqlalchemy.engine.base import Connection, Engine
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -44,16 +47,45 @@ if DATABASE_URL.drivername in {"postgres", "postgresql", "postgresql+psycopg2"}:
     DATABASE_URL = DATABASE_URL.set(drivername="postgresql+psycopg")
 
 
+MIGRATIONS_DIR = Path(__file__).with_name("migrations")
+BASELINE_REVISION = "0001"
+
+
 @lru_cache(maxsize=1)
 def _get_engine() -> Engine:
     return create_engine(DATABASE_URL, echo=False)
 
 
+def alembic_config(connection: Connection | None = None) -> Config:
+    """Alembic config for the bundled migrations, optionally bound to an open connection."""
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.attributes["connection"] = connection
+    return config
+
+
+def migrate(engine: Engine) -> None:
+    """Upgrade PostgreSQL to the latest migration; unversioned pre-Alembic schemas are stamped as baseline."""
+    if engine.dialect.name != "postgresql":
+        # shortcut: migrations are PostgreSQL-only, SQLite (tests) gets the current models directly.
+        SQLModel.metadata.create_all(engine)
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(current_database()), hashtext('theaterdb.migrations'))")
+        )
+        config = alembic_config(connection)
+        unversioned = MigrationContext.configure(connection).get_current_revision() is None
+        if unversioned and set(inspect(connection).get_table_names()) & set(SQLModel.metadata.tables):
+            command.stamp(config, BASELINE_REVISION)
+        command.upgrade(config, "head")
+
+
 def init_db() -> None:
-    """Create a missing PostgreSQL database and tables without rewriting data."""
+    """Create a missing PostgreSQL database, apply pending migrations and ensure the queue schema."""
     engine = _get_engine()
     try:
-        SQLModel.metadata.create_all(engine)
+        migrate(engine)
     except OperationalError as connection_error:
         database_name = engine.url.database
         if engine.url.get_backend_name() != "postgresql" or not database_name:
@@ -77,7 +109,7 @@ def init_db() -> None:
             except ProgrammingError as error:
                 if getattr(error.orig, "sqlstate", None) != "42P04":
                     raise
-        SQLModel.metadata.create_all(engine)
+        migrate(engine)
 
     ensure_queue_schema(engine)
 
