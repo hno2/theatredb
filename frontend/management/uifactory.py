@@ -222,7 +222,7 @@ def _render_bool(field: _FieldUI, d: bool | None, key: str) -> FormValue:
     return st.checkbox(field.label, value=bool(d), key=key)
 
 
-def _render_numeric(field: _FieldUI, d: int | float | str | None, key: str) -> FormValue:
+def _render_numeric(field: _FieldUI, d: float | str | None, key: str) -> FormValue:
     if field.kind == "int" and isinstance(d, float):
         if math.isnan(d):
             d = None
@@ -419,6 +419,31 @@ def _render_member_rows(
             st.rerun()
 
 
+def _rename_existing_fk_if_changed(
+    field: _FieldUI,
+    label: str,
+    member: SQLModel | None,
+    fk_lookup: dict[str, str],
+    auto_cfg: dict | None,
+    actor: str | None,
+) -> str | None:
+    if not auto_cfg or not auto_cfg.get("rename_existing") or field.fk_model is None or member is None:
+        return None
+    member_id = str(member.model_dump(mode="python").get(field.name))
+    current_name = fk_lookup.get(member_id)
+    if current_name is None:
+        return None
+    if label != current_name:
+        payload_field = cast(str, auto_cfg.get("payload_field", "name"))
+        update_entity(
+            field.fk_model,
+            entity_id=member_id,
+            payload={payload_field: label},
+            actor_id=actor,
+        )
+    return member_id
+
+
 def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
     *,
     parent_id: str,
@@ -472,6 +497,8 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
 
         for _, row in edited.iterrows():
             payload: dict = {}
+            row_id = "" if row.get("__id") is None else str(row.get("__id")).strip()
+            existing_member = existing_by_id.get(row_id)
             for f in fields:
                 raw = row.get(f.name)
                 if f.kind == "fk_select":
@@ -479,11 +506,23 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
                     if not label:
                         payload[f.name] = None
                     else:
+                        auto_cfg = cast(dict | None, fk_autocreate.get(f.name))
+                        renamed_id = _rename_existing_fk_if_changed(
+                            f,
+                            label,
+                            existing_member,
+                            fk_lookups.get(f.name, {}),
+                            auto_cfg,
+                            actor,
+                        )
+                        if renamed_id is not None:
+                            payload[f.name] = renamed_id
+                            continue
+
                         reverse_lookup = {v: k for k, v in fk_lookups.get(f.name, {}).items()}
                         if label in reverse_lookup:
                             payload[f.name] = reverse_lookup[label]
                         else:
-                            auto_cfg = cast(dict | None, fk_autocreate.get(f.name))
                             if auto_cfg and f.fk_model is not None:
                                 payload_field = cast(str, auto_cfg.get("payload_field", "name"))
                                 new_payload: dict[str, object] = {payload_field: label}
@@ -514,7 +553,6 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
                 continue
 
             payload[fk_field] = parent_id
-            row_id = "" if row.get("__id") is None else str(row.get("__id")).strip()
             if row_id and row_id in existing_by_id:
                 update_entity(
                     child_model,

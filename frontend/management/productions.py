@@ -37,6 +37,7 @@ def main() -> None:
                     "person_id": {
                         "payload_field": "name",
                         "infer_type_from": "role",
+                        "rename_existing": True,
                     }
                 },
                 "field_overrides": {

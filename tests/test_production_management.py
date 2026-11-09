@@ -4,11 +4,12 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine, event
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 from streamlit.testing.v1 import AppTest
 
 from backend import user_management
 from backend.models import Organization, Person, Production, ProductionMembership, Text
+from frontend.management.uifactory import _build_fields, _rename_existing_fk_if_changed
 
 PRODUCTION_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "productions.py"
 
@@ -92,3 +93,50 @@ def test_cast_and_crew_editor_shows_person_name_without_ids(db) -> None:
     column_config = json.loads(editor.proto.columns)
     assert column_config["__id"]["hidden"]
     assert column_config["person_id"]["label"] == "Person"
+
+
+def test_renaming_cast_and_crew_name_updates_shared_person(db) -> None:
+    production = Production(name="Example Production")
+    other_production = Production(name="Other Production")
+    production_id = production.id
+    person = Person(name="Original Name")
+    person_id = person.id
+    with Session(db) as session:
+        session.add_all(
+            [
+                ProductionMembership(production=production, person=person, role="actor"),
+                ProductionMembership(production=other_production, person=person, role="director"),
+            ]
+        )
+        session.commit()
+    with Session(db) as session:
+        membership = session.exec(
+            select(ProductionMembership).where(ProductionMembership.production_id == production_id)
+        ).one()
+    person_field = next(
+        field
+        for field in _build_fields(
+            ProductionMembership,
+            field_overrides={
+                "person_id": {"kind": "fk_select", "fk_model": Person, "fk_display": "name"},
+                "production_id": {"exclude": True},
+            },
+        )
+        if field.name == "person_id"
+    )
+    resolved_id = _rename_existing_fk_if_changed(
+        person_field,
+        "Renamed Person",
+        membership,
+        {str(person_id): "Original Name"},
+        {"payload_field": "name", "rename_existing": True},
+        "test",
+    )
+
+    assert resolved_id == str(person_id)
+    with Session(db) as session:
+        saved_person = session.get(Person, person_id)
+        memberships = session.exec(select(ProductionMembership)).all()
+        assert saved_person is not None and saved_person.name == "Renamed Person"
+        assert len(memberships) == 2
+        assert {membership.person_id for membership in memberships} == {person_id}
