@@ -52,6 +52,21 @@ Datenabgleich & Duplikate**. Uploads can apply conflict-free changes; ambiguous
 matches wait for review. For standalone scraping, Theapolis imports, schemas and
 validation, see the [ingestion guide](backend/ingestion/README.md).
 
+In **Verwaltung → Personen / Texte**, select multiple table rows and click
+**Zusammenführen**. Conflict-free selections merge immediately; differing field
+values open a comparison dialog with survivor and value choices. All dependent
+relationships, sources and old IDs follow the merged record.
+The same table autosaves simple fields: birth/death dates and nationality for
+people, publication dates and language for texts. Dates accept precision-preserving
+ISO inputs (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`); invalid values show errors without
+changing the record. Select a row's checkbox for the full editor, or multiple
+checkboxes for Merge. Names, titles and relationship columns remain read-only
+inline.
+
+Theapolis imports are accepted directly, without pending source reviews. Existing
+conflicting values are kept; missing values and credits are added. Other sources
+retain their review workflow under **Andere Quellen & gemeldete Duplikate**.
+
 Source-owned background crawls run from **Verwaltung → Quellen → Crawler**.
 See the [crawler guide](backend/crawling/README.md) for worker commands and
 operational details.

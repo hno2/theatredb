@@ -1,4 +1,4 @@
-"""Separate Theapolis API export, sitemap image download and review-only import."""
+"""Separate Theapolis API export, sitemap image download and accepted source import."""
 
 import argparse
 import asyncio
@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -23,8 +24,9 @@ from backend.config import IMAGE_SIGNATURES
 from backend.date_precision import parse_date
 from backend.ingestion.snapshots import digest, snapshot_path, without_null_fields
 from backend.ingestion.staging import validate_records
+from backend.ingestion.theapolis_import import accept_record, add_credits, migrate_pending_cases
 from backend.models import EntityType, Source, TheapolisProfileCache
-from backend.reconciliation import propose_record, validate_payload
+from backend.reconciliation import validate_payload
 from backend.user_management import get_session, init_db
 
 SITE = "https://www.theapolis.de"
@@ -286,7 +288,7 @@ class _ProfileCache:
             where=table.c.captured_at <= statement.excluded.captured_at,
         )
         with get_session() as session:
-            session.execute(statement)
+            session.exec(statement)
             session.commit()
 
     async def put(self, name: str, profile: dict | None) -> None:
@@ -650,7 +652,7 @@ def _read_import_snapshot(json_path: Path) -> dict:
     if isinstance(snapshot, list):
         source_path = _source_path(json_path)
         if not source_path.exists():
-            raise ValueError(f"Theapolis review import requires source metadata: {source_path}")
+            raise ValueError(f"Theapolis import requires source metadata: {source_path}")
         source = json.loads(source_path.read_text(encoding="utf-8"))
         if source.get("success") is False:
             raise ValueError("Theapolis export is incomplete; download again before importing")
@@ -668,7 +670,7 @@ def _read_import_snapshot(json_path: Path) -> dict:
 
 
 def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
-    """Validate a whole export, then queue generic review cases, never venue uploads."""
+    """Accept a validated export directly, retaining existing values and stable source identities."""
     snapshot = _read_import_snapshot(json_path if json_path is not None else _latest_export())
     organizations, people, productions, captured_at = _prepare_import(snapshot)
     init_db()
@@ -677,77 +679,78 @@ def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
         if source is None:
             source = Source(name="theapolis.de", base_url=SITE, description="Theapolis directory; not an official site")
             session.add(source)
-            session.commit()
+            session.flush()
             session.refresh(source)
         source_id = source.id
-    result: dict[str, list[str]] = {"organization": [], "person": [], "text": [], "production": []}
+        result: dict[str, list[str]] = {"organization": [], "person": [], "text": [], "production": []}
 
-    def propose(
-        kind: EntityType,
-        payload: dict,
-        *,
-        external_id: str | None = None,
-        external_url: str | None = None,
-        record_key: str | None = None,
-        context: dict | None = None,
-    ) -> str:
-        case = propose_record(
-            kind,
-            payload,
-            source_id=source_id,
-            captured_at=captured_at,
-            actor_id=ACTOR,
-            external_id=external_id,
-            external_url=external_url,
-            record_key=record_key,
-            context=context,
-        )
-        value = str(case.id)
-        if value not in result[kind.value]:
-            result[kind.value].append(value)
-        return value
+        def accept(
+            kind: EntityType,
+            payload: dict,
+            *,
+            external_id: str | None = None,
+            external_url: str | None = None,
+            record_key: str | None = None,
+            context: dict | None = None,
+        ) -> uuid.UUID:
+            key = record_key or f"id:{external_id}"
+            entity_id = accept_record(
+                session,
+                source_id,
+                kind,
+                payload,
+                record_key=key,
+                captured_at=captured_at,
+                actor_id=ACTOR,
+                context={
+                    **(context or {}),
+                    "external_id": external_id,
+                    "external_url": external_url,
+                    "record_key": key,
+                },
+            )
+            if str(entity_id) not in result[kind.value]:
+                result[kind.value].append(str(entity_id))
+            return entity_id
 
-    org_cases = {
-        key: propose(EntityType.ORGANIZATION, payload, external_id=key, external_url=url)
-        for key, (payload, url) in tqdm(organizations.items(), desc="Organizations", unit="organization")
-    }
-    person_cases = {
-        key: propose(
-            EntityType.PERSON,
-            {field: value for field, value in payload.items() if field != "profile_url"},
-            external_id=key,
-            external_url=payload.get("profile_url"),
-        )
-        for key, payload in tqdm(people.items(), desc="People", unit="person")
-    }
-    for production_id, org_id, payload, raw_credits in tqdm(productions, desc="Productions", unit="production"):
-        credits = [{"case_id": person_cases[key], "role": role} for key, role in raw_credits]
-        authors = [people[key]["name"] for key, role in raw_credits if role == "author"]
-        text_case = propose(
-            EntityType.TEXT,
-            {"title": payload["name"]},
-            record_key=f"work:production:{production_id}",
-            context={"authors": authors, "credits": [c for c in credits if c["role"] == "author"]},
-        )
-        propose(
-            EntityType.PRODUCTION,
-            payload,
-            external_id=production_id,
-            external_url=f"https://www2.theapolis.de/de/produktionen/{production_id}",
-            context={
-                "credits": credits,
-                "directors": [people[key]["name"] for key, role in raw_credits if role == "director"],
-                "dependencies": [
-                    *([{"case_id": org_cases[org_id], "field": "organization_id"}] if org_id else []),
-                    {"case_id": text_case, "field": "text_id"},
-                ],
-            },
-        )
+        org_ids = {
+            key: accept(EntityType.ORGANIZATION, payload, external_id=key, external_url=url)
+            for key, (payload, url) in tqdm(organizations.items(), desc="Organizations", unit="organization")
+        }
+        person_ids = {
+            key: accept(
+                EntityType.PERSON,
+                {field: value for field, value in payload.items() if field != "profile_url"},
+                external_id=key,
+                external_url=payload.get("profile_url"),
+            )
+            for key, payload in tqdm(people.items(), desc="People", unit="person")
+        }
+        for production_id, org_id, payload, raw_credits in tqdm(productions, desc="Productions", unit="production"):
+            credits = [{"person_id": str(person_ids[key]), "role": role} for key, role in raw_credits]
+            text_id = accept(
+                EntityType.TEXT,
+                {"title": payload["name"]},
+                record_key=f"work:production:{production_id}",
+                context={"authors": [people[key]["name"] for key, role in raw_credits if role == "author"]},
+            )
+            add_credits(
+                session, EntityType.TEXT, text_id, [c for c in credits if c["role"] == "author"], actor_id=ACTOR
+            )
+            production = accept(
+                EntityType.PRODUCTION,
+                {**payload, "text_id": str(text_id), **({"organization_id": str(org_ids[org_id])} if org_id else {})},
+                external_id=production_id,
+                external_url=f"https://www2.theapolis.de/de/produktionen/{production_id}",
+                context={"credits": credits},
+            )
+            add_credits(session, EntityType.PRODUCTION, production, credits, actor_id=ACTOR)
+        session.commit()
     return result
 
 
 def main() -> None:
-    """Run export, independent image download, or review-only reimport."""
+    """Run export, independent image download, accepted import or explicit case migration."""
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     export = sub.add_parser("download", help="Export API productions; no database writes")
@@ -758,8 +761,11 @@ def main() -> None:
     images.add_argument("--output", type=Path, default=DEFAULT_IMAGES)
     images.add_argument("--limit", type=int)
     images.add_argument("--concurrency", type=int, default=10)
-    review = sub.add_parser("import", aliases=["import_all"], help="Queue review cases only")
+    review = sub.add_parser(
+        "import", aliases=["import_all"], help="Accept source records without overwriting existing values"
+    )
     review.add_argument("--json", type=Path, help="Snapshot to import; defaults to latest full staged export")
+    sub.add_parser("migrate-cases", help="Explicitly accept stored pending Theapolis import cases")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if args.command == "download":
@@ -767,7 +773,7 @@ def main() -> None:
     elif args.command == "images":
         asyncio.run(download_images(args.output, concurrency=args.concurrency, limit=args.limit))
     else:
-        result = import_all(args.json)
+        result = migrate_pending_cases() if args.command == "migrate-cases" else import_all(args.json)
         print(json.dumps({kind: len(cases) for kind, cases in result.items()}))
 
 

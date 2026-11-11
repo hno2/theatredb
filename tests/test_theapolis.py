@@ -19,17 +19,28 @@ from backend import user_management
 from backend.import_status import theatre_status
 from backend.ingestion import theapolis
 from backend.ingestion.staging import staging_schema, validate_records
+from backend.ingestion.theapolis_import import migrate_pending_cases
 from backend.models import (
     EntitySource,
+    EntityType,
     Organization,
     Person,
     Production,
     ReconciliationCase,
     Source,
+    SourceRecord,
     Text,
     TheapolisProfileCache,
 )
-from backend.reconciliation import approve_case, find_candidates, preview_case
+from backend.reconciliation import (
+    approve_case,
+    find_candidates,
+    merge_entities,
+    preview_case,
+    preview_entity_merge,
+    propose_record,
+)
+from backend.scd2 import SCD2History
 from frontend.views.organization import filter_productions, premiere_label, production_dates
 
 
@@ -180,21 +191,20 @@ def test_production_tags_and_profile_birthday_preserve_source_identity(db, tmp_p
     assert staged["memberships"][0]["born_precision"] == "day"
     result = theapolis.import_all(path)
     with Session(db) as session:
-        person_case = next(
-            case
-            for case in session.exec(select(ReconciliationCase).where(ReconciliationCase.entity_type == "person")).all()
-            if case.context["external_id"] == "directors:9"
-        )
-        production_case = session.exec(
-            select(ReconciliationCase).where(ReconciliationCase.entity_type == "production")
-        ).one()
-        assert person_case.context["external_id"] == "directors:9"
-        assert person_case.context["external_url"] == profile["url"]
-        assert person_case.incoming["born"] == "1966-05-19T00:00:00"
-        assert person_case.incoming["born_precision"] == "day"
-        assert person_case.incoming["type"] == ["director"]
-        assert "tags" not in person_case.incoming
-        assert production_case.incoming["tags"] == ["Schauspiel", "UA", "Musical", "Freie Darstellende Künste"]
+        record = session.exec(select(SourceRecord).where(SourceRecord.external_id == "directors:9")).one()
+        person = session.get(Person, record.entity_id)
+        assert person is not None
+        assert record.external_url == profile["url"]
+        assert person.born == dt.datetime(1966, 5, 19)
+        assert person.born_precision == "day"
+        assert person.type == ["director"]
+        assert "tags" not in record.payload["incoming"]
+        assert session.exec(select(Production)).one().tags == [
+            "Schauspiel",
+            "UA",
+            "Musical",
+            "Freie Darstellende Künste",
+        ]
         assert result["person"]
 
 
@@ -322,11 +332,9 @@ def test_profile_summary_and_missing_authors_keep_source_id(db, monkeypatch, tmp
     assert author["name"] == "Alex"
     assert "url" not in author and "born" not in author
     with Session(db) as session:
-        cases = session.exec(select(ReconciliationCase).where(ReconciliationCase.entity_type == "person")).all()
-        assert {case.context["external_id"] for case in cases} == {"directors:9", "creators:9", "creators:10"}
-    for identity in result["person"]:
-        preview = preview_case(identity)
-        approve_case(identity, revision=preview["revision"], allow_create=True, actor_id="test")
+        assert not session.exec(select(ReconciliationCase)).all()
+        records = session.exec(select(SourceRecord).where(SourceRecord.entity_type == "person")).all()
+        assert {record.external_id for record in records} == {"directors:9", "creators:9", "creators:10"}
     with Session(db) as session:
         sources = session.exec(select(EntitySource).where(EntitySource.entity_type == "person")).all()
         assert {source.external_id for source in sources} == {"directors:9", "creators:9", "creators:10"}
@@ -729,7 +737,7 @@ def test_invalid_production_preserves_raw_page_and_last_valid_json(monkeypatch, 
     assert len(json.loads(path.read_text())) == 1
 
 
-def test_review_import_is_idempotent_and_approval_preserves_source_only_urls(db, tmp_path, item):
+def test_accepted_import_is_idempotent_and_preserves_source_only_urls(db, tmp_path, item):
     path = tmp_path / "export.json"
     year_only = {**copy.deepcopy(item), "id": 124, "premierDate": None}
     path.write_text(json.dumps({"items": [item, year_only], "captured_at": "2026-11-05T12:00:00Z"}))
@@ -742,18 +750,12 @@ def test_review_import_is_idempotent_and_approval_preserves_source_only_urls(db,
         "production": 2,
     }
     with Session(db) as session:
-        for model in (Organization, Person, Production, Text):
-            assert not session.exec(select(model)).all()
-        persons = session.exec(select(ReconciliationCase).where(ReconciliationCase.entity_type == "person")).all()
-        assert {tuple(p.incoming["type"]) for p in persons if p.incoming["name"] == "Alex"} == {
+        assert not session.exec(select(ReconciliationCase)).all()
+        persons = session.exec(select(Person)).all()
+        assert {tuple(p.type) for p in persons if p.name == "Alex"} == {
             ("director",),
             ("author",),
         }
-    for kind in ("organization", "person", "text", "production"):
-        for identity in result[kind]:
-            preview = preview_case(identity)
-            assert not preview["blocked"]
-            approve_case(identity, revision=preview["revision"], allow_create=True, actor_id="test")
     with Session(db) as session:
         productions = session.exec(select(Production).order_by(col(Production.premiere))).all()
         assert len(productions) == 2
@@ -778,22 +780,23 @@ def test_role_scoped_person_ids_keep_colliding_credits_separate(db, tmp_path, it
     result = theapolis.import_all(path)
     assert result == theapolis.import_all(path)
     with Session(db) as session:
-        cases = {
-            case.context["external_id"]: case
-            for case in session.exec(select(ReconciliationCase).where(ReconciliationCase.entity_type == "person"))
+        records = {
+            record.external_id: record
+            for record in session.exec(select(SourceRecord).where(SourceRecord.entity_type == "person"))
         }
-        assert {key: case.incoming["name"] for key, case in cases.items()} == {
+        names = {person.id: person.name for person in session.exec(select(Person))}
+        assert {key: names[record.entity_id] for key, record in records.items()} == {
             "directors:15696": "Director",
             "creators:15696": "Author",
         }
-        production = session.get(ReconciliationCase, uuid.UUID(result["production"][0]))
-        text = session.get(ReconciliationCase, uuid.UUID(result["text"][0]))
+        production = session.get(Production, uuid.UUID(result["production"][0]))
+        text = session.get(Text, uuid.UUID(result["text"][0]))
         assert production is not None and text is not None
-        assert production.context["credits"] == [
-            {"case_id": str(cases["directors:15696"].id), "role": "director"},
-            {"case_id": str(cases["creators:15696"].id), "role": "author"},
-        ]
-        assert text.context["authors"] == ["Author"]
+        assert {(member.person_id, member.role) for member in production.memberships} == {
+            (records["directors:15696"].entity_id, "director"),
+            (records["creators:15696"].entity_id, "author"),
+        }
+        assert {credit.person.name for credit in text.contributions} == {"Author"}
 
 
 def test_same_role_person_id_name_conflicts_fail_before_writes(db, tmp_path, item):
@@ -857,12 +860,13 @@ def test_staged_export_reimports_using_source_ids(db, tmp_path, item):
     result = theapolis.import_all(path)
     assert len(result["production"]) == 1
     with Session(db) as session:
-        case = session.get(ReconciliationCase, uuid.UUID(result["production"][0]))
-        assert case is not None
-        assert case.context["external_id"] == str(item["id"])
-        assert case.incoming["premiere"] == "2026-01-01T00:00:00"
-        assert case.incoming["premiere_precision"] == "month"
-        assert "url" not in case.incoming
+        production = session.get(Production, uuid.UUID(result["production"][0]))
+        assert production is not None
+        assert production.premiere == dt.datetime(2026, 1, 1)
+        assert production.premiere_precision == "month"
+        assert production.url is None
+        record = session.exec(select(SourceRecord).where(SourceRecord.entity_id == production.id)).one()
+        assert record.external_id == str(item["id"])
 
 
 def test_staged_import_rejects_missing_or_mismatched_metadata_before_writes(db, tmp_path, item):
@@ -904,7 +908,7 @@ def test_default_exports_use_shared_timestamp_scope_names_and_import_latest_full
     theapolis._write_json(incomplete, theapolis.staged_records([item]))
     theapolis._write_json(theapolis._source_path(incomplete), {"success": False, "partial": True, "items": [item]})
     assert theapolis.import_all() == theapolis.import_all(second)
-    assert theapolis.import_all() != theapolis.import_all(limited)
+    assert theapolis.import_all() == theapolis.import_all(limited)
 
 
 def test_default_import_does_not_select_limited_snapshot(db, monkeypatch, tmp_path, item):
@@ -913,6 +917,234 @@ def test_default_import_does_not_select_limited_snapshot(db, monkeypatch, tmp_pa
     limited.write_text(json.dumps(theapolis.staged_records([item])))
     with pytest.raises(ValueError, match="No full Theapolis snapshot"):
         theapolis.import_all()
+
+
+def test_direct_import_preserves_conflicts_fills_blanks_and_keeps_source_observation(db, tmp_path, item):
+    path = tmp_path / "import.json"
+    path.write_text(json.dumps({"items": [item], "captured_at": "2026-11-01T12:00:00Z"}))
+    result = theapolis.import_all(path)
+    with Session(db) as session:
+        production = session.get(Production, uuid.UUID(result["production"][0]))
+        organization = session.get(Organization, uuid.UUID(result["organization"][0]))
+        assert production is not None and organization is not None
+        production.name = "Manual title"
+        production.url = "https://official.example/hamlet"
+        organization.city = "Manual city"
+        session.add_all([production, organization])
+        session.commit()
+    item["name"] = "Changed source title"
+    item["organization"]["location"]["city"] = "Hamburg"
+    item["directors"][0]["profile"] = {"birthDate": "1980", "url": f"{theapolis.SITE}/de/profil/alex"}
+    path.write_text(json.dumps({"items": [item], "captured_at": "2026-11-02T12:00:00Z"}))
+    assert theapolis.import_all(path) == result
+    with Session(db) as session:
+        production = session.exec(select(Production)).one()
+        assert production.name == "Manual title" and production.url == "https://official.example/hamlet"
+        assert session.exec(select(Organization)).one().city == "Manual city"
+        director = session.exec(select(SourceRecord).where(SourceRecord.external_id == "directors:9")).one()
+        person = session.get(Person, director.entity_id)
+        assert person is not None and person.born_precision == "year"
+        observation = session.exec(select(SourceRecord).where(SourceRecord.entity_id == production.id)).one()
+        assert observation.payload["incoming"]["name"] == "Changed source title"
+        before = len(session.exec(select(SCD2History)).all())
+    assert theapolis.import_all(path) == result
+    with Session(db) as session:
+        assert len(session.exec(select(SCD2History)).all()) == before
+        assert not session.exec(select(ReconciliationCase)).all()
+
+
+def test_reimport_after_people_and_text_merge_reuses_survivors(db, tmp_path, item):
+    path = tmp_path / "import.json"
+    path.write_text(json.dumps({"items": [item, {**item, "id": 124}]}))
+    result = theapolis.import_all(path)
+    targets = {}
+    for kind, ids in (("person", result["person"][:2]), ("text", result["text"])):
+        preview = preview_entity_merge(kind, ids)
+        targets[kind] = str(
+            merge_entities(
+                kind,
+                ids,
+                target_id=preview["target_id"],
+                revision=preview["revision"],
+                actor_id="test",
+            )
+        )
+    again = theapolis.import_all(path)
+    assert set(again["text"]) == {targets["text"]}
+    assert len(again["person"]) == 2
+    assert targets["person"] in again["person"]
+    with Session(db) as session:
+        assert len(session.exec(select(Person)).all()) == 2
+        assert len(session.exec(select(Text)).all()) == 1
+        assert {production.text_id for production in session.exec(select(Production))} == {uuid.UUID(targets["text"])}
+        assert all(
+            record.payload.get("merged_sources")
+            for record in session.exec(select(SourceRecord).where(SourceRecord.entity_type == EntityType.PERSON))
+            if record.external_id in {"directors:9", "creators:9"}
+        )
+
+
+def test_import_failure_after_organization_rolls_back_all_writes(db, tmp_path, item):
+    item["directors"][0]["profile"] = {"url": "not a source URL"}
+    path = tmp_path / "invalid.json"
+    path.write_text(json.dumps({"items": [item]}))
+    with pytest.raises(ValueError, match="Invalid source URL"):
+        theapolis.import_all(path)
+    with Session(db) as session:
+        for model in (Organization, Person, Production, Text, Source, SourceRecord, EntitySource, SCD2History):
+            assert not session.exec(select(model)).all()
+
+
+def test_shared_profile_urls_do_not_override_scoped_identity_during_merge(db, tmp_path, item):
+    for person in [*item["directors"], *item["creators"]]:
+        person["profile"] = {"url": f"{theapolis.SITE}/de/profil/shared"}
+    path = tmp_path / "profiles.json"
+    path.write_text(json.dumps({"items": [item]}))
+    result = theapolis.import_all(path)
+    preview = preview_entity_merge("person", result["person"][:2])
+    merge_entities(
+        "person", result["person"][:2], target_id=preview["target_id"], revision=preview["revision"], actor_id="test"
+    )
+    assert len(theapolis.import_all(path)["person"]) == 2
+
+
+def _old_theapolis_cases(db, item):
+    with Session(db) as session:
+        source = Source(name="theapolis.de")
+        session.add(source)
+        session.commit()
+        source_id = source.id
+    organizations, people, productions, _ = theapolis._prepare_import({"items": [item]})
+
+    def propose(kind, payload, identity=None, key=None, context=None):
+        return propose_record(kind, payload, source_id=source_id, external_id=identity, record_key=key, context=context)
+
+    orgs = {key: propose("organization", payload, identity=key) for key, (payload, _) in organizations.items()}
+    persons = {key: propose("person", payload, identity=key) for key, payload in people.items()}
+    cases = [*orgs.values(), *persons.values()]
+    for production_id, org_id, payload, raw_credits in productions:
+        credits = [{"case_id": str(persons[key].id), "role": role} for key, role in raw_credits]
+        text = propose(
+            "text",
+            {"title": payload["name"]},
+            key=f"work:production:{production_id}",
+            context={
+                "credits": [credit for credit in credits if credit["role"] == "author"],
+            },
+        )
+        production = propose(
+            "production",
+            payload,
+            identity=production_id,
+            context={
+                "credits": credits,
+                "dependencies": [
+                    {"case_id": str(orgs[org_id].id), "field": "organization_id"},
+                    {"case_id": str(text.id), "field": "text_id"},
+                ],
+            },
+        )
+        cases.extend([text, production])
+    return source_id, cases
+
+
+def test_explicit_migration_preserves_cases_and_reimports_idempotently(db, tmp_path, item):
+    _, cases = _old_theapolis_cases(db, item)
+    result = migrate_pending_cases()
+    assert {kind: len(ids) for kind, ids in result.items()} == {
+        "organization": 1,
+        "person": 3,
+        "text": 1,
+        "production": 1,
+    }
+    with Session(db) as session:
+        for case in cases:
+            stored = session.get(ReconciliationCase, case.id)
+            assert stored is not None and stored.status == "approved"
+            assert stored.context["migration"]["target_id"] == str(stored.target_id)
+        production = session.exec(select(Production)).one()
+        assert production.organization_id and production.text_id
+        assert len(production.memberships) == 3
+        assert len(session.exec(select(Text)).one().contributions) == 2
+    assert all(not ids for ids in migrate_pending_cases().values())
+    path = tmp_path / "import.json"
+    path.write_text(json.dumps({"items": [item]}))
+    reimport = theapolis.import_all(path)
+    assert {kind: set(ids) for kind, ids in reimport.items()} == {kind: set(ids) for kind, ids in result.items()}
+
+
+def test_migration_uses_newest_payload_and_rejects_ambiguous_legacy_namespace(db):
+    with Session(db) as session:
+        source = Source(name="theapolis.de")
+        session.add(source)
+        session.commit()
+        source_id = source.id
+    for name, captured in (("Older", "2026-01-01"), ("Newer", "2026-02-01")):
+        propose_record(
+            "person",
+            {"name": name, "type": ["director"]},
+            source_id=source_id,
+            external_id="9",
+            captured_at=dt.datetime.fromisoformat(captured).replace(tzinfo=dt.UTC),
+        )
+    migrate_pending_cases()
+    with Session(db) as session:
+        assert session.exec(select(Person)).one().name == "Newer"
+        assert session.exec(select(SourceRecord)).one().external_id == "directors:9"
+    ambiguous = propose_record(
+        "person", {"name": "Unknown", "type": ["director", "author"]}, source_id=source_id, external_id="10"
+    )
+    with pytest.raises(ValueError, match=f"Ambiguous legacy Theapolis person case {ambiguous.id}"):
+        migrate_pending_cases()
+    with Session(db) as session:
+        stored = session.get(ReconciliationCase, ambiguous.id)
+        assert stored is not None and stored.status == "pending"
+        assert len(session.exec(select(Person)).all()) == 1
+
+
+def test_migration_missing_dependency_rolls_back_earlier_entities(db, item):
+    _, cases = _old_theapolis_cases(db, item)
+    with Session(db) as session:
+        production_case = session.get(ReconciliationCase, cases[-1].id)
+        assert production_case is not None
+        production_case.context = {"dependencies": [{"case_id": str(uuid.uuid4()), "field": "text_id"}]}
+        session.add(production_case)
+        session.commit()
+    with pytest.raises(ValueError, match="dependency"):
+        migrate_pending_cases()
+    with Session(db) as session:
+        for model in (Organization, Person, Text, Production, SourceRecord, EntitySource, SCD2History):
+            assert not session.exec(select(model)).all()
+        assert all(case.status == "pending" for case in session.exec(select(ReconciliationCase)))
+
+
+def test_migration_maps_approved_legacy_people_dependencies_for_reimport(db, tmp_path, item):
+    source_id, cases = _old_theapolis_cases(db, item)
+    director = next(
+        case for case in cases if case.entity_type == EntityType.PERSON and case.incoming["type"] == ["director"]
+    )
+    with Session(db) as session:
+        stored = session.get(ReconciliationCase, director.id)
+        assert stored is not None
+        stored.record_key = "id:9"
+        stored.context = {**stored.context, "external_id": "9", "record_key": "id:9"}
+        session.add(stored)
+        session.commit()
+    preview = preview_case(director.id)
+    approved_id = approve_case(director.id, revision=preview["revision"], allow_create=True, actor_id="test")
+    migrate_pending_cases()
+    with Session(db) as session:
+        qualified = session.exec(
+            select(SourceRecord).where(
+                SourceRecord.source_id == source_id,
+                SourceRecord.record_key == "id:directors:9",
+            )
+        ).one()
+        assert qualified.entity_id == approved_id
+    path = tmp_path / "legacy-approved.json"
+    path.write_text(json.dumps({"items": [item]}))
+    result = theapolis.import_all(path)
+    assert str(approved_id) in result["person"] and len(result["person"]) == 3
 
 
 def test_year_matching_and_display_do_not_invent_date(db):
@@ -1041,9 +1273,8 @@ def test_missing_organization_stays_unknown(db, tmp_path, item):
     result = theapolis.import_all(path)
     assert not result["organization"]
     with Session(db) as session:
-        case = session.get(ReconciliationCase, uuid.UUID(result["production"][0]))
-        assert case is not None
-        assert all(dep["field"] != "organization_id" for dep in case.context["dependencies"])
+        production = session.get(Production, uuid.UUID(result["production"][0]))
+        assert production is not None and production.organization_id is None
 
 
 def test_image_failure_is_recorded_while_other_downloads_continue(monkeypatch, tmp_path):
