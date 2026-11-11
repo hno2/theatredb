@@ -7,7 +7,6 @@ import pytest
 import yaml
 from psycopg.errors import DuplicateDatabase, InsufficientPrivilege
 from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlmodel import SQLModel
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -129,7 +128,7 @@ def database_setup(load_config, monkeypatch):
     create_engine = Mock(return_value=admin_engine)
     monkeypatch.setitem(config["init_db"].__globals__, "create_engine", create_engine)
     create_tables = Mock()
-    monkeypatch.setattr(SQLModel.metadata, "create_all", create_tables)
+    monkeypatch.setitem(config["init_db"].__globals__, "migrate", create_tables)
     monkeypatch.setitem(config["init_db"].__globals__, "ensure_queue_schema", Mock())
     return config["init_db"], engine, admin_engine, connection, create_engine, create_tables
 
