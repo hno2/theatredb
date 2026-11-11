@@ -27,6 +27,9 @@ dev = [
     "pytest>=9.0.3",
     "jsonschema>=4.26.0",
     "rfc3339-validator>=0.1.4",
+    "types-pyyaml>=6.0.12.20261111",
+    "types-jsonschema>=4.26.0.20261006",
+    "types-tqdm>=4.70.0.20261106",
 ]
 ingest=[
 	"babel>=2.17",
@@ -72,7 +75,7 @@ ignore = [
 preview = true
 
 [tool.ruff.lint.per-file-ignores]
-"backend/migrations/versions/*" = ["D", "W291", "E501"]
+"backend/migrations/versions/*" = ["D", "trailing-whitespace", "line-too-long"]
 
 "tests/*" = [
   "import-private-name",
