@@ -910,7 +910,7 @@ def list_production_cases(
                 "reason": case.reason,
             }
             for case in cases
-            if (organization_id is None or case.context["organization_id"] == str(organization_id))
+            if (organization_id is None or case.context["organization_id"] == organization_id)
             and needle in normalize(case.incoming["name"])
         ]
 

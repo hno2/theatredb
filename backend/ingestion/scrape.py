@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         return _dispatch(args)
-    except (ValueError, TypeError, OSError, TimeoutError, aiohttp.ClientError, yaml.YAMLError) as error:
+    except (ValueError, TypeError, OSError, aiohttp.ClientError, yaml.YAMLError) as error:
         print(f"Ingestion error: {error}", file=sys.stderr)
         return 2
 

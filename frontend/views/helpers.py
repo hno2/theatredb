@@ -26,7 +26,7 @@ def has_coordinates(lat: float | None, lon: float | None) -> bool:
 
 def entity_link(label: str, kind: str, entity_id: str) -> None:
     """Link to an entity within the current detail page."""
-    query = urlencode({"kind": kind, "id": str(entity_id)})
+    query = urlencode({"kind": kind, "id": entity_id})
     st.markdown(
         f'<a href="?{escape(query, quote=True)}" target="_self">{escape(label)}</a>',
         unsafe_allow_html=True,
