@@ -47,7 +47,6 @@ if DATABASE_URL.drivername in {"postgres", "postgresql", "postgresql+psycopg2"}:
     DATABASE_URL = DATABASE_URL.set(drivername="postgresql+psycopg")
 
 
-MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 BASELINE_REVISION = "0001"
 
 
@@ -58,8 +57,7 @@ def _get_engine() -> Engine:
 
 def alembic_config(connection: Connection | None = None) -> Config:
     """Alembic config for the bundled migrations, optionally bound to an open connection."""
-    config = Config()
-    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config = Config(toml_file=Path(__file__).resolve().parents[1] / "pyproject.toml")
     config.attributes["connection"] = connection
     return config
 

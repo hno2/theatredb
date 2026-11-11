@@ -37,6 +37,10 @@ ingest=[
 	"markdownify>=1.2.3",
 ]
 
+[tool.alembic]
+script_location = "%(here)s/backend/migrations"
+prepend_sys_path = ["%(here)s"]
+
 [tool.ruff]
 fix = true
 line-length = 120

@@ -1,16 +1,38 @@
 import os
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
 import psycopg
 import pytest
 from alembic import command
+from alembic.config import CommandLine
+from alembic.script import ScriptDirectory
 from psycopg import sql
 from sqlalchemy import Engine, text
 from sqlmodel import SQLModel, create_engine
 
 from backend import db, user_management
+
+
+def test_alembic_config_uses_pyproject_outside_project(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = user_management.alembic_config()
+    assert ScriptDirectory.from_config(config).get_current_head() == user_management.BASELINE_REVISION
+    with create_engine("sqlite://").connect() as connection:
+        assert user_management.alembic_config(connection).attributes["connection"] is connection
+
+
+def test_alembic_cli_discovers_pyproject(monkeypatch) -> None:
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    monkeypatch.delenv("ALEMBIC_CONFIG", raising=False)
+    cli = CommandLine()
+    run_cmd = Mock()
+    monkeypatch.setattr(cli, "run_cmd", run_cmd)
+    cli.main(["heads"])
+    config = run_cmd.call_args.args[0]
+    assert ScriptDirectory.from_config(config).get_current_head() == user_management.BASELINE_REVISION
 
 
 @pytest.fixture

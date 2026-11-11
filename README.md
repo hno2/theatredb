@@ -28,6 +28,9 @@ migrations ([backend/migrations](backend/migrations)). Databases created before
 Alembic are stamped as the baseline revision, so their schema must match it;
 back up before upgrading.
 
+Alembic settings live in `[tool.alembic]` in `pyproject.toml`; direct commands
+such as `uv run alembic heads` work from the project root without an INI file.
+
 ```bash
 uv run python -m backend.db migrate              # apply pending migrations
 uv run python -m backend.db status               # current vs head, model drift
