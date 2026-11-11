@@ -240,7 +240,7 @@ def test_hour_input_roundtrips_as_minute_in_database_and_review(db):
 def test_people_merge_selects_date_and_precision_together(db):
     with Session(db) as session:
         first = Person.model_validate({"name": "Person", "born": "1980"})
-        second = Person.model_validate({"name": "Person", "born": "1980-01"})
+        second = Person.model_validate({"name": "Person", "born": "1981-01"})
         session.add_all([first, second])
         session.commit()
         first_id, second_id = first.id, second.id
@@ -258,7 +258,7 @@ def test_people_merge_selects_date_and_precision_together(db):
     with Session(db) as session:
         saved = session.get(Person, first_id)
         assert saved is not None
-        assert saved.born == dt.datetime(1980, 1, 1)
+        assert saved.born == dt.datetime(1981, 1, 1)
         assert saved.born_precision == DatePrecision.MONTH
 
 

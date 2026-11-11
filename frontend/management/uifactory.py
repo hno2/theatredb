@@ -3,10 +3,12 @@ import json
 import math
 from dataclasses import dataclass
 from typing import Any, cast, get_args, get_origin
+from uuid import UUID
 
 import pandas as pd
 import streamlit as st
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlmodel import SQLModel
 from streamlit import session_state, user
@@ -15,6 +17,8 @@ from backend.config import FORM_FIELD_KINDS
 from backend.date_precision import DatePrecision, iso_date, parse_date
 from backend.entity_management import create_entity, delete_entity, list_entities, list_entities_where, update_entity
 from backend.models import EntitySource, Person, Source, TextContribution
+from backend.reconciliation import search_people_for_merge, stable_digest
+from frontend.management.merge import render_merge_action
 
 FormValue = str | int | float | bool | dt.date | dt.datetime | list[str] | dict | None
 
@@ -70,7 +74,7 @@ def _extract_validation_errors(exc: Exception) -> tuple[dict[str, str], str | No
         for err in exc.errors():
             loc = err.get("loc") or []
             field = str(loc[0]) if loc else ""
-            msg = str(err.get("msg", "Invalid value"))
+            msg = err.get("msg", "Invalid value")
             if field:
                 field_errors[field] = msg
         return field_errors, None if field_errors else str(exc)
@@ -293,7 +297,7 @@ def _render_json(field: _FieldUI, d: dict | None, key: str) -> FormValue:
 
 
 def _render_text(field: _FieldUI, d: str | None, key: str) -> FormValue:
-    return st.text_input(field.label, value="" if d is None else str(d), key=key).strip() or None
+    return st.text_input(field.label, value="" if d is None else d, key=key).strip() or None
 
 
 def _render_field(field: _FieldUI, defaults: dict[str, Any], *, form_key: str, errors: dict[str, str]) -> FormValue:
@@ -609,7 +613,9 @@ def _render_inline_relations(
 
         st.subheader(f":material/group: {title}")
 
-        members = list_entities_where(child_model, filter_field=fk_field, filter_value=parent_id, order_by=order_by)
+        members = list_entities_where(
+            child_model, filter_field=fk_field, filter_value=UUID(parent_id), order_by=order_by
+        )
 
         if relation.get("editable_table", False):
             relation_key = f"{child_name}_{fk_field}"
@@ -665,7 +671,88 @@ def _load_df(model_cls: type[SQLModel]) -> pd.DataFrame:
     return df
 
 
-def _render_table(df: pd.DataFrame, fields: list[_FieldUI], name: str) -> dict | None:
+INLINE_FIELDS = {"person": ("born", "died", "nationality"), "text": ("published", "language")}
+
+
+def _autosave_table(model_cls: type[SQLModel], original: pd.DataFrame, key: str, kind: str, actor: str | None) -> bool:
+    edits = st.session_state[key].get("edited_rows", {})
+    errors = []
+    saved = False
+    attempted = False
+    for index, changes in edits.items():
+        entity_id = str(original.index[index])
+        payload = {
+            field: value if value not in ("", None) else None
+            for field, value in changes.items()
+            if field in INLINE_FIELDS[kind] and value != original.iloc[index][field]
+        }
+        if not payload:
+            continue
+        attempted = True
+        try:
+            update_entity(model_cls, entity_id=entity_id, payload=payload, actor_id=actor)
+        except (ValueError, TypeError, SQLAlchemyError) as exc:
+            errors.append(f"{original.iloc[index].get('name') or original.iloc[index].get('title')}: {exc}")
+        else:
+            saved = True
+    if attempted:
+        st.session_state[f"table_errors_{kind}"] = errors
+    return saved
+
+
+def _render_inline_table(
+    df: pd.DataFrame, view: pd.DataFrame, model_cls: type[SQLModel], kind: str, actor: str | None
+) -> list[dict]:
+    epoch = st.session_state.get(f"table_epoch_{kind}", 0)
+    selection_key = f"table_selection_epoch_{kind}"
+    if st.session_state.get(selection_key) != epoch:
+        st.session_state[f"table_selected_{kind}"] = []
+        st.session_state[selection_key] = epoch
+    selected = st.session_state.get(f"table_selected_{kind}", [])
+    view.insert(0, "Auswahl", view.index.isin(selected))
+    label = "name" if kind == "person" else "title"
+    order = [
+        "Auswahl",
+        label,
+        *INLINE_FIELDS[kind],
+        *[column for column in view.columns if column not in {"Auswahl", label, *INLINE_FIELDS[kind]}],
+    ]
+    config = {
+        "Auswahl": st.column_config.CheckboxColumn("Auswahl", width="small"),
+        label: st.column_config.TextColumn("Name" if kind == "person" else "Titel", width="medium"),
+    }
+    dates = getattr(model_cls, "date_fields", ())
+    for field in INLINE_FIELDS[kind]:
+        config[field] = st.column_config.TextColumn(
+            next(item.label for item in _build_fields(model_cls) if item.name == field),
+            help="ISO-Datum: YYYY, YYYY-MM oder YYYY-MM-DD; leer zum Löschen." if field in dates else None,
+        )
+    key = f"table_{kind}_{epoch}_{stable_digest(df.to_dict(orient='records'))}"
+    edited = st.data_editor(
+        view,
+        hide_index=True,
+        key=key,
+        column_order=order,
+        column_config=config,
+        disabled=[column for column in view.columns if column not in {"Auswahl", *INLINE_FIELDS[kind]}],
+    )
+    selected = edited.index[edited["Auswahl"]].tolist()
+    st.session_state[f"table_selected_{kind}"] = selected
+    if _autosave_table(model_cls, view, key, kind, actor):
+        st.rerun()
+    for error in st.session_state.get(f"table_errors_{kind}", []):
+        st.error(f"Automatisches Speichern fehlgeschlagen: {error}")
+    return [df.loc[entity_id].to_dict() for entity_id in selected]
+
+
+def _render_table(
+    df: pd.DataFrame,
+    fields: list[_FieldUI],
+    model_cls: type[SQLModel],
+    *,
+    merge_kind: str | None = None,
+    actor: str | None = None,
+) -> list[dict]:
     df_view = df.drop(columns=["id"], errors="ignore").copy()
     for f in fields:
         if f.kind == "domain_date" and f.name in df_view.columns:
@@ -683,11 +770,18 @@ def _render_table(df: pd.DataFrame, fields: list[_FieldUI], name: str) -> dict |
         df_view[display_col] = [lookup.get(str(v), "") if pd.notna(v) and str(v) else "" for v in df_view[f.name]]
         df_view = df_view.drop(columns=[f.name], errors="ignore")
 
+    if merge_kind:
+        return _render_inline_table(df, df_view, model_cls, merge_kind, actor)
+    key = f"table_{model_cls.__name__.lower()}"
     sel = st.dataframe(
-        df_view, hide_index=True, key=f"table_{name.lower()}", on_select="rerun", selection_mode="single-row"
+        df_view,
+        hide_index=True,
+        key=key,
+        on_select="rerun",
+        selection_mode="single-row",
     )
     sel_rows = sel.get("selection", {}).get("rows", [])
-    return df.iloc[sel_rows[0]].to_dict() if len(sel_rows) == 1 and not df.empty else None
+    return [df.iloc[index].to_dict() for index in sel_rows if 0 <= index < len(df)]
 
 
 def _render_edit_form(
@@ -777,12 +871,14 @@ def render_sqlmodel_crud(
     title: str | None = None,
     field_overrides: dict | None = None,
     inline_relations: list[dict] | None = None,
+    merge_kind: str | None = None,
 ) -> None:
     """Render a CRUD UI for a given SQLModel class.
 
     Args:
         model_cls: The SQLModel class to render the CRUD UI for.
         title: Optional title for the page. Defaults to the model class name.
+        merge_kind: Enable native people/text table merges for this entity type.
         field_overrides: Optional dict of field overrides, keyed by field name. Each override can specify:
             - kind: Optional explicit kind (e.g. "multiselect", "datetime", "list_text", etc.)
             - label: Optional explicit label for the field
@@ -798,13 +894,26 @@ def render_sqlmodel_crud(
     fields = _build_fields(model_cls, field_overrides=field_overrides)
     actor = _actor_id()
     df = _load_df(model_cls)
+    if merge_kind == "person" and not df.empty:
+        context = search_people_for_merge(limit=len(df))
+        productions = {row["id"]: "; ".join(row["productions"]) for row in context}
+        df["Produktionen · Theater"] = df["id"].map(productions)
     st.title(title or f"{model_cls.__name__}s Management")
-    sel_row = _render_table(df, fields, model_cls.__name__)
-    if sel_row:
+    selected = _render_table(df, fields, model_cls, merge_kind=merge_kind, actor=actor)
+    if merge_kind:
+        st.caption(
+            "Auswahl anklicken zum Bearbeiten oder Zusammenführen. Einfache Felder werden direkt gespeichert; "
+            "Datumsangaben als YYYY, YYYY-MM oder YYYY-MM-DD. Ohne Feldkonflikte wird sofort zusammengeführt."
+        )
+        render_merge_action(merge_kind, selected, actor)
+    if len(selected) == 1:
+        sel_row = selected[0]
         _render_edit_form(model_cls, fields, sel_row, actor)
         _render_sources_for_selected(model_cls, sel_row)
         if inline_relations:
             _render_inline_relations(str(sel_row.get("id")), inline_relations, actor)
-    else:
+    elif not selected:
         st.caption(f"Select row to edit {model_cls.__name__}.")
         _render_add_form(model_cls, fields, actor)
+    else:
+        st.caption(f"{len(selected)} Datensätze für die Zusammenführung ausgewählt.")

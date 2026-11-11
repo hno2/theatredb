@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -37,15 +38,16 @@ from backend.reconciliation import (
     discover_duplicates,
     find_candidates,
     list_cases,
+    merge_entities,
     merge_people,
     preview_case,
+    preview_entity_merge,
     preview_people_merge,
     propose_record,
     queue_duplicate,
     resolve_id,
     search_entities,
     search_people_for_merge,
-    stable_digest,
     union_values,
 )
 from backend.scd2 import SCD2History
@@ -384,18 +386,18 @@ def test_canonical_roles(raw, expected) -> None:
 
 
 def test_review_ui_empty_and_manual_submission(db) -> None:
-    left, right = save(db, Person(name="Same"), Person(name="Same"))
+    left, right = save(db, Organization(name="Same"), Organization(name="Same"))
     app = AppTest.from_file(str(REVIEW_APP)).run()
     assert not app.exception
     assert app.title[0].value == "Datenabgleich & Duplikate"
-    app.selectbox(key="duplicate_kind").set_value("person").run()
+    app.selectbox(key="duplicate_kind").set_value("organization").run()
     app.selectbox(key="duplicate_left").set_value(str(left.id)).run()
     app.selectbox(key="duplicate_right").set_value(str(right.id)).run()
-    app.text_input(key="duplicate_reason").set_value("Same person").run()
+    app.text_input(key="duplicate_reason").set_value("Same organization").run()
     next(button for button in app.button if button.label == "Duplikat zur Prüfung einreichen").click().run()
     assert not app.exception
     assert count(db, ReconciliationCase) == 1
-    assert count(db, Person) == 2
+    assert count(db, Organization) == 2
     app.run()
     assert not app.exception
     assert any("Genehmigen" in button.label and button.disabled for button in app.button)
@@ -859,71 +861,255 @@ def test_bulk_people_merge_validates_selection_and_choices(db) -> None:
     assert count(db, ReconciliationCase) == 0
 
 
-def test_people_table_ui_requires_selection_preview_and_confirmation(db) -> None:
-    people = save(db, Person(name="Same"), Person(name="Same"), Person(name="Other"))
-    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
-    assert not app.exception
-    assert app.selectbox(key="duplicate_kind").value == "person"
-    merge_button = next(button for button in app.button if button.label == "Personen zusammenführen")
-    assert merge_button.disabled
-    ids = [row["id"] for row in search_people_for_merge()]
-    editor_key = f"people_selection_{stable_digest(['', 1, ids])}"
-    app.session_state[editor_key] = {
-        "edited_rows": {ids.index(str(person.id)): {"Auswahl": True} for person in people[:2]},
+def _management_app(kind: str) -> AppTest:
+    return AppTest.from_file(
+        str(REVIEW_APP.parent / ("persons.py" if kind == "person" else "texts.py")), default_timeout=10
+    ).run()
+
+
+def _select_rows(app: AppTest, rows: list[int]) -> AppTest:
+    app.session_state[app.dataframe[0].proto.id.rsplit("-", 1)[1]] = {
+        "edited_rows": {index: {"Auswahl": index in rows} for index in range(len(app.dataframe[0].value))},
         "added_rows": [],
         "deleted_rows": [],
     }
+    return app.run()
+
+
+def _edit_cell(app: AppTest, row: int, field: str, value: str | None) -> AppTest:
+    app.session_state[app.dataframe[0].proto.id.rsplit("-", 1)[1]] = {
+        "edited_rows": {row: {field: value}},
+        "added_rows": [],
+        "deleted_rows": [],
+    }
+    return app.run()
+
+
+@pytest.mark.parametrize(
+    "kind,model,payload,field,value,expected",
+    [
+        ("person", Person, {"name": "Person"}, "born", "1980-06", dt.datetime(1980, 6, 1)),
+        ("person", Person, {"name": "Person"}, "died", "2020", dt.datetime(2020, 1, 1)),
+        ("person", Person, {"name": "Person"}, "nationality", "DE", "DE"),
+        ("text", Text, {"title": "Text"}, "published", "2001-02-03", dt.datetime(2001, 2, 3)),
+        ("text", Text, {"title": "Text"}, "language", "de", "de"),
+    ],
+)
+def test_inline_table_autosaves_simple_fields(db, kind, model, payload, field, value, expected) -> None:
+    entity = save(db, model(**payload))[0]
+    app = _management_app(kind)
+    _edit_cell(app, 0, field, value)
+    assert not app.exception and not app.error
+    with Session(db) as session:
+        saved = session.get(model, entity.id)
+        assert saved is not None and getattr(saved, field) == expected
+        if field in model.date_fields:
+            assert (
+                getattr(saved, f"{field}_precision")
+                == {
+                    "born": "month",
+                    "died": "year",
+                    "published": "day",
+                }[field]
+            )
+    assert count(db, SCD2History) == 1
     app.run()
+    assert count(db, SCD2History) == 1
+    _edit_cell(app, 0, field, "")
+    assert not app.exception and not app.error
+    with Session(db) as session:
+        saved = session.get(model, entity.id)
+        assert saved is not None and getattr(saved, field) is None
+        if field in model.date_fields:
+            assert getattr(saved, f"{field}_precision") is None
+
+
+def test_inline_table_rejects_invalid_dates_and_preserves_selection(db) -> None:
+    entity = save(db, Person.model_validate({"name": "Person", "born": "1980"}))[0]
+    app = _management_app("person")
+    _select_rows(app, [0])
+    _edit_cell(app, 0, "born", "invalid")
     assert not app.exception
-    assert not next(button for button in app.button if button.label == "Personen zusammenführen").disabled
-    next(button for button in app.button if button.label == "Personen zusammenführen").click().run()
-    assert count(db, Person) == 3
-    assert count(db, ReconciliationCase) == 0
+    assert any("Automatisches Speichern fehlgeschlagen" in error.value for error in app.error)
+    with Session(db) as session:
+        saved = session.get(Person, entity.id)
+        assert saved is not None and saved.born == dt.datetime(1980, 1, 1) and saved.born_precision == "year"
+    assert count(db, SCD2History) == 0
+    _edit_cell(app, 0, "born", "1980-06")
+    assert not app.exception and not app.error
+    assert any(button.label == "Save" for button in app.button)
+
+
+def test_inline_table_column_order_and_readonly_names(db) -> None:
+    save(db, Person(name="Person"))
+    app = _management_app("person")
+    assert list(app.dataframe[0].proto.column_order)[:2] == ["Auswahl", "name"]
+    config = json.loads(app.dataframe[0].proto.columns)
+    assert config["name"]["disabled"]
+    assert not config["born"].get("disabled", False)
+    assert config["type"]["disabled"]
+    _edit_cell(app, 0, "name", "Not allowed")
+    assert not app.exception
+    with Session(db) as session:
+        assert session.exec(select(Person)).one().name == "Person"
+
+
+@pytest.mark.parametrize(
+    "kind,model,payload",
+    [
+        ("person", Person, {"name": "Same"}),
+        ("text", Text, {"title": "Same"}),
+    ],
+)
+def test_entity_table_merges_without_dialog_when_no_overwrites(db, kind, model, payload) -> None:
+    save(db, model(**payload), model(**payload))
+    app = _management_app(kind)
+    assert not app.exception
+    assert app.button(key=f"merge_{kind}").disabled
+    assert app.dataframe[0].proto.editing_mode != 0
+    _select_rows(app, [0, 1])
+    assert not app.button(key=f"merge_{kind}").disabled
+    app.button(key=f"merge_{kind}").click().run()
+    assert not app.exception and not app.error
+    assert count(db, model) == 1
+    assert f"merge_preview_{kind}" not in app.session_state
+    assert app.button(key=f"merge_{kind}").disabled
+    assert not any(button.label == "Zusammenführung speichern" for button in app.button)
+
+
+@pytest.mark.parametrize("kind,model,label", [("person", Person, "name"), ("text", Text, "title")])
+def test_entity_table_conflict_dialog_choices_survivor_and_cancel(db, kind, model, label) -> None:
+    records = save(db, model(**{label: "One"}), model(**{label: "Two"}))
+    app = _management_app(kind)
+    _select_rows(app, [0, 1])
+    app.button(key=f"merge_{kind}").click().run()
+    assert not app.exception
+    assert count(db, model) == 2
     assert next(button for button in app.button if button.label == "Zusammenführung speichern").disabled
-    next(box for box in app.checkbox if box.label.startswith("Alle ausgewählten")).check().run()
-    assert not app.error, [error.value for error in app.error]
-    assert "people_merge_preview" in app.session_state
+    app.selectbox(key=f"merge_survivor_{kind}").select(str(records[1].id)).run()
+    assert not app.exception
+    preview = app.session_state[f"merge_preview_{kind}"]
+    app.selectbox(key=f"merge_choice_{preview['revision']}_{label}").select(str(records[0].id)).run()
+    next(button for button in app.button if button.label == "Abbrechen").click().run()
+    assert not app.exception
+    assert count(db, model) == 2
+    assert f"merge_preview_{kind}" not in app.session_state
+    app.button(key=f"merge_{kind}").click().run()
+    app.selectbox(key=f"merge_survivor_{kind}").select(str(records[1].id)).run()
+    preview = app.session_state[f"merge_preview_{kind}"]
+    app.selectbox(key=f"merge_choice_{preview['revision']}_{label}").select(str(records[0].id)).run()
+    next(button for button in app.button if button.label == "Zusammenführung speichern").click().run()
+    assert not app.exception and not app.error
+    assert count(db, model) == 1
+    with Session(db) as session:
+        survivor = session.exec(select(model)).one()
+        assert survivor.id == records[1].id and getattr(survivor, label) == "One"
+
+
+def test_entity_dialog_rejects_stale_sources_and_clears_selection(db, source) -> None:
+    people = save(db, Person(name="One"), Person(name="Two"))
+    app = _management_app("person")
+    _select_rows(app, [0, 1])
+    app.button(key="merge_person").click().run()
+    preview = app.session_state["merge_preview_person"]
+    save(db, EntitySource(source_id=source.id, entity_type=EntityType.PERSON, entity_id=people[0].id))
+    app.selectbox(key=f"merge_choice_{preview['revision']}_name").select(str(people[0].id)).run()
     next(button for button in app.button if button.label == "Zusammenführung speichern").click().run()
     assert not app.exception
-    assert not app.error
+    assert any("Data changed" in error.value for error in app.error)
     assert count(db, Person) == 2
-    assert count(db, ReconciliationCase) == 1
-    assert "people_merge_preview" not in app.session_state
+    _select_rows(app, [])
+    assert "merge_preview_person" not in app.session_state
+    assert app.button(key="merge_person").disabled
 
 
-@pytest.mark.parametrize("change", ["person", "query", "source"])
-def test_people_table_ui_rejects_stale_preview_and_clears_changed_selection(db, source, change) -> None:
-    people = save(db, Person(name="Same"), Person(name="Same"))
-    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
-    ids = [row["id"] for row in search_people_for_merge()]
-    editor_key = f"people_selection_{stable_digest(['', 1, ids])}"
-    app.session_state[editor_key] = {
-        "edited_rows": {index: {"Auswahl": True} for index in range(2)},
-        "added_rows": [],
-        "deleted_rows": [],
-    }
-    app.run()
-    next(button for button in app.button if button.label == "Personen zusammenführen").click().run()
-    if change == "query":
-        app.text_input(key="duplicate_query").set_value("Not found").run()
-        assert "people_merge_preview" not in app.session_state
-    elif change == "person":
-        with Session(db) as session:
-            person = session.get(Person, people[0].id)
-            assert person is not None
-            person.description = "Concurrent edit"
-            session.add(person)
-            session.commit()
-        app.run()
-        assert "people_merge_preview" not in app.session_state
-        assert next(button for button in app.button if button.label == "Personen zusammenführen").disabled
-    else:
-        save(db, EntitySource(source_id=source.id, entity_type=EntityType.PERSON, entity_id=people[0].id))
-        next(box for box in app.checkbox if box.label.startswith("Alle ausgewählten")).check().run()
-        assert not app.error, [error.value for error in app.error]
-        assert "people_merge_preview" in app.session_state
-        next(button for button in app.button if button.label == "Zusammenführung speichern").click().run()
-        assert any("Data changed" in error.value for error in app.error)
-    assert not app.exception
-    assert count(db, Person) == 2
+def test_text_merge_rewires_productions_contributions_lineages_and_sources(db, source) -> None:
+    texts = save(db, Text(title="Same"), Text(title="Same", language="de"), Text(title="Same"))
+    author, other, production = save(
+        db, Person(name="Author"), Text(title="Other"), Production(name="Show", text_id=texts[1].id)
+    )
+    for text in texts[1:]:
+        save(
+            db,
+            TextContribution(text_id=text.id, person_id=author.id, role="author"),
+            TextLineage(source_text_id=text.id, derived_text_id=other.id, relation="adaptation", notes="Keep"),
+            TextLineage(source_text_id=other.id, derived_text_id=text.id, relation="translation"),
+            EntitySource(source_id=source.id, entity_type=EntityType.TEXT, entity_id=text.id, external_id=str(text.id)),
+        )
+    save(db, TextLineage(source_text_id=texts[1].id, derived_text_id=texts[2].id, relation="adaptation"))
+    alias = uuid.uuid4()
+    save(db, EntityRedirect(entity_type=EntityType.TEXT, old_id=alias, target_id=texts[2].id))
+    ids = [text.id for text in texts]
+    preview = preview_entity_merge("text", ids, target_id=texts[0].id)
+    merge_entities("text", ids, target_id=texts[0].id, revision=preview["revision"], actor_id="test")
+    with Session(db) as session:
+        stored_production = session.get(Production, production.id)
+        assert stored_production is not None and stored_production.text_id == texts[0].id
+        assert session.exec(select(TextContribution)).one().text_id == texts[0].id
+        lineages = session.exec(select(TextLineage)).all()
+        assert len(lineages) == 2
+        assert all(lineage.source_text_id != lineage.derived_text_id for lineage in lineages)
+        assert {lineage.notes for lineage in lineages} == {"Keep", None}
+        assert session.exec(select(EntitySource)).one().entity_id == texts[0].id
+        assert all(record.entity_id == texts[0].id for record in session.exec(select(SourceRecord)).all())
+        assert resolve_id(session, "text", alias) == texts[0].id
+        survivor = session.get(Text, texts[0].id)
+        assert survivor is not None and survivor.language == "de"
+    assert count(db, Text) == 2
+    assert count(db, SCD2History) > 0
+
+
+@pytest.mark.parametrize("kind,model,label", [("person", Person, "name"), ("text", Text, "title")])
+def test_table_merge_requires_all_conflict_choices(db, kind, model, label) -> None:
+    entities = save(db, model(**{label: "One"}), model(**{label: "Two"}))
+    ids = [entity.id for entity in entities]
+    preview = preview_entity_merge(kind, ids)
+    with pytest.raises(ValueError, match="every conflicting field"):
+        merge_entities(kind, ids, target_id=preview["target_id"], revision=preview["revision"], actor_id="test")
+    assert count(db, model) == 2
     assert count(db, ReconciliationCase) == 0
+
+
+def test_other_source_review_remains_and_theapolis_is_hidden(db) -> None:
+    sources = save(db, Source(name="theapolis.de"), Source(name="Other"))
+    for source in sources:
+        propose_record("person", {"name": source.name}, source_id=source.id, external_id="1")
+    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
+    assert not app.exception
+    assert "Weitere Prüffälle" not in [tab.label for tab in app.tabs]
+    assert "Andere Quellen & gemeldete Duplikate" in [tab.label for tab in app.tabs]
+    review_selector = next(box for box in app.selectbox if box.label == "Prüffall")
+    assert len(review_selector.options) == 1
+    assert "Other" in review_selector.options[0]
+
+
+@pytest.mark.parametrize(
+    "kind,model,label,date",
+    [
+        ("person", Person, "name", "born"),
+        ("text", Text, "title", "published"),
+    ],
+)
+def test_table_merge_refines_compatible_dates_without_conflicts(db, kind, model, label, date) -> None:
+    entities = save(
+        db, model.model_validate({label: "Same", date: "1980"}), model.model_validate({label: "Same", date: "1980-06"})
+    )
+    ids = [entity.id for entity in entities]
+    preview = preview_entity_merge(kind, ids)
+    assert not any(field["conflict"] for field in preview["fields"])
+    merge_entities(kind, ids, target_id=preview["target_id"], revision=preview["revision"], actor_id="test")
+    with Session(db) as session:
+        survivor = session.exec(select(model)).one()
+        assert getattr(survivor, date) == dt.datetime(1980, 6, 1)
+        assert getattr(survivor, f"{date}_precision") == "month"
+
+
+def test_text_table_merge_rejects_stale_reference_atomically(db) -> None:
+    texts = save(db, Text(title="Same"), Text(title="Same"))
+    ids = [text.id for text in texts]
+    preview = preview_entity_merge("text", ids)
+    save(db, Production(name="Concurrent", text_id=texts[1].id))
+    with pytest.raises(ValueError, match="Data changed"):
+        merge_entities("text", ids, target_id=preview["target_id"], revision=preview["revision"], actor_id="test")
+    assert count(db, Text) == 2
+    assert count(db, SCD2History) == 0

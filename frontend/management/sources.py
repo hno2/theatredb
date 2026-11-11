@@ -95,7 +95,8 @@ def _config_editor(source: Source) -> None:
             )
             st.caption(
                 "Felder des gewählten Entitätstyps; z. B. Produktionsname und Kritiken. "
-                "Ergebnisse werden als generische Prüffälle vorgemerkt, nicht als Theater-Upload."
+                "Ergebnisse werden unter Datenabgleich → Andere Quellen & gemeldete Duplikate geprüft, "
+                "nicht als Theater-Upload."
             )
             organization = None
         enabled = st.checkbox("Crawler aktiviert", value=stored.enabled if stored else True, key=f"enabled-{source.id}")
@@ -119,7 +120,7 @@ def _run_controls(source_id: uuid.UUID) -> None:
     force = st.checkbox("Alle Seiten neu laden (ohne HTTP-Cache)", key=f"force-{source_id}")
     limited = st.checkbox("Begrenzter Testlauf", key=f"limited-{source_id}")
     limit = (
-        int(st.number_input("Maximale Datensätze", min_value=1, value=5, step=1, key=f"limit-{source_id}"))
+        st.number_input("Maximale Datensätze", min_value=1, value=5, step=1, key=f"limit-{source_id}")
         if limited
         else None
     )

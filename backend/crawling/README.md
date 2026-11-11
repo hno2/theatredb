@@ -26,7 +26,8 @@ SQLite is supported for tests only.
 
 - **Theater (YAML):** use a bundled scraper config and select an existing theatre.
 - **Other source (JSON):** define listing URLs, selectors and fields for generic
-  review proposals. Config is data; it cannot run Python or shell commands.
+  review proposals under **Datenabgleich & Duplikate → Andere Quellen & gemeldete
+  Duplikate**. Config is data; it cannot run Python or shell commands.
 
 `Source` owns each crawler and its run history. Changed extracted records are
 submitted; unchanged records are skipped. Failed or cancelled runs never delete

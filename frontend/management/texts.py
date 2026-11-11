@@ -8,6 +8,7 @@ def main() -> None:
     init_db()
     render_sqlmodel_crud(
         model_cls=Text,
+        merge_kind="text",
         field_overrides={
             "contributions": {"exclude": True},
             "productions": {"exclude": True},

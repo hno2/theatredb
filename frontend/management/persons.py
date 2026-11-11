@@ -10,6 +10,7 @@ def main() -> None:
     # from db get all roles
     render_sqlmodel_crud(
         model_cls=Person,
+        merge_kind="person",
         field_overrides={
             "type": {"kind": "multiselect", "label": "Types", "options": get_unique_field_values(Person, "type")},
             "urls": {"kind": "list_text", "label": "URLs"},

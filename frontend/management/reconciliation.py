@@ -7,7 +7,6 @@ from urllib.parse import urlsplit
 
 import pandas as pd
 import streamlit as st
-from pandas.io.formats.style import Styler
 from sqlalchemy.exc import SQLAlchemyError
 
 from backend.config import (
@@ -16,7 +15,6 @@ from backend.config import (
     IMPORT_RESULT_LABELS,
     PEOPLE_STATUS,
     REVIEW_STATUS_LABELS,
-    ROW_COLORS,
 )
 from backend.config import ENTITY_LABELS as KINDS
 from backend.config import ROLE_LABELS as ROLES
@@ -39,15 +37,13 @@ from backend.reconciliation import (
     decide_case,
     discover_duplicates,
     list_cases,
-    merge_people,
     preview_case,
-    preview_people_merge,
     queue_duplicate,
     search_entities,
-    search_people_for_merge,
-    stable_digest,
 )
 from backend.user_management import init_db
+from frontend.management.merge import format_value as _format
+from frontend.management.merge import styled as _styled
 from frontend.management.uifactory import _actor_id
 
 NEW_PRODUCTION = "__new__"
@@ -281,30 +277,6 @@ def _scrape_overview() -> None:
     st.caption("Älteste zuerst. 🟢 ≤ 30 Tage · 🟡 ≤ 90 Tage · 🔴 älter. Stand = Erfassungsdatum der Daten.")
 
 
-def _format(field: str, value: object, precision: str | None = None) -> str:
-    if value in (None, "", [], {}):
-        return "—"
-    if field == "premiere":
-        parsed, inferred = parse_date(value)
-        return format_date(parsed, DatePrecision(precision or inferred))
-    if isinstance(value, list):
-        return ", ".join(map(str, value))
-    if field == "duration":
-        return f"{value} Min."
-    if field == "age_rating":
-        return f"ab {value} J."
-    return str(value)
-
-
-def _styled(frame: pd.DataFrame, statuses: list[str]) -> Styler:
-    styles = pd.DataFrame(
-        [[f"background-color: {ROW_COLORS[s]}" if s in ROW_COLORS else ""] * len(frame.columns) for s in statuses],
-        index=frame.index,
-        columns=frame.columns,
-    )
-    return frame.style.apply(lambda _: styles, axis=None)
-
-
 def _field_table(review: dict) -> None:
     rows = [row for row in review["fields"] if row["status"] != "empty"]
     frame = pd.DataFrame(
@@ -484,117 +456,6 @@ def _conflict_tab() -> None:
         st.rerun()
 
 
-def _people_merge_review(preview: dict) -> None:
-    labels = _unique({state["record"]["id"]: _label(state["record"]) for state in preview["people"]})
-    st.subheader("Zusammenführung prüfen")
-    st.dataframe(
-        [
-            {"Person": labels[state["record"]["id"]], **{k: v for k, v in state["record"].items() if k != "id"}}
-            for state in preview["people"]
-        ],
-        hide_index=True,
-    )
-    choices = {}
-    result = dict(preview["result"])
-    for field in preview["fields"]:
-        if not field["conflict"]:
-            continue
-        options = {option["person_id"]: option for option in field["options"]}
-        choice = st.selectbox(
-            f"{field['field']}: Wert behalten",
-            list(options),
-            format_func=lambda person_id, options=options: (
-                f"{_review_value(options[person_id]['value'], options[person_id]['precision'])} · {labels[person_id]}"
-                if "precision" in options[person_id]
-                else f"{options[person_id]['value']} · {labels[person_id]}"
-            ),
-            key=f"people_choice_{preview['revision']}_{field['field']}",
-        )
-        choices[field["field"]] = choice
-        result[field["field"]] = options[choice]["value"]
-        if "precision" in options[choice]:
-            result[f"{field['field']}_precision"] = options[choice]["precision"]
-    with st.expander("Ergebnis und betroffene Verknüpfungen"):
-        st.json({"Ergebnis": result, "Personen": preview["people"]})
-    st.warning(
-        "Die übrigen ausgewählten Personen werden gelöscht. Alle Verknüpfungen, Quellen und alten IDs werden "
-        "auf den verbleibenden Datensatz umgeleitet. Nicht gewählte Feldwerte bleiben im Änderungsverlauf erhalten."
-    )
-    confirmed = st.checkbox(
-        "Alle ausgewählten Datensätze sind dieselbe Person; Zusammenführung bestätigen",
-        key=f"people_confirm_{preview['revision']}",
-    )
-    if st.button("Zusammenführung speichern", type="primary", disabled=not confirmed):
-        merge_people(
-            [state["record"]["id"] for state in preview["people"]],
-            target_id=preview["target_id"],
-            revision=preview["revision"],
-            actor_id=_actor(),
-            choices=choices,
-        )
-        st.session_state.pop("people_merge_preview", None)
-        st.session_state["_flash"] = f"{len(preview['people'])} Personen zusammengeführt."
-        st.rerun()
-
-
-def _people_duplicates(query: str) -> list[dict]:
-    page = st.number_input("Personenseite", min_value=1, value=1, step=1, key=f"people_page_{query}")
-    records = search_people_for_merge(query, offset=(page - 1) * 100)
-    st.caption(
-        "Bis zu 100 Personen pro Seite, nach Name sortiert. Auswahl gilt für diese Seite. "
-        "Produktionen und Theater helfen, Namensgleiche zu unterscheiden."
-    )
-    if not records:
-        st.info("Keine Personen auf dieser Seite.")
-        st.session_state.pop("people_merge_preview", None)
-        return records
-    table = pd.DataFrame(records)
-    table["productions"] = table["productions"].map("; ".join)
-    table.insert(0, "Auswahl", False)
-    edited = st.data_editor(
-        table,
-        hide_index=True,
-        width="stretch",
-        column_order=[
-            "Auswahl",
-            "name",
-            "productions",
-            *[field for field in records[0] if field not in {"name", "productions"}],
-        ],
-        disabled=[column for column in table.columns if column != "Auswahl"],
-        column_config={
-            "id": None,
-            "Auswahl": st.column_config.CheckboxColumn("Auswahl", width="small"),
-            "name": st.column_config.TextColumn("Name"),
-            "productions": st.column_config.TextColumn("Produktionen · Theater", width="large"),
-        },
-        key=f"people_selection_{stable_digest([query, page, table['id'].tolist()])}",
-    )
-    selected = edited.loc[edited["Auswahl"], "id"].tolist()
-    labels = _unique({row["id"]: _label(row) for row in records if row["id"] in selected})
-    target = st.selectbox(
-        "Dieser Personendatensatz bleibt erhalten",
-        selected,
-        format_func=labels.__getitem__,
-        key=f"people_survivor_{stable_digest(selected)}",
-        disabled=len(selected) < 2,
-    )
-    if st.button("Personen zusammenführen", disabled=len(selected) < 2):
-        st.session_state["people_merge_preview"] = preview_people_merge(selected, target_id=target)
-    preview = st.session_state.get("people_merge_preview")
-    if preview and (
-        {state["record"]["id"] for state in preview["people"]} != set(selected) or preview["target_id"] != target
-    ):
-        st.session_state.pop("people_merge_preview", None)
-        preview = None
-    if preview:
-        if st.button("Personenvergleich aktualisieren"):
-            preview = preview_people_merge(selected, target_id=target)
-            st.session_state["people_merge_preview"] = preview
-        _people_merge_review(preview)
-    return records
-
-
 def _duplicates_tab() -> None:
     kind = st.selectbox(
         "Bereich",
@@ -603,10 +464,8 @@ def _duplicates_tab() -> None:
         key="duplicate_kind",
     )
     query = st.text_input("Name, Titel oder UUID suchen", key="duplicate_query")
-    if kind == "person":
-        records = _people_duplicates(query)
-        with st.expander("Zwei Personen als Prüffall melden / Ähnlichkeitssuche"):
-            _duplicate_pairs(kind, query, records)
+    if kind in {"person", "text"}:
+        st.info(f"{KINDS[kind]} direkt in ihrer Verwaltungsansicht auswählen und zusammenführen.")
     else:
         _duplicate_pairs(kind, query, search_entities(kind, query))
 
@@ -830,6 +689,7 @@ def _review_tab() -> None:
         query=query,
         offset=(page - 1) * 200,
         exclude_operations=[OPERATION],
+        exclude_source_ids=[source.id for source in list_entities(Source) if source.name == "theapolis.de"],
     )
     if not cases:
         st.info("Keine Prüffälle für diesen Filter.")
@@ -882,7 +742,7 @@ def _render_tabs() -> None:
         [
             f"Produktionskonflikte ({open_conflicts})",
             IMPORT_TAB,
-            "Weitere Prüffälle",
+            "Andere Quellen & gemeldete Duplikate",
             "Duplikate suchen / melden",
         ],
         default=IMPORT_TAB if st.session_state.pop("show_import_tab", False) else None,
