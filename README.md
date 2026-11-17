@@ -147,6 +147,8 @@ alternative titles and all but each text's first language.
   not four per text. Request-local graph; no stale global ORM cache.
 - **AI JSON:** use `jsonschema`, not a homegrown validator. Draft 2020-12,
   local references only, explicit errors. Reject non-finite numbers at decode.
+- **Review desk:** native Streamlit 1.66 tracked tabs; run only active panel.
+  Conflict badge uses SQL `COUNT`, not case hydration. No custom tab component.
 
 ## Check
 

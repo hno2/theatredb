@@ -389,7 +389,9 @@ def test_canonical_roles(raw, expected) -> None:
 
 def test_review_ui_empty_and_manual_submission(db) -> None:
     left, right = save(db, Organization(name="Same"), Organization(name="Same"))
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Duplikate suchen / melden"
+    app.run()
     assert not app.exception
     assert app.title[0].value == "Datenabgleich & Duplikate"
     app.selectbox(key="duplicate_kind").set_value("organization").run()
@@ -402,6 +404,8 @@ def test_review_ui_empty_and_manual_submission(db) -> None:
     assert count(db, Organization) == 2
     app.run()
     assert not app.exception
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
     assert any("Genehmigen" in button.label and button.disabled for button in app.button)
 
 
@@ -570,7 +574,9 @@ def test_capture_time_is_normalized_to_utc(db, source) -> None:
 def test_review_ui_merges_only_after_explicit_confirmation(db) -> None:
     left, right = save(db, Person(name="Same"), Person(name="Same"))
     case = queue_duplicate("person", left.id, right.id, reason="Same person")
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
     assert not app.exception
     assert count(db, Person) == 2
     next(box for box in app.checkbox if box.label.startswith("Identität")).check().run()
@@ -585,7 +591,9 @@ def test_review_ui_preserves_stale_preview_until_refreshed(db, source) -> None:
     case = propose_record(
         "person", {"name": "Person", "description": "Source bio"}, source_id=source.id, external_id="1"
     )
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
     app.selectbox(key=f"target_{case.id}").set_value(str(person.id)).run()
     next(box for box in app.checkbox if box.label.startswith("Identität")).check().run()
     with Session(db) as session:
@@ -1143,7 +1151,9 @@ def test_other_source_review_remains_and_theapolis_is_hidden(db) -> None:
     sources = save(db, Source(name="theapolis.de"), Source(name="Other"))
     for source in sources:
         propose_record("person", {"name": source.name}, source_id=source.id, external_id="1")
-    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
+    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10)
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
     assert not app.exception
     assert "Weitere Prüffälle" not in [tab.label for tab in app.tabs]
     assert "Andere Quellen & gemeldete Duplikate" in [tab.label for tab in app.tabs]
@@ -1159,7 +1169,9 @@ def test_review_source_links_prefer_record_url_then_source_website(db, record_ur
         "person", {"name": "Example Person"}, source_id=source.id, external_id="123", external_url=record_url
     )
 
-    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
+    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10)
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
 
     assert not app.exception
     assert [button.proto.url for button in app.get("link_button")] == [record_url or source.base_url]

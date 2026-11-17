@@ -905,6 +905,16 @@ def production_label(production: Production | dict, theatre: str | None) -> str:
     return " · ".join(parts)
 
 
+def count_production_cases(*, status: str = "pending") -> int:
+    """Count upload conflicts without loading case payloads or theatre records."""
+    with get_session() as session:
+        return session.exec(
+            select(func.count())
+            .select_from(ReconciliationCase)
+            .where(ReconciliationCase.operation == OPERATION, ReconciliationCase.status == status)
+        ).one()
+
+
 def list_production_cases(
     *, status: str = "pending", organization_id: str | None = None, query: str = ""
 ) -> list[dict]:

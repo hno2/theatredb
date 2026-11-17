@@ -35,6 +35,7 @@ from backend.production_import import (
     title_similarity,
 )
 from backend.texts import add_title, resolve_staged_text
+from frontend.management import reconciliation as review_ui
 
 CAPTURE = dt.datetime(2026, 6, 7, tzinfo=dt.UTC)
 REVIEW_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "reconciliation.py"
@@ -529,6 +530,21 @@ def test_conflict_ui_shows_both_sides_and_merges(db, theatre) -> None:
     assert app.tabs[0].label == "Produktionskonflikte (0)"
 
 
+def test_review_tabs_render_only_active_panel(db, monkeypatch) -> None:
+    calls = []
+    for name in ("_conflict_tab", "_import_tab", "_review_tab", "_duplicates_tab"):
+        monkeypatch.setattr(review_ui, name, lambda name=name: calls.append(name))
+    monkeypatch.setattr(review_ui, "list_production_cases", lambda: pytest.fail("Badge must not load case payloads"))
+    app = AppTest.from_string("from frontend.management.reconciliation import render\nrender()").run()
+    assert not app.exception
+    assert calls == ["_conflict_tab"]
+    app.session_state["show_import_tab"] = True
+    app.run()
+    assert not app.exception
+    assert calls == ["_conflict_tab", "_import_tab"]
+    assert app.session_state["reconciliation_tab"] == "Theater-JSON hochladen"
+
+
 def test_conflict_ui_adds_false_positive_upload_anyway(db, theatre) -> None:
     original = save(db, Production(name="Fallen", organization_id=theatre.id))[0]
     record = {**HAMLET, "title": "Mann kann auch in Höhe Fallen", "url": "https://theatre.example/p/hoehe-fallen"}
@@ -550,7 +566,9 @@ def test_conflict_ui_adds_false_positive_upload_anyway(db, theatre) -> None:
 
 def test_upload_ui_updates_conflict_count_without_reload(db, theatre) -> None:
     save(db, Production(name="Hamlet", organization_id=theatre.id, description="Old text"))
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Theater-JSON hochladen"
+    app.run()
     assert app.tabs[0].label == "Produktionskonflikte (0)"
     app.selectbox(key="upload_theatre").set_value(str(theatre.id))
     app.file_uploader[0].upload("20260607_productions.json", json.dumps([HAMLET]).encode(), "application/json")
@@ -620,7 +638,9 @@ def test_overview_counts_theatres_with_recent_uploads(db, theatre) -> None:
 
 def test_upload_tab_shows_theatre_status_and_overview(db, theatre) -> None:
     upload(theatre, HAMLET, captured_at=dt.datetime.now(dt.UTC))
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Theater-JSON hochladen"
+    app.run()
     app.selectbox(key="upload_theatre").set_value(str(theatre.id)).run()
     assert not app.exception
     markdown = " ".join(element.value for element in app.markdown)

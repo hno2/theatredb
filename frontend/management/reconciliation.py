@@ -26,6 +26,7 @@ from backend.import_status import FIELDS, scrape_overview, theatre_status
 from backend.models import Organization, Source
 from backend.production_import import (
     OPERATION,
+    count_production_cases,
     ingest_records,
     list_production_cases,
     production_review,
@@ -758,24 +759,28 @@ IMPORT_TAB = "Theater-JSON hochladen"
 
 def _render_tabs() -> None:
     init_db()
-    open_conflicts = len(list_production_cases())
-    conflicts, imports, review, duplicates = st.tabs(
-        [
-            f"Produktionskonflikte ({open_conflicts})",
-            IMPORT_TAB,
-            "Andere Quellen & gemeldete Duplikate",
-            "Duplikate suchen / melden",
-        ],
-        default=IMPORT_TAB if st.session_state.pop("show_import_tab", False) else None,
-    )
-    with conflicts:
-        _conflict_tab()
-    with imports:
-        _import_tab()
-    with review:
-        _review_tab()
-    with duplicates:
-        _duplicates_tab()
+    labels = [
+        f"Produktionskonflikte ({count_production_cases()})",
+        IMPORT_TAB,
+        "Andere Quellen & gemeldete Duplikate",
+        "Duplikate suchen / melden",
+    ]
+    key = "reconciliation_tab"
+    selected = st.session_state.get(key, labels[0])
+    if st.session_state.pop("show_import_tab", False):
+        selected = IMPORT_TAB
+    elif selected.startswith("Produktionskonflikte (") or selected not in labels:
+        selected = labels[0]
+    if st.session_state.get(key) != selected:
+        st.session_state[key] = selected
+    for tab, render_tab in zip(
+        st.tabs(labels, key=key, on_change="rerun"),
+        (_conflict_tab, _import_tab, _review_tab, _duplicates_tab),
+        strict=True,
+    ):
+        if tab.open:
+            with tab:
+                render_tab()
 
 
 def render() -> None:
