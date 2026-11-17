@@ -218,6 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 db_data/
+.git/
 skills-lock.json
 .agents/*
 old_do_not_use/*

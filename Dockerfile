@@ -1,50 +1,29 @@
-# Use a Python image with uv pre-installed
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+FROM python:3.14-slim-bookworm AS builder
 
-# Setup a non-root user
-RUN groupadd --system --gid 999 nonroot \
- && useradd --system --gid 999 --uid 999 --create-home nonroot
-
-# Install the project into `/app`
+COPY --from=ghcr.io/astral-sh/uv:python3.14-bookworm-slim /usr/local/bin/uv /usr/local/bin/uv
 WORKDIR /app
-
-# Enable bytecode compilation
-ENV UV_COMPILE_BYTECODE=1
-
-# Copy from the cache instead of linking since it's a mounted volume
 ENV UV_LINK_MODE=copy
 
-# Omit development dependencies
-ENV UV_NO_DEV=1
-
-# Ensure installed tools can be executed out of the box
-ENV UV_TOOL_BIN_DIR=/usr/local/bin
-
-# Install the project's dependencies using the lockfile and settings
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --group ingest --no-install-project
+    uv sync --locked --no-dev --group ingest --no-install-project
 
-# Then, add the rest of the project source code and install it
-# Installing separately from its dependencies allows optimal layer caching
-COPY . /app/
+COPY pyproject.toml uv.lock README.md ./
+COPY backend/ backend/
+COPY frontend/ frontend/
+COPY .streamlit/config.toml .streamlit/config.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --group ingest
+    uv sync --locked --no-dev --group ingest
 
-# Place executables in the environment at the front of the path
-ENV PATH="/app/.venv/bin:$PATH"
+FROM python:3.14-slim-bookworm
 
-# Reset the entrypoint, don't invoke `uv`
-ENTRYPOINT []
-
-# Use the non-root user to run our application
+RUN groupadd --system --gid 999 nonroot \
+ && useradd --system --gid 999 --uid 999 --create-home nonroot
+WORKDIR /app
+COPY --from=builder /app /app
 RUN mkdir -p /app/data/crawls && chown nonroot:nonroot /app/data/crawls
-USER nonroot
 
-# Run the Streamlit application by default
-# Uses `uv run` to sync dependencies on startup, respecting UV_NO_DEV
-# Uses `streamlit dev` to enable hot-reloading when the `watch` sync occurs
-# Uses `--host 0.0.0.0` to allow access from outside the container
-# Note in production, you should use `streamlit run` instead
+ENV PATH="/app/.venv/bin:$PATH"
+USER nonroot
 CMD ["streamlit", "run", "frontend/app.py"]

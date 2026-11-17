@@ -21,6 +21,10 @@ docker network create web  # if the configured Traefik network is missing
 docker compose up -d --build
 ```
 
+App and worker share the same runtime image layers, including ingestion and
+Streamlit dependencies. The runtime image excludes `uv` and development tools;
+use `python` or the installed commands for operations inside the container.
+
 ## Database
 
 App and worker startup create a missing database and apply pending Alembic
