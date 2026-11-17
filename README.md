@@ -83,7 +83,7 @@ relationships, sources and old IDs follow the merged record.
 Both pages show the total record count below the heading. The people table loads
 people and their production/theatre context in two queries, regardless of record count.
 The same table autosaves simple fields: birth/death dates and nationality for
-people, publication dates and language for texts. Dates accept precision-preserving
+people, publication dates and comma-separated languages for texts. Dates accept precision-preserving
 ISO inputs (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`); invalid values show errors without
 changing the record. Select a row's checkbox for the full editor, or multiple
 checkboxes for Merge. Names, titles and relationship columns remain read-only
@@ -100,6 +100,46 @@ workflow under **Andere Quellen & gemeldete Duplikate**.
 Source-owned background crawls run from **Verwaltung → Quellen → Crawler**.
 See the [crawler guide](backend/crawling/README.md) for worker commands and
 operational details.
+
+### Texts and work families
+
+A **Text** is a readable or licensable version. Alternative titles (with optional
+two-letter language codes) belong to that text; its display title is always
+searchable too. `languages` is an ordered JSON list: first language is primary,
+`[]` means unknown, and `mul` means multilingual/unspecified. Optional genres are
+`play`, `musical`, `opera`, `novel`, `film`, and `other`.
+
+Translations and published adaptations form a computed work family. **Vorlage /
+nach** links different works instead (for example a novel and its musical).
+Self-links, duplicate edges and cycles are rejected. Director-specific Fassungen
+stay production `adapter` credits, unless published as their own text.
+
+**Verwaltung → Texte** shows credits, source works, versions, dependent works and
+productions. It also provides title editing, sentence-style lineage links, pasted
+credit previews and the text review inbox. Ambiguous imports wait there rather
+than choosing a work arbitrarily. Theatre JSON and publisher metadata use the
+same title/family/translator resolver; see the [ingestion guide](backend/ingestion/README.md).
+
+Wikidata search is read-only. Selecting an item creates an explicitly identified
+stub; enrichment adds labels/aliases, authors, source works, languages and
+publication dates. Network failures and unsupported metadata are reported.
+Publisher extraction accepts supplied HTML and CSS rules; site-specific crawling
+rules require verified fixtures rather than guessed selectors.
+
+AI is optional and disabled until **all three** settings exist:
+`AI_BASE_URL` (OpenAI-compatible API base, such as `http://localhost:11434/v1`),
+`AI_API_KEY` (use a non-empty local placeholder for Ollama), and `AI_MODEL`.
+AI actions require explicit opt-in and send the displayed text/candidate metadata
+to that endpoint. Parsing starts with regex; AI lineage suggestions enter the
+existing review inbox and cannot invent candidate IDs. Suggested titles remain
+unverified unless a database title or Wikidata label/alias confirms them.
+
+Back up before applying migration `0004`. It backfills titles/languages, folds
+duplicate lineage notes, converts unknown relations to `based_on` while retaining
+their original value in notes, and replaces legacy source-author credits with
+source texts. Invalid legacy language codes, self-links or cycles stop migration
+with a repair message rather than silently deleting data. Downgrading discards
+alternative titles and all but each text's first language.
 
 ## Check
 
