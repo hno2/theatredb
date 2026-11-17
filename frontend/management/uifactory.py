@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast, get_args, get_origin
 from uuid import UUID
@@ -33,11 +34,13 @@ class _FieldUI:
     kind: str
     optional: bool
     options: list[str] | None = None
+    option_labels: dict[str, str] | None = None
     fk_model: type[SQLModel] | None = None
     fk_display: str = "name"
     new_payload_field: str = "name"
     related_people_role: str | None = None
     related_people_label: str = "People"
+    fk_labels: Callable[[list], dict[str, str]] | None = None
 
 
 @dataclass
@@ -150,11 +153,13 @@ def _build_fields(model_cls: type[SQLModel], *, field_overrides: dict | None = N
                 kind=kind,
                 optional=optional,
                 options=list(ov["options"]) if "options" in ov else None,
+                option_labels=ov.get("option_labels"),
                 fk_model=ov.get("fk_model"),
                 fk_display=str(ov.get("fk_display", "name")),
                 new_payload_field=str(ov.get("new_payload_field", "name")),
                 related_people_role=ov.get("related_people_role"),
                 related_people_label=str(ov.get("related_people_label", "People")),
+                fk_labels=ov.get("fk_labels"),
             )
         )
     return fields
@@ -165,8 +170,13 @@ def _render_fk_select(field: _FieldUI, d: FormValue, *, form_key: str) -> FormVa
         v = st.text_input(field.label, value="" if d is None else str(d))
         return v.strip() or None
     entities = list_entities(field.fk_model, order_by=_order_expr(field.fk_model, field.fk_display))
-    options: list[str] = [str(getattr(e, field.fk_display, str(e))) for e in entities]
-    id_by_label = {str(getattr(e, field.fk_display, str(e))): _id_of(e) for e in entities}
+    labels = (
+        field.fk_labels(entities)
+        if field.fk_labels
+        else {_id_of(e): str(getattr(e, field.fk_display, str(e))) for e in entities}
+    )
+    id_by_label = {labels[_id_of(e)]: _id_of(e) for e in entities}
+    options = list(id_by_label)
     default_choice: list[str] = []
     if d:
         d_str = str(d)
@@ -473,6 +483,8 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
                 val = _domain_date_input(val, m_dict.get(f"{f.name}_precision"))
             if f.kind == "fk_select" and f.name in fk_lookups:
                 val = fk_lookups[f.name].get(str(val) if val is not None else "", "")
+            if f.kind == "select" and f.option_labels and isinstance(val, str):
+                val = f.option_labels.get(val, val)
             entry[f.name] = val
         rows.append(entry)
     if not rows:
@@ -482,7 +494,12 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
         "__id": None,
     }
     for f in fields:
-        if f.kind in {"int", "float"}:
+        if f.kind == "select" and f.options:
+            labels = f.option_labels or {}
+            options = [labels.get(value, value) for value in f.options]
+            options += [str(row[f.name]) for row in rows if row[f.name] and row[f.name] not in options]
+            column_config[f.name] = st.column_config.SelectboxColumn(f.label, options=list(dict.fromkeys(options)))
+        elif f.kind in {"int", "float"}:
             column_config[f.name] = st.column_config.NumberColumn(f.label)
         else:
             column_config[f.name] = st.column_config.TextColumn(f.label)
@@ -496,6 +513,16 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
     )
 
     if st.button(f"Save {relation.get('title', child_name)}", key=f"save_{relation_key}_{parent_id}"):
+        for f in fields:
+            if f.kind == "select" and f.options:
+                allowed = {((f.option_labels or {}).get(value, value)) for value in f.options}
+                if any(
+                    row.get(f.name) not in allowed
+                    for _, row in edited.iterrows()
+                    if any(row.get(other.name) not in (None, "", []) for other in fields)
+                ):
+                    st.error(f"{f.label}: Bitte eine gültige Rolle wählen.")
+                    return
         existing_by_id = {_id_of(m): m for m in members}
         keep_ids: set[str] = set()
         fk_autocreate = cast(dict, relation.get("fk_autocreate", {}))
@@ -551,6 +578,8 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
                     payload[f.name] = int(raw) if raw not in (None, "") else None
                 elif f.kind == "float":
                     payload[f.name] = float(raw) if raw not in (None, "") else None
+                elif f.kind == "select" and f.option_labels:
+                    payload[f.name] = next((key for key, label in f.option_labels.items() if label == raw), raw)
                 else:
                     payload[f.name] = raw
 
@@ -783,10 +812,10 @@ def _render_table(
     for f in fields:
         if f.kind != "fk_select" or f.fk_model is None or f.name not in df_view.columns:
             continue
-        lookup = {
-            str(e.model_dump(mode="python").get("id")): str(getattr(e, f.fk_display, ""))
-            for e in list_entities(f.fk_model, order_by=_order_expr(f.fk_model, f.fk_display))
-        }
+        entities = list_entities(f.fk_model, order_by=_order_expr(f.fk_model, f.fk_display))
+        lookup = (
+            f.fk_labels(entities) if f.fk_labels else {_id_of(e): str(getattr(e, f.fk_display, "")) for e in entities}
+        )
         display_col = f.name.removesuffix("_id")
         df_view[display_col] = [lookup.get(str(v), "") if pd.notna(v) and str(v) else "" for v in df_view[f.name]]
         df_view = df_view.drop(columns=[f.name], errors="ignore")
@@ -817,7 +846,7 @@ def _render_edit_form(
     model_cls: type[SQLModel], fields: list[_FieldUI], sel_row: dict[str, Any], actor: str | None
 ) -> None:
     st.subheader(":material/edit: Edit")
-    edit_form_key = f"edit_{model_cls.__name__.lower()}"
+    edit_form_key = f"edit_{model_cls.__name__.lower()}_{sel_row['id']}"
     edit_errors: _FormErrors = _FormErrors.load(edit_form_key)
     with st.form(edit_form_key, clear_on_submit=False):
         vals = {f.name: _render_field(f, sel_row, form_key=edit_form_key, errors=edit_errors.fields) for f in fields}
@@ -901,13 +930,14 @@ def _render_sources_for_selected(model_cls: type[SQLModel], sel_row: dict) -> No
     )
 
 
-def render_sqlmodel_crud(
+def render_sqlmodel_crud(  # ruff: ignore[complex-structure]
     *,
     model_cls: type[SQLModel],
     title: str | None = None,
     field_overrides: dict | None = None,
     inline_relations: list[dict] | None = None,
     merge_kind: str | None = None,
+    selected_callback: Callable[[dict], None] | None = None,
 ) -> None:
     """Render a CRUD UI for a given SQLModel class.
 
@@ -915,6 +945,7 @@ def render_sqlmodel_crud(
         model_cls: The SQLModel class to render the CRUD UI for.
         title: Optional title for the page. Defaults to the model class name.
         merge_kind: Enable native people/text table merges for this entity type.
+        selected_callback: Render additional detail for the selected entity.
         field_overrides: Optional dict of field overrides, keyed by field name. Each override can specify:
             - kind: Optional explicit kind (e.g. "multiselect", "datetime", "list_text", etc.)
             - label: Optional explicit label for the field
@@ -951,6 +982,8 @@ def render_sqlmodel_crud(
         render_merge_action(merge_kind, selected, actor)
     if len(selected) == 1:
         sel_row = selected[0]
+        if selected_callback:
+            selected_callback(sel_row)
         _render_edit_form(model_cls, fields, sel_row, actor)
         _render_sources_for_selected(model_cls, sel_row)
         if inline_relations:

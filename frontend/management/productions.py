@@ -1,5 +1,6 @@
 from backend.models import Organization, Person, Production, ProductionMembership, Text
 from backend.user_management import init_db
+from frontend.management.texts import text_labels
 from frontend.management.uifactory import render_sqlmodel_crud
 
 
@@ -19,6 +20,7 @@ def main() -> None:
                 "kind": "fk_select",
                 "fk_model": Text,
                 "fk_display": "title",
+                "fk_labels": text_labels,
                 "label": "Text",
                 "new_payload_field": "title",
                 "related_people_role": "author",
