@@ -47,6 +47,17 @@ Crawl files under `data/crawls` are kept. In Docker, run commands as
 
 ## Data
 
+Theatre profiles batch-load productions and credits without recursive relationship
+graphs, cache public profile data for up to 30 seconds (including during imports),
+and render 12 productions per page. Search and filters still cover all productions,
+not just the visible page. Production **Technische Angaben** shows the complete
+loaded production JSON, including relationships, for debugging.
+
+Profile lookup indexes cover organization foreign keys and entity sources;
+PostgreSQL does not automatically index referencing foreign-key columns.
+Apply pending migrations before deploying. Index creation can briefly block writes
+on large tables; schedule migrations outside busy import periods.
+
 Upload theatre production JSON or review reconciliation cases in **Verwaltung →
 Datenabgleich & Duplikate**. Uploads can apply conflict-free changes; ambiguous
 matches wait for review. For standalone scraping, Theapolis imports, schemas and

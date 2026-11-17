@@ -175,6 +175,7 @@ class EntitySource(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("source_id", "entity_type", "entity_id"),
         Index("ix_entitysource_external_identity", "source_id", "entity_type", "external_id"),
+        Index("ix_entitysource_entity", "entity_type", "entity_id"),
     )
 
 
@@ -363,7 +364,7 @@ class OrganizationMembership(DomainModel, table=True):
     date_fields: ClassVar[tuple[str, ...]] = ("start_date", "end_date")
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    organization_id: uuid.UUID = Field(foreign_key="organization.id")
+    organization_id: uuid.UUID = Field(foreign_key="organization.id", index=True)
     person_id: uuid.UUID = Field(foreign_key="person.id")
     role: str | None = None  # e.g. "artistic director", "ensemble member", etc.
     start_date: dt.datetime | None = Field(default=None, sa_type=DateTime)
@@ -442,7 +443,7 @@ class Production(SourceMixin, DomainModel, table=True):
     premiere: dt.datetime | None = Field(default=None, sa_type=DateTime)
     premiere_precision: DatePrecision | None = None
 
-    organization_id: uuid.UUID | None = Field(default=None, foreign_key="organization.id")
+    organization_id: uuid.UUID | None = Field(default=None, foreign_key="organization.id", index=True)
     organization: Organization | None = Relationship(back_populates="productions")
 
     memberships: list[ProductionMembership] = Relationship(back_populates="production")

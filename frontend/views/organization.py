@@ -10,9 +10,15 @@ import streamlit as st
 from backend.config import canonical_role
 from backend.date_precision import DatePrecision, date_interval, format_date, intervals_overlap
 from backend.date_precision import parse_date as parse_domain_date
-from backend.entity_management import list_entities
+from backend.entity_management import get_organization_profile, list_entities
 from backend.models import Source
 from frontend.views.helpers import entity_link, has_coordinates, role_label
+
+
+@st.cache_data(ttl=30, max_entries=64)
+def load_organization_profile(entity_id: str) -> dict:
+    """Reuse detached public profile data across reruns, for at most 30 seconds."""
+    return get_organization_profile(entity_id)
 
 
 def parse_date(value: str | None) -> date | None:

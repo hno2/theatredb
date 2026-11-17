@@ -136,5 +136,4 @@ def render_production(data: dict) -> None:
             for critic in data["critics"]:
                 st.write(critic)
     with st.expander("Technische Angaben"):
-        st.caption("Interne Kennung dieses Eintrags")
-        st.code(str(data["id"]), language=None)
+        st.json(data, expanded=False)

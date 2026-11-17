@@ -1,3 +1,4 @@
+import json
 from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import Mock
@@ -123,6 +124,7 @@ def test_production_profile_preserves_details_and_counts_other_credits(credits) 
     assert "?kind=production&amp;id=current" not in html
     assert "?kind=production&amp;id=no-cast" in html
     assert "?kind=person&amp;id=alice" in html
+    assert json.loads(app.json[0].value) == current
 
 
 def test_empty_production_and_invalid_data_are_explicit(credits) -> None:

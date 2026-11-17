@@ -1,12 +1,29 @@
 from datetime import date
+from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
+from uuid import uuid4
 
 import pandas as pd
 import pytest
+from sqlalchemy import event
+from sqlmodel import Session, SQLModel, create_engine
 from streamlit.testing.v1 import AppTest
 
-from backend.models import Source
+from backend import entity_management
+from backend.models import (
+    EntityRedirect,
+    EntitySource,
+    EntityType,
+    Organization,
+    OrganizationMembership,
+    Person,
+    Production,
+    ProductionMembership,
+    Source,
+    Text,
+    TextContribution,
+)
 from frontend.views import organization
 
 PROFILE_SCRIPT = """
@@ -350,15 +367,16 @@ def test_list_uses_native_pagination_and_resets_after_filter_changes(profile: Pr
     app, data, links = profile
     data["productions"] = [
         {"id": str(index), "name": f"Produktion {index:02}", "age_rating": index % 2, "premiere": "2025-01-01"}
-        for index in range(25)
+        for index in range(500)
     ]
     app.run()
     assert not app.exception
     assert len(links.call_args_list) == 12
-    assert app.pagination[0].num_pages == 3
+    assert app.pagination[0].num_pages == 42
     links.reset_mock()
-    app.pagination[0].set_value(3).run()
-    assert len(links.call_args_list) == 1
+    app.pagination[0].set_value(42).run()
+    assert not app.exception
+    assert len(links.call_args_list) == 8
     links.reset_mock()
     app.multiselect[0].set_value(["Ab 0 Jahren"]).run()
     assert app.pagination[0].value == 1
@@ -376,3 +394,85 @@ def test_undated_only_theatre_disables_premiere_filter(profile: ProfileFixture) 
     assert not app.exception
     assert app.date_input[0].disabled
     assert any("Premiere unbekannt" in element.value for element in app.caption)
+
+
+@pytest.mark.parametrize("count", [12, 500])
+def test_profile_batches_productions_and_credits_without_recursive_queries(monkeypatch, count: int) -> None:
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    old_id = uuid4()
+    with Session(engine) as session:
+        theatre = Organization(name="Theater", venues={"Studio": 100})
+        source = Source(name="Archiv")
+        author = Person(name="Autorin")
+        member = Person(name="Hausmitglied")
+        session.add_all([theatre, source])
+        for index in range(count):
+            person = Person(name=f"Person {index}")
+            entry = Production(
+                name=f"Produktion {index}",
+                organization=theatre,
+                description=f"Beschreibung {index}",
+                age_rating=index % 2,
+                text=Text(title=f"Text {index}", contributions=[TextContribution(person=author, role="author")]),
+                memberships=[ProductionMembership(person=person, role="director")],
+            )
+            session.add(entry)
+        session.add(OrganizationMembership(organization=theatre, person=member, role="director"))
+        session.add(Production(name="Anderes Haus", memberships=[ProductionMembership(person=author)]))
+        session.flush()
+        session.add(EntitySource(source_id=source.id, entity_type=EntityType.ORGANIZATION, entity_id=theatre.id))
+        session.add(EntityRedirect(entity_type=EntityType.ORGANIZATION, old_id=old_id, target_id=theatre.id))
+        session.commit()
+        theatre_id = str(theatre.id)
+    monkeypatch.setattr(entity_management, "get_session", lambda: Session(engine))
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+    try:
+        data = entity_management.get_organization_profile(theatre_id)
+        assert len(statements) <= 8, statements
+        assert len(data["productions"]) == count
+        assert data["venues"] == {"Studio": 100}
+        assert len(data["sources"]) == 1
+        assert data["memberships"][0]["person"]["name"] == "Hausmitglied"
+        for production in data["productions"]:
+            assert production["description"].startswith("Beschreibung")
+            assert production["memberships"][0]["person"]["name"].startswith("Person ")
+            assert production["text"]["contributions"][0]["person"]["name"] == "Autorin"
+            assert "organization" not in production
+            assert "production_memberships" not in production["memberships"][0]["person"]
+        assert len(organization.filter_productions(data["productions"], "", "Autorin", [], ())) == count
+        assert entity_management.get_organization_profile(str(old_id))["id"] == theatre_id
+        with pytest.raises(ValueError, match="Organization not found"):
+            entity_management.get_organization_profile(str(uuid4()))
+        with pytest.raises(ValueError):
+            entity_management.get_organization_profile("invalid")
+    finally:
+        engine.dispose()
+
+
+def test_detail_reuses_cached_organization_profile(profile: ProfileFixture, monkeypatch) -> None:
+    _, data, _ = profile
+    fetch = Mock(return_value=data)
+    monkeypatch.setattr(organization, "get_organization_profile", fetch)
+    graph = Mock(side_effect=AssertionError("Organization must not load a recursive graph"))
+    monkeypatch.setattr(entity_management, "get_entity_graph", graph)
+    organization.load_organization_profile.clear()
+    try:
+        app = AppTest.from_file(Path(__file__).resolve().parents[1] / "frontend" / "views" / "detail.py")
+        app.query_params.update(kind="organization", id=data["id"])
+        app.run()
+        app.run()
+        assert not app.exception
+        assert app.title[0].value == data["name"]
+        fetch.assert_called_once_with(data["id"])
+        cached = organization.load_organization_profile(data["id"])
+        cached["productions"].clear()
+        assert len(organization.load_organization_profile(data["id"])["productions"]) == 4
+        organization.load_organization_profile.clear()
+        app.run()
+        assert not app.exception
+        assert fetch.call_count == 2
+        graph.assert_not_called()
+    finally:
+        organization.load_organization_profile.clear()

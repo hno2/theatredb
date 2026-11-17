@@ -3,7 +3,7 @@ import streamlit as st
 from backend.config import DISCOVERY_KINDS
 from backend.entity_management import get_entity_graph
 from frontend.views.discovery import render_discovery
-from frontend.views.organization import render_organization
+from frontend.views.organization import load_organization_profile, render_organization
 from frontend.views.person import render_person
 from frontend.views.production import render_production
 
@@ -19,7 +19,11 @@ if params.get("id"):
     else:
         _, model = DISCOVERY_KINDS[kind]
         try:
-            data = get_entity_graph(model, params["id"])
+            data = (
+                load_organization_profile(params["id"])
+                if kind == "organization"
+                else get_entity_graph(model, params["id"])
+            )
         except ValueError:
             st.error("Not found")
             st.stop()

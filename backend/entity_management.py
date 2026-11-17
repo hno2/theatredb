@@ -4,14 +4,24 @@ from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.orm import InstrumentedAttribute, Mapper, selectinload
+from sqlalchemy.orm import InstrumentedAttribute, Mapper, raiseload, selectinload
 from sqlmodel import Session, SQLModel, col, func, or_, select
 
 from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
 
-from .models import EntitySource, EntityType, Organization, Person, Production, ProductionMembership
+from .models import (
+    EntitySource,
+    EntityType,
+    Organization,
+    OrganizationMembership,
+    Person,
+    Production,
+    ProductionMembership,
+    Text,
+    TextContribution,
+)
 
 ModelT = TypeVar("ModelT", bound=SQLModel)
 
@@ -167,6 +177,61 @@ def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
             }
             for production in productions
         ]
+
+
+def get_organization_profile(entity_id: str) -> dict[str, Any]:
+    """Load theatre display/filter data in batches, without following reverse relationships."""
+    with get_session() as session:
+        resolved_id = resolve_id(session, EntityType.ORGANIZATION, UUID(entity_id))
+        productions = selectinload(cast(InstrumentedAttribute, Organization.productions))
+        organization = session.exec(
+            select(Organization)
+            .where(Organization.id == resolved_id)
+            .options(
+                raiseload("*"),
+                productions.selectinload(cast(InstrumentedAttribute, Production.memberships)).joinedload(
+                    cast(InstrumentedAttribute, ProductionMembership.person)
+                ),
+                productions.joinedload(cast(InstrumentedAttribute, Production.text))
+                .selectinload(cast(InstrumentedAttribute, Text.contributions))
+                .joinedload(cast(InstrumentedAttribute, TextContribution.person)),
+                selectinload(cast(InstrumentedAttribute, Organization.memberships)).joinedload(
+                    cast(InstrumentedAttribute, OrganizationMembership.person)
+                ),
+            )
+        ).one_or_none()
+        if organization is None:
+            raise ValueError("Organization not found")
+        entries = []
+        for production in organization.productions:
+            text = production.text
+            entries.append(
+                {
+                    **_snapshot(production),
+                    "memberships": [
+                        {**_snapshot(membership), "person": _snapshot(membership.person)}
+                        for membership in production.memberships
+                    ],
+                    "text": {
+                        **_snapshot(text),
+                        "contributions": [
+                            {**_snapshot(contribution), "person": _snapshot(contribution.person)}
+                            for contribution in text.contributions
+                        ],
+                    }
+                    if text
+                    else None,
+                }
+            )
+        return {
+            **_snapshot(organization),
+            "productions": entries,
+            "memberships": [
+                {**_snapshot(membership), "person": _snapshot(membership.person)}
+                for membership in organization.memberships
+            ],
+            "sources": [_snapshot(source) for source in organization.sources],
+        }
 
 
 def browse_entities(
