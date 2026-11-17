@@ -8,8 +8,10 @@ import logging
 import math
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Generator, Iterable
+from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
+from itertools import batched
 from pathlib import Path
 from time import monotonic, time
 from urllib.parse import quote, urlencode, urljoin, urlsplit
@@ -17,16 +19,17 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 import aiohttp
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from sqlalchemy.dialects.postgresql import insert
-from sqlmodel import SQLModel, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlmodel import Session, SQLModel, select
 from tqdm import tqdm
 
 from backend.config import IMAGE_SIGNATURES
 from backend.date_precision import parse_date
 from backend.ingestion.snapshots import digest, snapshot_path, without_null_fields
 from backend.ingestion.staging import validate_records
-from backend.ingestion.theapolis_import import accept_record, add_credits, migrate_pending_cases
+from backend.ingestion.theapolis_import import ImportRecord, accept_records, add_credits_batch, migrate_pending_cases
 from backend.models import EntityType, Source, TheapolisProfileCache
-from backend.reconciliation import validate_payload
+from backend.reconciliation import canonical_url, validate_payload
 from backend.user_management import get_session, init_db
 
 SITE = "https://www.theapolis.de"
@@ -34,6 +37,8 @@ DEFAULT_EXPORT_DIR = Path("data/staged/theapolis.de")
 DEFAULT_IMAGES = Path("data/theapolis/images")
 ACTOR = "theapolis-ingestion"
 LOG = logging.getLogger(__name__)
+BATCH_SIZE = 500
+type PreparedProduction = tuple[str, str | None, dict, list[tuple[str, str]]]
 
 
 async def _parallel[T, R](
@@ -603,7 +608,22 @@ def _organization(item: dict) -> tuple[dict, str | None]:
     return payload, url
 
 
-def _prepare_import(snapshot: dict) -> tuple[dict, dict, list, dt.datetime | None]:
+def _clean_import_strings(value: object, path: str) -> object:
+    if isinstance(value, dict):
+        return {key: _clean_import_strings(child, f"{path}.{key}") for key, child in value.items()}
+    if isinstance(value, list):
+        return [_clean_import_strings(child, f"{path}[{index}]") for index, child in enumerate(value)]
+    if isinstance(value, str) and "\x00" in value:
+        if path.endswith(".id"):
+            raise ValueError(f"NUL byte in Theapolis source identity: {path}")
+        LOG.warning("Removed %s NUL byte(s) from Theapolis %s", value.count("\x00"), path)
+        return value.replace("\x00", "")
+    return value
+
+
+def _prepare_import(
+    snapshot: dict,
+) -> tuple[dict[str, tuple[dict, str | None]], dict[str, dict], list[PreparedProduction], dt.datetime | None]:
     if snapshot.get("success") is False:
         raise ValueError("Theapolis export is incomplete; download again before importing")
     items = snapshot.get("items", snapshot.get("data", {}).get("items"))
@@ -614,25 +634,38 @@ def _prepare_import(snapshot: dict) -> tuple[dict, dict, list, dt.datetime | Non
     if captured_at and captured_at.tzinfo is None:
         raise ValueError("captured_at must include a timezone")
     organizations, people, productions = {}, {}, []
-    for item in items:
+    for raw_item in items:
+        item = {
+            key: _clean_import_strings(value, f"production[{raw_item.get('id')!r}].{key}")
+            for key, value in raw_item.items()
+        }
         production_id, name = _identity(item), _name(item)
         org = item.get("organization") or {}
+        if not isinstance(org, dict):
+            raise TypeError(f"Invalid Theapolis organization for production {production_id}")
         org_id = _identity(org) if org else None
         if org_id:
             organizations[org_id] = _organization(org)
         credits = _add_people(item, people)
         payload = {"name": name, **premiere_fields(item), "tags": _production_tags(item)}
         productions.append((production_id, org_id, payload, credits))
-    for payload, _ in organizations.values():
-        validate_payload(EntityType.ORGANIZATION, payload, complete=True)
-    for payload in people.values():
-        validate_payload(
+    for key, (payload, url) in organizations.items():
+        organizations[key] = (
+            validate_payload(EntityType.ORGANIZATION, payload, complete=True),
+            canonical_url(url) if url else None,
+        )
+    for key, payload in people.items():
+        people[key] = validate_payload(
             EntityType.PERSON,
             {key: value for key, value in payload.items() if key != "profile_url"},
             complete=True,
         )
-    for _, _, payload, _ in productions:
-        validate_payload(EntityType.PRODUCTION, payload, complete=True)
+        if payload.get("profile_url"):
+            people[key]["profile_url"] = canonical_url(payload["profile_url"])
+    productions = [
+        (key, org_id, validate_payload(EntityType.PRODUCTION, payload, complete=True), credits)
+        for key, org_id, payload, credits in productions
+    ]
     return organizations, people, productions, captured_at
 
 
@@ -669,10 +702,98 @@ def _read_import_snapshot(json_path: Path) -> dict:
     return snapshot
 
 
+@contextmanager
+def _import_batch(session: Session, stage: str, number: int) -> Generator[None]:
+    try:
+        yield
+        session.commit()
+    except SQLAlchemyError, ValueError:
+        session.rollback()
+        LOG.exception("Theapolis %s batch %s failed; earlier committed batches remain. Rerun to resume.", stage, number)
+        raise
+
+
+def _import_record(
+    payload: dict,
+    *,
+    external_id: str | None = None,
+    external_url: str | None = None,
+    record_key: str | None = None,
+    context: dict | None = None,
+) -> ImportRecord:
+    key = record_key or f"id:{external_id}"
+    return {
+        "record_key": key,
+        "incoming": payload,
+        "context": {
+            **(context or {}),
+            "external_id": external_id,
+            "external_url": canonical_url(external_url) if external_url else None,
+            "record_key": key,
+        },
+    }
+
+
+def _import_productions(
+    session: Session,
+    batch: tuple[PreparedProduction, ...],
+    org_ids: dict[str, uuid.UUID],
+    person_ids: dict[str, uuid.UUID],
+    people: dict[str, dict],
+    accept: Callable[[EntityType, list[ImportRecord]], tuple[list[uuid.UUID], set[uuid.UUID]]],
+) -> None:
+    credits = [
+        [{"person_id": str(person_ids[key]), "role": role} for key, role in raw_credits]
+        for _, _, _, raw_credits in batch
+    ]
+    text_ids, text_changes = accept(
+        EntityType.TEXT,
+        [
+            _import_record(
+                {"title": payload["name"]},
+                record_key=f"work:production:{production_id}",
+                context={
+                    "authors": [people[key]["name"] for key, role in raw_credits if role == "author"],
+                    "credits": [c for c in members if c["role"] == "author"],
+                },
+            )
+            for (production_id, _, payload, raw_credits), members in zip(batch, credits, strict=True)
+        ],
+    )
+    production_ids, production_changes = accept(
+        EntityType.PRODUCTION,
+        [
+            _import_record(
+                {
+                    **payload,
+                    "text_id": str(text_id),
+                    **({"organization_id": str(org_ids[org_id])} if org_id else {}),
+                },
+                external_id=production_id,
+                external_url=f"https://www2.theapolis.de/de/produktionen/{production_id}",
+                context={"credits": members},
+            )
+            for (production_id, org_id, payload, _), text_id, members in zip(batch, text_ids, credits, strict=True)
+        ],
+    )
+    for kind, identities, changes in (
+        (EntityType.TEXT, text_ids, text_changes),
+        (EntityType.PRODUCTION, production_ids, production_changes),
+    ):
+        links: dict[uuid.UUID, list[dict]] = {}
+        for identity, members in zip(identities, credits, strict=True):
+            if identity in changes:
+                links.setdefault(identity, []).extend(
+                    c for c in members if kind == EntityType.PRODUCTION or c["role"] == "author"
+                )
+        add_credits_batch(session, kind, links, actor_id=ACTOR)
+
+
 def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
-    """Accept a validated export directly, retaining existing values and stable source identities."""
-    snapshot = _read_import_snapshot(json_path if json_path is not None else _latest_export())
-    organizations, people, productions, captured_at = _prepare_import(snapshot)
+    """Accept export deltas in visible, resumable batches, preserving existing values."""
+    organizations, people, productions, captured_at = _prepare_import(
+        _read_import_snapshot(json_path if json_path is not None else _latest_export())
+    )
     init_db()
     with get_session() as session:
         source = session.exec(select(Source).where(Source.name == "theapolis.de")).first()
@@ -684,68 +805,56 @@ def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
         source_id = source.id
         result: dict[str, list[str]] = {"organization": [], "person": [], "text": [], "production": []}
 
-        def accept(
-            kind: EntityType,
-            payload: dict,
-            *,
-            external_id: str | None = None,
-            external_url: str | None = None,
-            record_key: str | None = None,
-            context: dict | None = None,
-        ) -> uuid.UUID:
-            key = record_key or f"id:{external_id}"
-            entity_id = accept_record(
-                session,
-                source_id,
-                kind,
-                payload,
-                record_key=key,
-                captured_at=captured_at,
-                actor_id=ACTOR,
-                context={
-                    **(context or {}),
-                    "external_id": external_id,
-                    "external_url": external_url,
-                    "record_key": key,
-                },
-            )
-            if str(entity_id) not in result[kind.value]:
-                result[kind.value].append(str(entity_id))
-            return entity_id
+        seen: dict[EntityType, set[uuid.UUID]] = {kind: set() for kind in EntityType}
 
-        org_ids = {
-            key: accept(EntityType.ORGANIZATION, payload, external_id=key, external_url=url)
-            for key, (payload, url) in tqdm(organizations.items(), desc="Organizations", unit="organization")
-        }
-        person_ids = {
-            key: accept(
+        def accept(kind: EntityType, batch: list[ImportRecord]) -> tuple[list[uuid.UUID], set[uuid.UUID]]:
+            identities, changed = accept_records(
+                session, source_id, kind, batch, captured_at=captured_at, actor_id=ACTOR
+            )
+            for identity in identities:
+                if identity not in seen[kind]:
+                    result[kind.value].append(str(identity))
+                    seen[kind].add(identity)
+            return identities, changed
+
+        org_ids, person_ids = {}, {}
+
+        for kind, values, mapping in (
+            (
+                EntityType.ORGANIZATION,
+                [
+                    (key, _import_record(payload, external_id=key, external_url=url))
+                    for key, (payload, url) in organizations.items()
+                ],
+                org_ids,
+            ),
+            (
                 EntityType.PERSON,
-                {field: value for field, value in payload.items() if field != "profile_url"},
-                external_id=key,
-                external_url=payload.get("profile_url"),
-            )
-            for key, payload in tqdm(people.items(), desc="People", unit="person")
-        }
-        for production_id, org_id, payload, raw_credits in tqdm(productions, desc="Productions", unit="production"):
-            credits = [{"person_id": str(person_ids[key]), "role": role} for key, role in raw_credits]
-            text_id = accept(
-                EntityType.TEXT,
-                {"title": payload["name"]},
-                record_key=f"work:production:{production_id}",
-                context={"authors": [people[key]["name"] for key, role in raw_credits if role == "author"]},
-            )
-            add_credits(
-                session, EntityType.TEXT, text_id, [c for c in credits if c["role"] == "author"], actor_id=ACTOR
-            )
-            production = accept(
-                EntityType.PRODUCTION,
-                {**payload, "text_id": str(text_id), **({"organization_id": str(org_ids[org_id])} if org_id else {})},
-                external_id=production_id,
-                external_url=f"https://www2.theapolis.de/de/produktionen/{production_id}",
-                context={"credits": credits},
-            )
-            add_credits(session, EntityType.PRODUCTION, production, credits, actor_id=ACTOR)
-        session.commit()
+                [
+                    (
+                        key,
+                        _import_record(
+                            {field: value for field, value in payload.items() if field != "profile_url"},
+                            external_id=key,
+                            external_url=payload.get("profile_url"),
+                        ),
+                    )
+                    for key, payload in people.items()
+                ],
+                person_ids,
+            ),
+        ):
+            with tqdm(total=len(values), desc=kind.value.title(), unit=kind.value) as progress:
+                for batch_number, batch in enumerate(batched(values, BATCH_SIZE, strict=False), 1):
+                    with _import_batch(session, kind.value, batch_number):
+                        identities, _ = accept(kind, [value for _, value in batch])
+                        mapping.update(zip((key for key, _ in batch), identities, strict=True))
+                    progress.update(len(batch))
+        with tqdm(total=len(productions), desc="Productions", unit="production") as progress:
+            for batch_number, batch in enumerate(batched(productions, BATCH_SIZE, strict=False), 1):
+                with _import_batch(session, "productions", batch_number):
+                    _import_productions(session, batch, org_ids, person_ids, people, accept)
+                progress.update(len(batch))
     return result
 
 

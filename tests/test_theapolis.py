@@ -12,10 +12,12 @@ import aiohttp
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 from multidict import CIMultiDict, CIMultiDictProxy
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, col, create_engine, select
 from yarl import URL
 
 from backend import user_management
+from backend.entity_management import browse_entities, list_entities
 from backend.import_status import theatre_status
 from backend.ingestion import theapolis
 from backend.ingestion.staging import staging_schema, validate_records
@@ -26,10 +28,12 @@ from backend.models import (
     Organization,
     Person,
     Production,
+    ProductionMembership,
     ReconciliationCase,
     Source,
     SourceRecord,
     Text,
+    TextContribution,
     TheapolisProfileCache,
 )
 from backend.reconciliation import (
@@ -995,6 +999,249 @@ def test_import_failure_after_organization_rolls_back_all_writes(db, tmp_path, i
             assert not session.exec(select(model)).all()
 
 
+@pytest.mark.parametrize("staged", [False, True])
+def test_import_removes_nuls_before_domain_and_json_writes(db, tmp_path, item, caplog, staged):
+    item["name"] = "Ham\x00let"
+    item["organization"]["name"] = "The\x00ater"
+    item["organization"]["location"]["city"] = "Ber\x00lin"
+    item["directors"][0]["name"] = "Al\x00ex"
+    item["creators"][0]["name"] = "Al\x00ex"
+    item["tags"] = ["Dra\x00ma"]
+    path = tmp_path / "nul.json"
+    if staged:
+        path.write_text(json.dumps(theapolis.staged_records([item])))
+        path.with_suffix(".source.json").write_text(json.dumps({"items": [item]}))
+    else:
+        path.write_text(json.dumps({"items": [item]}))
+    original = path.read_bytes()
+
+    def reject_nul(connection, cursor, statement, parameters, context, executemany):
+        assert "\\u0000" not in repr(parameters)
+        assert "\\x00" not in repr(parameters)
+
+    event.listen(db, "before_cursor_execute", reject_nul)
+    try:
+        result = theapolis.import_all(path)
+        assert result == theapolis.import_all(path)
+    finally:
+        event.remove(db, "before_cursor_execute", reject_nul)
+    assert "production[123].name" in caplog.text
+    assert "production[123].directors[0].name" in caplog.text
+    assert path.read_bytes() == original
+    assert item["name"] == "Ham\x00let"
+    with Session(db) as session:
+        assert session.exec(select(Text)).one().title == "Hamlet"
+        production = session.exec(select(Production)).one()
+        assert production.name == "Hamlet" and production.tags == ["Drama"]
+        organization = session.exec(select(Organization)).one()
+        assert organization.name == "Theater" and organization.city == "Berlin"
+        assert {person.name for person in session.exec(select(Person))} == {"Alex", "Other Alex"}
+        assert all(row.version == 1 for row in session.exec(select(SCD2History)))
+
+
+@pytest.mark.parametrize("field", ["name", "id"])
+def test_nul_only_name_or_corrupted_identity_fails_before_writes(db, tmp_path, item, field):
+    invalid = copy.deepcopy(item)
+    invalid[field] = "\x00"
+    path = tmp_path / "invalid-nul.json"
+    path.write_text(json.dumps({"items": [item, invalid]}))
+    with pytest.raises(ValueError, match=r"needs a name|NUL byte in Theapolis source identity"):
+        theapolis.import_all(path)
+    with Session(db) as session:
+        for model in (Source, Organization, Person, Text, Production, SourceRecord, EntitySource, SCD2History):
+            assert not session.exec(select(model)).all()
+
+
+def test_batches_are_visible_and_failed_production_batch_resumes(db, monkeypatch, tmp_path, item):
+    monkeypatch.setattr(theapolis, "BATCH_SIZE", 2)
+    items = []
+    for identity in range(5):
+        entry = copy.deepcopy(item)
+        entry["id"] = identity
+        entry["organization"]["id"] = identity
+        entry["organization"]["name"] = f"Theatre {identity}"
+        entry["directors"] = [{"id": identity, "name": f"Director {identity}"}]
+        entry["creators"] = [{"id": identity, "name": f"Author {identity}"}]
+        items.append(entry)
+    path = tmp_path / "batches.json"
+    path.write_text(json.dumps({"items": items}))
+    original = theapolis.add_credits_batch
+    production_batches = 0
+
+    def fail_second_batch(session, kind, credits, *, actor_id):
+        nonlocal production_batches
+        if kind == EntityType.PRODUCTION:
+            production_batches += 1
+            assert len(list_entities(Organization)) == 5
+            assert browse_entities(Person)[1] == 10
+            assert browse_entities(Production)[1] == (production_batches - 1) * 2
+        original(session, kind, credits, actor_id=actor_id)
+        if kind == EntityType.PRODUCTION and production_batches == 2:
+            raise ValueError("injected batch failure")
+
+    monkeypatch.setattr(theapolis, "add_credits_batch", fail_second_batch)
+    with pytest.raises(ValueError, match="injected batch failure"):
+        theapolis.import_all(path)
+    with Session(db) as session:
+        assert len(session.exec(select(Production)).all()) == 2
+        assert len(session.exec(select(Text)).all()) == 2
+        assert len(session.exec(select(ProductionMembership)).all()) == 4
+        assert len(session.exec(select(TextContribution)).all()) == 2
+    monkeypatch.setattr(theapolis, "add_credits_batch", original)
+    result = theapolis.import_all(path)
+    assert len(result["production"]) == 5
+    assert result == theapolis.import_all(path)
+    with Session(db) as session:
+        assert len(session.exec(select(ProductionMembership)).all()) == 10
+        assert len(session.exec(select(TextContribution)).all()) == 5
+        history = session.exec(select(SCD2History)).all()
+        assert len(history) == 40
+        assert all(row.version == 1 and row.is_current for row in history)
+
+
+def test_batch_import_rejects_colliding_source_identities(db, tmp_path, item):
+    with Session(db) as session:
+        source = Source(name="theapolis.de")
+        people = [Person(name="First"), Person(name="Second")]
+        session.add_all([source, *people])
+        session.flush()
+        session.add_all(
+            [
+                EntitySource(
+                    source_id=source.id,
+                    entity_type=EntityType.PERSON,
+                    entity_id=person.id,
+                    external_id="directors:9",
+                )
+                for person in people
+            ]
+        )
+        session.commit()
+    path = tmp_path / "collision.json"
+    path.write_text(json.dumps({"items": [item]}))
+    with pytest.raises(ValueError, match="Theapolis source identity collision"):
+        theapolis.import_all(path)
+    with Session(db) as session:
+        assert {person.name for person in session.exec(select(Person))} == {"First", "Second"}
+        assert not session.exec(select(Production)).all()
+        assert not session.exec(select(SourceRecord).where(SourceRecord.entity_type == EntityType.PERSON)).all()
+
+
+def test_newer_unchanged_observations_advance_freshness_without_domain_writes(db, tmp_path, item):
+    path = tmp_path / "freshness.json"
+    path.write_text(json.dumps({"items": [item], "captured_at": "2026-01-01T12:00:00Z"}))
+    result = theapolis.import_all(path)
+    writes = []
+
+    def record_write(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith(("INSERT ", "UPDATE ", "DELETE ")):
+            writes.append(statement)
+
+    event.listen(db, "before_cursor_execute", record_write)
+    try:
+        assert theapolis.import_all(path) == result
+        assert writes == []
+        path.write_text(json.dumps({"items": [item], "captured_at": "2026-03-01T12:00:00Z"}))
+        assert theapolis.import_all(path) == result
+        assert writes and all(
+            statement.startswith(("UPDATE sourcerecord ", "UPDATE entitysource ")) for statement in writes
+        )
+        writes.clear()
+        item["directors"][0]["profile"] = {"birthDate": "1980"}
+        path.write_text(json.dumps({"items": [item], "captured_at": "2026-02-01T12:00:00Z"}))
+        assert theapolis.import_all(path) == result
+        assert writes == []
+    finally:
+        event.remove(db, "before_cursor_execute", record_write)
+    with Session(db) as session:
+        assert all(person.born is None for person in session.exec(select(Person)))
+        assert all(
+            row.captured_at is not None and row.captured_at.month == 3 for row in session.exec(select(SourceRecord))
+        )
+        assert all(row.version == 1 for row in session.exec(select(SCD2History)))
+
+
+def test_newer_export_adds_only_delta_preserving_missing_records_and_conflicts(db, tmp_path, item):
+    path = tmp_path / "delta.json"
+    path.write_text(
+        json.dumps(
+            {
+                "items": [item, {**item, "id": 124}],
+                "captured_at": "2026-01-01T12:00:00Z",
+            }
+        )
+    )
+    result = theapolis.import_all(path)
+    changed = copy.deepcopy(item)
+    changed["name"] = "Source title change"
+    changed["directors"][0]["profile"] = {"birthDate": "1980"}
+    changed["creators"].append({"id": 11, "name": "Other Alex"})
+    path.write_text(
+        json.dumps(
+            {
+                "items": [changed, {**item, "id": 125}],
+                "captured_at": "2026-02-01T12:00:00Z",
+            }
+        )
+    )
+    again = theapolis.import_all(path)
+    assert len(again["person"]) == 4
+    assert set(again["production"]) & set(result["production"]) == {result["production"][0]}
+    with Session(db) as session:
+        assert len(session.exec(select(Production)).all()) == 3
+        assert session.get(Production, uuid.UUID(result["production"][1])) is not None
+        production = session.get(Production, uuid.UUID(result["production"][0]))
+        assert production is not None and production.name == item["name"]
+        assert len(production.memberships) == 4
+        assert production.text is not None and len(production.text.contributions) == 3
+        director = session.exec(select(SourceRecord).where(SourceRecord.external_id == "directors:9")).one()
+        history = session.exec(
+            select(SCD2History)
+            .where(SCD2History.entity_name == "person", SCD2History.entity_id == str(director.entity_id))
+            .order_by(col(SCD2History.version))
+        ).all()
+        assert [row.version for row in history] == [1, 2]
+        assert not history[0].is_current and history[0].valid_to is not None
+        assert history[1].is_current and history[1].snapshot["born_precision"] == "year"
+        count = len(session.exec(select(SCD2History)).all())
+    assert theapolis.import_all(path) == again
+    with Session(db) as session:
+        assert len(session.exec(select(SCD2History)).all()) == count
+
+
+@pytest.mark.parametrize("size", [50, 200, 600])
+def test_import_queries_scale_with_batches_not_records(db, tmp_path, item, size):
+    items = [
+        {
+            **item,
+            "id": identity,
+            "directors": [{"id": identity, "name": f"Director {identity}"}],
+            "creators": [{"id": identity, "name": f"Author {identity}"}],
+        }
+        for identity in range(size)
+    ]
+    path = tmp_path / "bounded.json"
+    path.write_text(json.dumps({"items": items}))
+    statements = []
+
+    def record_statement(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(db, "before_cursor_execute", record_statement)
+    try:
+        result = theapolis.import_all(path)
+        assert len(result["production"]) == size
+        assert sum(statement.startswith("SELECT ") for statement in statements) < 100
+        assert len(statements) < 300
+        statements.clear()
+        assert theapolis.import_all(path) == result
+        assert sum(statement.startswith("SELECT ") for statement in statements) < 100
+        assert len(statements) < 200
+        assert not any(statement.startswith(("INSERT ", "UPDATE ", "DELETE ")) for statement in statements)
+    finally:
+        event.remove(db, "before_cursor_execute", record_statement)
+
+
 def test_shared_profile_urls_do_not_override_scoped_identity_during_merge(db, tmp_path, item):
     for person in [*item["directors"], *item["creators"]]:
         person["profile"] = {"url": f"{theapolis.SITE}/de/profil/shared"}
@@ -1023,6 +1270,7 @@ def _old_theapolis_cases(db, item):
     persons = {key: propose("person", payload, identity=key) for key, payload in people.items()}
     cases = [*orgs.values(), *persons.values()]
     for production_id, org_id, payload, raw_credits in productions:
+        assert org_id is not None
         credits = [{"case_id": str(persons[key].id), "role": role} for key, role in raw_credits]
         text = propose(
             "text",

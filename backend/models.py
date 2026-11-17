@@ -172,7 +172,10 @@ class EntitySource(SQLModel, table=True):
 
     source: Source = Relationship()
 
-    __table_args__ = (UniqueConstraint("source_id", "entity_type", "entity_id"),)
+    __table_args__ = (
+        UniqueConstraint("source_id", "entity_type", "entity_id"),
+        Index("ix_entitysource_external_identity", "source_id", "entity_type", "external_id"),
+    )
 
 
 class SourceMixin:
@@ -253,7 +256,10 @@ class SourceRecord(SQLModel, table=True):
     payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
     captured_at: dt.datetime | None = None
 
-    __table_args__ = (UniqueConstraint("source_id", "entity_type", "record_key"),)
+    __table_args__ = (
+        UniqueConstraint("source_id", "entity_type", "record_key"),
+        Index("ix_sourcerecord_external_identity", "source_id", "entity_type", "external_id"),
+    )
 
 
 class ImportRun(SQLModel, table=True):
@@ -397,7 +403,7 @@ class TextContribution(SQLModel, table=True):
     """Represents the contribution of a person to a text, e.g. that a person is an author, translator, adapter, source author (for lineages), etc. of a text."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    text_id: uuid.UUID = Field(foreign_key="text.id")
+    text_id: uuid.UUID = Field(foreign_key="text.id", index=True)
     person_id: uuid.UUID = Field(foreign_key="person.id")
     role: str | None = None  # e.g. "author", "translator", "adapter", "source author" (for lineages), etc.
 
@@ -454,7 +460,7 @@ class ProductionMembership(SQLModel, table=True):
 
     # person assignment with role name in this specific play (e.g. "Regie")
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    production_id: uuid.UUID = Field(foreign_key="production.id")
+    production_id: uuid.UUID = Field(foreign_key="production.id", index=True)
     person_id: uuid.UUID = Field(foreign_key="person.id")
     role: str | None = None  # e.g. "Regie", "Schauspieler", "Dramaturgie", etc. # TODO: define somewhere else
     character: str | None = None  # for actors

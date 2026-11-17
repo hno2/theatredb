@@ -64,8 +64,12 @@ checkboxes for Merge. Names, titles and relationship columns remain read-only
 inline.
 
 Theapolis imports are accepted directly, without pending source reviews. Existing
-conflicting values are kept; missing values and credits are added. Other sources
-retain their review workflow under **Andere Quellen & gemeldete Duplikate**.
+conflicting values are kept; missing values and credits are added. Incremental
+imports skip unchanged records and commit batches, making organizations, people
+and productions visible on UI refresh before the whole import finishes. After a
+failure, completed batches remain saved; rerun to resume without duplicates.
+Missing export records are not deleted. Other sources retain their review
+workflow under **Andere Quellen & gemeldete Duplikate**.
 
 Source-owned background crawls run from **Verwaltung → Quellen → Crawler**.
 See the [crawler guide](backend/crawling/README.md) for worker commands and

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Sequence
 from typing import Any, cast
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, insert, tuple_, update
 from sqlalchemy.orm import InstrumentedAttribute
-from sqlmodel import Field, Session, SQLModel, select
+from sqlmodel import Field, Session, SQLModel, col, func, select
 
 
 class SCD2History(SQLModel, table=True):
@@ -22,6 +23,49 @@ class SCD2History(SQLModel, table=True):
     is_current: bool = Field(default=True, index=True)
     actor_id: str | None = Field(default=None, index=True)
     snapshot: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+
+def add_scd2_events(
+    session: Session, *, inserted: Sequence[SQLModel], updated: Sequence[SQLModel], actor_id: str | None
+) -> None:
+    """Audit an import batch without querying history for newly allocated identities."""
+    now = dt.datetime.now(dt.UTC)
+    versions = {}
+    keys = [(type(row).__name__.lower(), str(row.model_dump()["id"])) for row in updated]
+    if keys:
+        identity = tuple_(SCD2History.entity_name, SCD2History.entity_id)
+        versions = {
+            (name, entity_id): version
+            for name, entity_id, version in session.exec(
+                select(SCD2History.entity_name, SCD2History.entity_id, func.max(SCD2History.version))
+                .where(identity.in_(keys))
+                .group_by(SCD2History.entity_name, SCD2History.entity_id)
+            )
+        }
+        session.execute(
+            update(SCD2History)
+            .where(identity.in_(keys), col(SCD2History.is_current))
+            .values(is_current=False, valid_to=now),
+            execution_options={"synchronize_session": False},
+        )
+    events = []
+    for operation, rows in (("insert", inserted), ("update", updated)):
+        for row in rows:
+            name, entity_id = type(row).__name__.lower(), str(row.model_dump()["id"])
+            events.append(
+                {
+                    "entity_name": name,
+                    "entity_id": entity_id,
+                    "operation": operation,
+                    "version": versions.get((name, entity_id), 0) + 1,
+                    "valid_from": now,
+                    "is_current": True,
+                    "actor_id": actor_id,
+                    "snapshot": row.model_dump(mode="json"),
+                }
+            )
+    if events:
+        session.execute(insert(SCD2History), events)
 
 
 def add_scd2_event(

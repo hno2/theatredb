@@ -76,6 +76,28 @@ uv run python -m backend.ingestion.theapolis images --concurrency 10
 uv run python -m backend.ingestion.theapolis import
 ```
 
+Import validates the entire snapshot, including source URLs, before writing.
+Embedded NUL bytes in source text are removed with field-specific warnings
+before validation, including text stored in JSON observations and audit history.
+Source IDs containing NUL bytes are rejected rather than changed; the original
+export files remain untouched.
+It then saves batches of up to 500 organizations, people, and productions, in
+that order. Organizations and people are visible before production import
+finishes; refresh the UI to see committed progress. Each production batch saves
+its texts, credits, source observations and audit history atomically.
+
+Re-run the same command after an interruption: completed batches remain saved,
+and stable source identities prevent duplicates. Only the current failed batch
+is rolled back. An importer already running old code must be restarted to use
+batch commits.
+
+Imports are incremental. Unchanged observations skip domain and credit writes
+and add no audit events. A newer unchanged export advances observation timestamps
+only, so older exports cannot later fill blanks using stale data. New records,
+missing values and added credits are imported; changed non-empty values are kept
+in the source observation without overwriting existing domain values. Records
+and credits absent from a newer export are not deleted.
+
 For a bounded export check, add `--max-pages 1`; partial exports are not selected
 by the default import.
 
