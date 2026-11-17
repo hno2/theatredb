@@ -664,7 +664,12 @@ def _entity_to_row(e: SQLModel) -> dict:
 
 
 def _load_df(model_cls: type[SQLModel]) -> pd.DataFrame:
-    rows = [_entity_to_row(e) for e in list_entities(model_cls, order_by=None)]
+    if model_cls is Person:
+        rows = search_people_for_merge(limit=None)
+        for row in rows:
+            row["Produktionen · Theater"] = "; ".join(row.pop("productions"))
+    else:
+        rows = [_entity_to_row(e) for e in list_entities(model_cls, order_by=None)]
     df = pd.DataFrame(rows)
     if not df.empty and "id" in df.columns:
         df = df.set_index("id", drop=False)
@@ -899,10 +904,6 @@ def render_sqlmodel_crud(
     fields = _build_fields(model_cls, field_overrides=field_overrides)
     actor = _actor_id()
     df = _load_df(model_cls)
-    if merge_kind == "person" and not df.empty:
-        context = search_people_for_merge(limit=len(df))
-        productions = {row["id"]: "; ".join(row["productions"]) for row in context}
-        df["Produktionen · Theater"] = df["id"].map(productions)
     if merge_kind == "text" and not df.empty:
         names = {str(p.id): p.name for p in list_entities(Person)}
         authors: dict[str, list[str]] = {}
@@ -911,6 +912,8 @@ def render_sqlmodel_crud(
                 authors.setdefault(str(c.text_id), []).append(names[str(c.person_id)])
         df["Autoren"] = df["id"].map(lambda i: ", ".join(sorted(authors.get(i, []))))
     st.title(title or f"{model_cls.__name__}s Management")
+    if merge_kind == "person":
+        st.caption(f"{len(df)} Personen insgesamt")
     if merge_kind == "text":
         st.caption(f"{len(df)} Texte insgesamt")
     selected = _render_table(df, fields, model_cls, merge_kind=merge_kind, actor=actor)

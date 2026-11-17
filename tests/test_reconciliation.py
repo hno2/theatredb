@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, event
+from sqlalchemy import Engine, event, insert
 from sqlmodel import Session, SQLModel, create_engine, select
 from streamlit.testing.v1 import AppTest
 
@@ -681,6 +681,41 @@ def test_people_merge_table_includes_text_credits_without_duplicate_productions(
     assert [row["productions"] for row in search_people_for_merge()] == [["Hamlet · Theater"], ["Hamlet · Theater"]]
 
 
+@pytest.mark.parametrize("limit", [32768, None])
+def test_people_merge_table_limits_queries_and_parameters_for_large_pages(db, limit) -> None:
+    first, last, text = save(db, Person(name="First"), Person(name="ZLast"), Text(title="Text"))
+    show = save(db, Production(name="Hamlet", text_id=text.id))[0]
+    save(
+        db,
+        ProductionMembership(person_id=first.id, production_id=show.id),
+        TextContribution(person_id=last.id, text_id=text.id, role="author"),
+    )
+    with Session(db) as session:
+        session.execute(
+            insert(Person),
+            [{"id": uuid.UUID(int=index), "name": f"Middle {index:05}"} for index in range(1, 32767)],
+        )
+        session.commit()
+    parameter_counts = []
+
+    def check_parameters(_, __, ___, parameters, *____: object) -> None:
+        parameter_counts.append(len(parameters))
+        assert len(parameters) <= 2
+
+    event.listen(db, "before_cursor_execute", check_parameters)
+    try:
+        rows = search_people_for_merge(limit=limit)
+    finally:
+        event.remove(db, "before_cursor_execute", check_parameters)
+    assert len(rows) == 32768
+    assert len(parameter_counts) == 2
+    assert rows[0]["id"] == str(first.id)
+    assert rows[-1]["id"] == str(last.id)
+    assert rows[0]["productions"] == ["Hamlet · Theater nicht hinterlegt"]
+    assert rows[-1]["productions"] == ["Hamlet · Theater nicht hinterlegt"]
+    assert rows[400]["productions"] == []
+
+
 def test_bulk_people_merge_closes_pending_pairs_within_selection(db) -> None:
     left, right, third = save(db, Person(name="One"), Person(name="Two"), Person(name="Three"))
     old_id = uuid.uuid4()
@@ -865,6 +900,34 @@ def _management_app(kind: str) -> AppTest:
     return AppTest.from_file(
         str(REVIEW_APP.parent / ("persons.py" if kind == "person" else "texts.py")), default_timeout=10
     ).run()
+
+
+@pytest.mark.parametrize("people_count", [0, 2])
+def test_people_management_loads_once_and_shows_total(db, people_count) -> None:
+    people = save(db, *(Person(name=f"Person {index}") for index in range(people_count)))
+    if people:
+        production = save(db, Production(name="Hamlet"))[0]
+        save(db, ProductionMembership(person_id=people[0].id, production_id=production.id))
+    statements = []
+
+    def record_statement(_, __, statement, *___: object) -> None:
+        if statement.startswith(("SELECT", "WITH")):
+            statements.append(statement)
+
+    event.listen(db, "before_cursor_execute", record_statement)
+    try:
+        app = _management_app("person")
+    finally:
+        event.remove(db, "before_cursor_execute", record_statement)
+    assert not app.exception
+    assert app.caption[0].value == f"{people_count} Personen insgesamt"
+    # One types query, one people query, and (for nonempty pages) one credits query.
+    assert len(statements) == (3 if people else 2)
+    if people:
+        assert app.dataframe[0].value["Produktionen · Theater"].tolist() == [
+            "Hamlet · Theater nicht hinterlegt",
+            "",
+        ]
 
 
 def _select_rows(app: AppTest, rows: list[int]) -> AppTest:

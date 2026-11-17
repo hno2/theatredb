@@ -18,6 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 from sqlalchemy import String, cast, or_
 from sqlalchemy import inspect as sa_inspect
 from sqlmodel import Session, SQLModel, col, select
+from sqlmodel.sql.expression import SelectOfScalar
 
 from backend.config import ENTITY_MODELS, LINK_IDENTITY_FIELDS, canonical_role
 from backend.date_precision import DatePrecision, date_interval, intervals_overlap, parse_date
@@ -109,42 +110,47 @@ def _get(session: Session, kind: EntityType, entity_id: uuid.UUID | str) -> Enti
     return entity
 
 
-def search_entities(kind: EntityType | str, query: str = "", *, limit: int = 50, offset: int = 0) -> list[dict]:
-    """Search by name/title or UUID, returning IDs to disambiguate namesakes."""
-    kind = _kind(kind)
+def _entity_search_statement(
+    session: Session, kind: EntityType, query: str, *, limit: int | None, offset: int
+) -> SelectOfScalar[Entity]:
     model = ENTITY_MODELS[kind]
     label = getattr(model, "title" if kind == EntityType.TEXT else "name")
-    with get_session() as session:
-        stmt = select(model)
-        if query.strip():
-            try:
-                entity_id = uuid.UUID(query.strip())
-            except ValueError:
-                stmt = stmt.where(label.icontains(query.strip(), autoescape=True))
-            else:
-                stmt = stmt.where(model.id == resolve_id(session, kind, entity_id))
-        return [
-            entity_snapshot(row)
-            for row in session.exec(stmt.order_by(label, col(model.id)).offset(offset).limit(limit)).all()
-        ]
+    stmt = select(model)
+    if query.strip():
+        try:
+            entity_id = uuid.UUID(query.strip())
+        except ValueError:
+            stmt = stmt.where(label.icontains(query.strip(), autoescape=True))
+        else:
+            stmt = stmt.where(model.id == resolve_id(session, kind, entity_id))
+    return stmt.order_by(label, col(model.id)).offset(offset).limit(limit)
 
 
-def search_people_for_merge(query: str = "", *, limit: int = 100, offset: int = 0) -> list[dict]:
-    """Fetch a people page and batch its production/theatre context without per-person queries."""
-    people = search_entities(EntityType.PERSON, query, limit=limit, offset=offset)
-    if not people:
-        return []
-    by_id = {uuid.UUID(person["id"]): person for person in people}
-    for person in people:
-        person["productions"] = []
+def search_entities(kind: EntityType | str, query: str = "", *, limit: int = 50, offset: int = 0) -> list[dict]:
+    """Search by name/title or UUID, returning IDs to disambiguate namesakes."""
     with get_session() as session:
+        stmt = _entity_search_statement(session, _kind(kind), query, limit=limit, offset=offset)
+        return [entity_snapshot(row) for row in session.exec(stmt).all()]
+
+
+def search_people_for_merge(query: str = "", *, limit: int | None = 100, offset: int = 0) -> list[dict]:
+    """Fetch people and production/theatre context in two queries; None loads all people."""
+    with get_session() as session:
+        stmt = _entity_search_statement(session, EntityType.PERSON, query, limit=limit, offset=offset)
+        people = [entity_snapshot(row) for row in session.exec(stmt).all()]
+        if not people:
+            return []
+        by_id = {uuid.UUID(person["id"]): person for person in people}
+        for person in people:
+            person["productions"] = []
+        page = stmt.with_only_columns(col(Person.id)).cte("people_page")
         involvement = (
             select(ProductionMembership.person_id, ProductionMembership.production_id)
-            .where(col(ProductionMembership.person_id).in_(by_id))
+            .join(page, page.c.id == col(ProductionMembership.person_id))
             .union(
                 select(TextContribution.person_id, Production.id)
                 .join(Production, col(Production.text_id) == col(TextContribution.text_id))
-                .where(col(TextContribution.person_id).in_(by_id))
+                .join(page, page.c.id == col(TextContribution.person_id))
             )
             .subquery()
         )

@@ -67,6 +67,8 @@ In **Verwaltung → Personen / Texte**, select multiple table rows and click
 **Zusammenführen**. Conflict-free selections merge immediately; differing field
 values open a comparison dialog with survivor and value choices. All dependent
 relationships, sources and old IDs follow the merged record.
+Both pages show the total record count below the heading. The people table loads
+people and their production/theatre context in two queries, regardless of record count.
 The same table autosaves simple fields: birth/death dates and nationality for
 people, publication dates and language for texts. Dates accept precision-preserving
 ISO inputs (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`); invalid values show errors without
