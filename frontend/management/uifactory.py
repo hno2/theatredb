@@ -19,6 +19,7 @@ from backend.entity_management import create_entity, delete_entity, list_entitie
 from backend.models import EntitySource, Person, Source, TextContribution
 from backend.reconciliation import search_people_for_merge, stable_digest
 from frontend.management.merge import render_merge_action
+from frontend.views.organization import web_url
 
 FormValue = str | int | float | bool | dt.date | dt.datetime | list[str] | dict | None
 
@@ -782,6 +783,13 @@ def _render_table(
 
     if merge_kind:
         return _render_inline_table(df, df_view, model_cls, merge_kind, actor)
+    column_config = {}
+    if model_cls is Source and "base_url" in df_view.columns:
+        for value in df_view["base_url"]:
+            if value and not web_url(value):
+                st.warning(f"Base URL: Kein gültiger HTTP(S)-Link hinterlegt: {value}")
+        df_view["base_url"] = df_view["base_url"].map(web_url)
+        column_config["base_url"] = st.column_config.LinkColumn("Base URL")
     key = f"table_{model_cls.__name__.lower()}"
     sel = st.dataframe(
         df_view,
@@ -789,6 +797,7 @@ def _render_table(
         key=key,
         on_select="rerun",
         selection_mode="single-row",
+        column_config=column_config,
     )
     sel_rows = sel.get("selection", {}).get("rows", [])
     return [df.iloc[index].to_dict() for index in sel_rows if 0 <= index < len(df)]
@@ -857,10 +866,13 @@ def _render_sources_for_selected(model_cls: type[SQLModel], sel_row: dict) -> No
         if str(data.get("entity_type")) != str(entity_type):
             continue
         source_id = str(data.get("source_id") or "")
+        external_url = data.get("external_url")
+        if external_url and not web_url(external_url):
+            st.warning(f"Quelle: Kein gültiger HTTP(S)-Link hinterlegt: {external_url}")
         source_rows.append(
             {
                 "source": source_name_by_id.get(source_id, source_id),
-                "external_url": data.get("external_url"),
+                "external_url": web_url(external_url),
                 "external_id": data.get("external_id"),
                 "title": data.get("title"),
                 "sourced_at": data.get("sourced_at"),
@@ -872,7 +884,11 @@ def _render_sources_for_selected(model_cls: type[SQLModel], sel_row: dict) -> No
         return
 
     st.subheader(":material/link: Sources")
-    st.dataframe(pd.DataFrame(source_rows), hide_index=True)
+    st.dataframe(
+        pd.DataFrame(source_rows),
+        hide_index=True,
+        column_config={"external_url": st.column_config.LinkColumn("external_url")},
+    )
 
 
 def render_sqlmodel_crud(

@@ -45,6 +45,7 @@ from backend.user_management import init_db
 from frontend.management.merge import format_value as _format
 from frontend.management.merge import styled as _styled
 from frontend.management.uifactory import _actor_id
+from frontend.views.organization import render_web_link
 
 NEW_PRODUCTION = "__new__"
 
@@ -359,6 +360,8 @@ def _header(review: dict) -> None:
             st.markdown(f"#### {review['target']['label']}")
             sources = review["target"]["sources"]
             st.write("Quellen: " + (", ".join(s["source"] for s in sources) if sources else "keine"))
+            for source in sources:
+                render_web_link(source["source"], source["url"])
         else:
             st.markdown("#### 🆕 Neue Produktion")
             st.write(f"Wird bei {review['theatre']} angelegt.")
@@ -368,7 +371,8 @@ def _header(review: dict) -> None:
         stand = (
             dt.date.fromisoformat(review["captured_at"]).strftime("%d.%m.%Y") if review["captured_at"] else "unbekannt"
         )
-        st.write(f"Quelle: [{review['source']['name']}]({review['source']['url']}) · Stand {stand}")
+        st.write(f"Quelle: {review['source']['name']} · Stand {stand}")
+        render_web_link("Quelle öffnen", review["source"]["url"])
 
 
 def _conflict_tab() -> None:
@@ -713,9 +717,14 @@ def _review_tab() -> None:
         return
     case = by_id[case_id]
     st.write(case["reason"])
-    sources = {str(source.id): source.name for source in list_entities(Source)}
-    source_name = sources.get(case["source_id"], case["source_id"] or "Manuelle Einreichung")
+    sources = {str(source.id): source for source in list_entities(Source)}
+    source = sources.get(case["source_id"])
+    source_name = source.name if source else case["source_id"] or "Manuelle Einreichung"
     st.caption(f"Quelle: {source_name} · Quellstand: {case['captured_at'] or 'Unbekannt'}")
+    render_web_link(
+        "Quelle öffnen",
+        case["context"].get("external_url") or (source.base_url if source else None),
+    )
     if status == "pending":
         with st.expander("Prüffall ablehnen"):
             note = st.text_input("Ablehnungsgrund", key=f"reject_note_{case_id}")

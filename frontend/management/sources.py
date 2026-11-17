@@ -14,6 +14,7 @@ from backend.ingestion.configurable import CONFIG_DIR, load_config
 from backend.models import CrawlRun, Organization, Source
 from backend.user_management import init_db
 from frontend.management.uifactory import _actor_id, render_sqlmodel_crud
+from frontend.views.organization import render_web_link
 
 LOG = logging.getLogger(__name__)
 ERRORS = (ValueError, TypeError, yaml.YAMLError, SQLAlchemyError, ProcrastinateException)
@@ -220,6 +221,7 @@ def main() -> None:
         selected = st.selectbox("Quelle", list(by_id), format_func=lambda value: by_id[value].name)
         if selected is not None:
             source = by_id[selected]
+            render_web_link("Quelle öffnen", source.base_url)
             _config_editor(source)
             _run_controls(source.id)
 

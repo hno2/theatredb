@@ -67,6 +67,11 @@ Datenabgleich & Duplikate**. Uploads can apply conflict-free changes; ambiguous
 matches wait for review. For standalone scraping, Theapolis imports, schemas and
 validation, see the [ingestion guide](backend/ingestion/README.md).
 
+Source URLs are clickable in every management view: selected entities' **Sources**
+tables, reconciliation reviews, and **Quellen & Crawls**. Links open the source
+record when available, otherwise the source website in general reviews.
+Missing URLs stay unlinked; invalid or non-HTTP(S) URLs show a warning.
+
 In **Verwaltung → Personen / Texte**, select multiple table rows and click
 **Zusammenführen**. Conflict-free selections merge immediately; differing field
 values open a comparison dialog with survivor and value choices. All dependent

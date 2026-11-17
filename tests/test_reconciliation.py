@@ -1146,6 +1146,36 @@ def test_other_source_review_remains_and_theapolis_is_hidden(db) -> None:
     assert "Other" in review_selector.options[0]
 
 
+@pytest.mark.parametrize("record_url", ["https://example.org/person/123", None])
+def test_review_source_links_prefer_record_url_then_source_website(db, record_url) -> None:
+    (source,) = save(db, Source(name="Example", base_url="https://example.org"))
+    propose_record(
+        "person", {"name": "Example Person"}, source_id=source.id, external_id="123", external_url=record_url
+    )
+
+    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
+
+    assert not app.exception
+    assert [button.proto.url for button in app.get("link_button")] == [record_url or source.base_url]
+
+
+def test_production_conflict_header_links_both_sources() -> None:
+    app = AppTest.from_string(
+        "from frontend.management.reconciliation import _header\n"
+        "_header({"
+        "'target': {'label': 'Existing', 'sources': [{'source': 'Archive', 'url': 'https://archive.example/123'}]},"
+        "'incoming_label': 'Incoming', 'source': {'name': 'Upload', 'url': 'https://theatre.example/456'},"
+        "'captured_at': None"
+        "})"
+    ).run()
+
+    assert not app.exception
+    assert [button.proto.url for button in app.get("link_button")] == [
+        "https://archive.example/123",
+        "https://theatre.example/456",
+    ]
+
+
 @pytest.mark.parametrize(
     "kind,model,label,date",
     [

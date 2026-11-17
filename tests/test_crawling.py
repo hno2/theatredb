@@ -464,10 +464,16 @@ def test_missing_records_never_delete_previous_results(db: Engine) -> None:
 
 def test_streamlit_source_controls(db: Engine) -> None:
     source, _ = setup_source(db)
+    with Session(db) as session:
+        source.base_url = "https://example.org"
+        session.add(source)
+        session.commit()
+        session.refresh(source)
     service.save_config(source.id, record_config("https://example.org"))
     path = Path(__file__).resolve().parents[1] / "frontend/management/sources.py"
     app = AppTest.from_file(str(path)).run()
     assert not app.exception
+    assert [button.proto.url for button in app.get("link_button")] == ["https://example.org"]
     start = next(button for button in app.button if button.label == "Crawl starten")
     start.click().run()
     assert not app.exception

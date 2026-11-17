@@ -8,7 +8,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from streamlit.testing.v1 import AppTest
 
 from backend import user_management
-from backend.models import Organization, Person, Production, ProductionMembership, Text
+from backend.models import Award, EntitySource, Organization, Person, Production, ProductionMembership, Source, Text
 from frontend.management.uifactory import _build_fields, _rename_existing_fk_if_changed
 
 PRODUCTION_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "productions.py"
@@ -71,6 +71,76 @@ def test_production_table_resolves_foreign_keys_to_names(db) -> None:
     assert "Example Play" in table["text"].values
     assert str(organization_id) not in str(table)
     assert str(text_id) not in str(table)
+
+
+@pytest.mark.parametrize(
+    "model,record_url",
+    [
+        (Organization, "https://example.org/records/123"),
+        (Person, "https://example.org/records/123"),
+        (Production, "https://example.org/records/123"),
+        (Text, "https://example.org/records/123"),
+        (Award, "https://example.org/records/123"),
+        (Production, None),
+        (Production, "javascript:alert(1)"),
+    ],
+)
+def test_selected_entity_sources_have_clickable_record_urls(db, model, record_url) -> None:
+    entity = model(**({"title": "Example"} if model is Text else {"name": "Example"}))
+    source = Source(name="Example Source", base_url="https://example.org")
+    with Session(db) as session:
+        session.add(entity)
+        session.add(source)
+        session.flush()
+        session.add(
+            EntitySource(
+                source_id=source.id,
+                entity_type=model._entity_type,
+                entity_id=entity.id,
+                external_url=record_url,
+            )
+        )
+        session.commit()
+
+    app = AppTest.from_string(
+        f"from backend.models import {model.__name__}\n"
+        "from frontend.management.uifactory import render_sqlmodel_crud\n"
+        f"render_sqlmodel_crud(model_cls={model.__name__})"
+    ).run()
+    dataframe_key = app.dataframe[0].proto.id.rsplit("-", 1)[1]
+    app.session_state[dataframe_key] = {"selection": {"rows": [0], "columns": []}}
+    app.run()
+
+    assert not app.exception
+    sources = app.dataframe[1]
+    if record_url and record_url.startswith("https://"):
+        assert sources.value["external_url"].tolist() == [record_url]
+    else:
+        assert sources.value["external_url"].isna().all()
+    assert len(app.warning) == int(bool(record_url and not record_url.startswith("https://")))
+    assert sources.value["source"].tolist() == ["Example Source"]
+    assert json.loads(sources.proto.columns)["external_url"]["type_config"]["type"] == "link"
+
+
+@pytest.mark.parametrize("url", [None, "javascript:alert(1)", "https://example.org"])
+def test_source_management_links_only_valid_web_urls(db, url) -> None:
+    with Session(db) as session:
+        session.add(Source(name="Example", base_url=url))
+        session.commit()
+    app = AppTest.from_string(
+        "from backend.models import Source\n"
+        "from frontend.management.uifactory import render_sqlmodel_crud\n"
+        "render_sqlmodel_crud(model_cls=Source)"
+    ).run()
+
+    assert not app.exception
+    table = app.dataframe[0]
+    assert json.loads(table.proto.columns)["base_url"]["type_config"]["type"] == "link"
+    if url and url.startswith("https://"):
+        assert table.value["base_url"].tolist() == [url]
+    else:
+        assert table.value["base_url"].isna().all()
+    assert len(app.warning) == int(bool(url and not url.startswith("https://")))
 
 
 def test_cast_and_crew_editor_shows_person_name_without_ids(db) -> None:
