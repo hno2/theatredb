@@ -151,6 +151,8 @@ alternative titles and all but each text's first language.
   Conflict badge uses SQL `COUNT`, not case hydration. No custom tab component.
 - **Homepage metrics:** combine scalar count subqueries in one SQL statement.
   Five round trips become one; counts stay live, no cache invalidation.
+- **Text credits:** fetch ancestor contributions once; inherit names in memory.
+  Never scan all people to recover display spelling. Same-name strangers stay out.
 
 ## Check
 

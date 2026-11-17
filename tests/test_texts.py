@@ -2,13 +2,14 @@ import uuid
 
 import pytest
 from alembic import command
-from sqlalchemy import inspect
+from sqlalchemy import event, inspect
 from sqlalchemy import text as sql
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from backend import user_management
 from backend.models import (
     LineageRelation,
+    Person,
     Production,
     ReconciliationCase,
     Text,
@@ -152,6 +153,27 @@ def test_original_metadata_and_based_on_credit_line(session):
     assert (
         credit_line(session, english.id) == "Musik Schönberg · Buch Boublil · Übersetzung Translator · nach Victor Hugo"
     )
+
+
+def test_credit_line_batches_ancestors_and_only_shows_contributors(session):
+    root = resolve_text(session, "Work", ["Author"], language="en")
+    assert isinstance(root, Text)
+    translation = resolve_text(session, "Work", ["Author"], ["Translator"])
+    assert isinstance(translation, Text)
+    session.add(Person(name="AUTHOR"))
+    session.flush()
+    statements = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        assert credit_line(session, translation.id) == "Text Author · Übersetzung Translator"
+        assert len(statements) <= 5
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
 
 
 def test_text_merge_keeps_aliases_and_coalesces_edge_notes(session, monkeypatch):

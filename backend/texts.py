@@ -347,22 +347,19 @@ def resolve_staged_text(session: Session, data: dict) -> Text | ReconciliationCa
     return result
 
 
-def _inherited_names(session: Session, text_id: uuid.UUID, role: str) -> set[str]:
+def _inherited_names(
+    text_id: uuid.UUID,
+    role: str,
+    parents: dict[uuid.UUID, set[uuid.UUID]],
+    credits: dict[tuple[uuid.UUID, str | None], set[str]],
+) -> set[str]:
     frontier, seen = {text_id}, set()
-    edges = session.exec(select(TextLineage)).all()
     while frontier:
-        rows = list(session.exec(select(Text).where(col(Text.id).in_(frontier))).all())
-        names = _names(session, rows, role)
+        names = {name for member in frontier for name in credits.get((member, role), ())}
         if names:
             return names
         seen.update(frontier)
-        frontier = {
-            edge.source_text_id
-            for edge in edges
-            if edge.derived_text_id in frontier
-            and edge.relation in FAMILY_RELATIONS
-            and edge.source_text_id not in seen
-        }
+        frontier = {parent for member in frontier for parent in parents.get(member, ())} - seen
     return set()
 
 
@@ -372,41 +369,45 @@ def credit_line(session: Session, text_id: uuid.UUID) -> str:
     texts = {text.id: text for text in family}
     if text_id not in texts:
         raise ValueError("Text not found")
-    parts = []
-    for role in ("composer", "author", "lyricist", "translator", "adapter"):
-        names = (
-            _inherited_names(session, text_id, role)
-            if role in {"composer", "author", "lyricist"}
-            else _names(session, [texts[text_id]], role)
-        )
-        if names:
-            actual = session.exec(select(Person).order_by(Person.name)).all()
-            label = "Buch" if role == "author" and texts[text_id].genre == "musical" else ROLE_LABELS[role]
-            parts.append(
-                f"{label} {', '.join(dict.fromkeys(person.name for person in actual if normalize(person.name) in names))}"
-            )
     ancestors = {text.id for text in family}
     seen = set(ancestors)
     sources: set[uuid.UUID] = set()
-    edges = session.exec(select(TextLineage)).all()
+    edges = session.exec(select(TextLineage.source_text_id, TextLineage.derived_text_id, TextLineage.relation)).all()
+    parents: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for source_id, derived_id, relation in edges:
+        if relation in FAMILY_RELATIONS:
+            parents.setdefault(derived_id, set()).add(source_id)
     while ancestors:
-        parents = {edge.source_text_id for edge in edges if edge.derived_text_id in ancestors}
+        preceding = {source_id for source_id, derived_id, _ in edges if derived_id in ancestors}
         sources.update(
-            edge.source_text_id
-            for edge in edges
-            if edge.derived_text_id in ancestors and edge.relation == LineageRelation.BASED_ON
+            source_id
+            for source_id, derived_id, relation in edges
+            if derived_id in ancestors and relation == LineageRelation.BASED_ON
         )
-        ancestors = parents - seen
-        seen.update(parents)
+        ancestors = preceding - seen
+        seen.update(preceding)
+    roles = ("composer", "author", "lyricist", "translator", "adapter")
+    credits: dict[tuple[uuid.UUID, str | None], set[str]] = {}
+    for member_id, role, name in session.exec(
+        select(TextContribution.text_id, TextContribution.role, Person.name)
+        .join(Person, col(Person.id) == col(TextContribution.person_id))
+        .where(col(TextContribution.text_id).in_(seen), col(TextContribution.role).in_(roles))
+    ).all():
+        credits.setdefault((member_id, role), set()).add(name)
+    parts = []
+    for role in roles:
+        names = (
+            _inherited_names(text_id, role, parents, credits)
+            if role in {"composer", "author", "lyricist"}
+            else credits.get((text_id, role), set())
+        )
+        if names:
+            label = "Buch" if role == "author" and texts[text_id].genre == "musical" else ROLE_LABELS[role]
+            parts.append(f"{label} {', '.join(sorted(names))}")
     if sources:
-        names = set().union(*(_inherited_names(session, source_id, "author") for source_id in sources))
-        rows = [
-            person.name
-            for person in session.exec(select(Person).order_by(Person.name)).all()
-            if normalize(person.name) in names
-        ]
-        if rows:
-            parts.append(f"nach {', '.join(dict.fromkeys(rows))}")
+        names = set().union(*(_inherited_names(source_id, "author", parents, credits) for source_id in sources))
+        if names:
+            parts.append(f"nach {', '.join(sorted(names))}")
     return " · ".join(parts)
 
 
