@@ -132,10 +132,13 @@ _CREDIT_MARKER = re.compile(
 _QUOTED = re.compile(
     r"[\u201e\u201c\"\u00ab\u201a]([^\u201e\u201c\u201d\"\u00ab\u00bb\u201a\u2018\u2019]+)[\u201c\u201d\"\u00bb\u2018\u2019]"
 )
+# Start whitespace scans only at run boundaries; retries inside a run are quadratic.
+_NAME_SEPARATOR = re.compile(r"(?:(?<!\s)\s+)?,\s*|(?<!\s)\s+(?:und|&)\s+")
+_CLAUSE_SEPARATOR = re.compile(r"(?:(?<!\s)\s+)?[/;|·\n]\s*")
 
 
 def _names(raw: str) -> list[str]:
-    return [name for part in re.split(r"\s*,\s*|\s+(?:und|&)\s+", raw) if (name := part.strip(_STRIP))]
+    return [name for part in _NAME_SEPARATOR.split(raw) if (name := part.strip(_STRIP))]
 
 
 def _add(result: dict, field: str, values: list[str]) -> None:
@@ -179,7 +182,7 @@ def _parse_head(result: dict, head: str, first: bool) -> tuple[bool, str | None]
 def _regex_credits(credit: str) -> dict:
     result: dict = {"title": None, **{field: [] for field in _CREDIT_LISTS}}
     title_only, same_title, recognized = None, False, False
-    clauses = [clause for part in re.split(r"\s*[/;|·\n]\s*", credit) if (clause := part.strip(_STRIP))]
+    clauses = [clause for part in _CLAUSE_SEPARATOR.split(credit) if (clause := part.strip(_STRIP))]
     for index, clause in enumerate(clauses):
         matches = list(_CREDIT_MARKER.finditer(clause))
         head = clause[: matches[0].start() if matches else len(clause)].strip(_STRIP)

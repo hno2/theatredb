@@ -1,6 +1,8 @@
 import datetime as dt
 import io
 import json
+import subprocess  # ruff: ignore[suspicious-subprocess-import] - Bound adversarial parser tests by timeout.
+import sys
 from email.message import Message
 from urllib.error import HTTPError
 
@@ -330,6 +332,46 @@ def credits(**values: object):
 )
 def test_credit_parser_separates_authors_sources_and_translators(credit, expected):
     assert ai.parse_credits(credit) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Ada\r,\u00a0Bea", ["Ada", "Bea"]),
+        ("Ada\u00a0und\rBea", ["Ada", "Bea"]),
+        ("Ada, \t, Bea", ["Ada", "Bea"]),
+        ("Ada und Bea & Carl", ["Ada", "Bea", "Carl"]),
+        ("Ada undBea", ["Ada undBea"]),
+        ("Ada&Bea", ["Ada&Bea"]),
+        ("\u00a0Ada\u00a0", ["\u00a0Ada\u00a0"]),
+    ],
+)
+def test_credit_names_preserve_whitespace_and_separator_rules(raw, expected):
+    assert ai._names(raw) == expected
+
+
+@pytest.mark.parametrize("separator", ["\r/\u00a0", "\t; |·\n", "\n"])
+def test_credit_clauses_preserve_whitespace_rules(separator):
+    assert ai.parse_credits(f"von Ada{separator}Deutsch von Bea") == credits(authors=["Ada"], translators=["Bea"])
+
+
+def test_credit_parser_handles_long_whitespace_runs():
+    script = (
+        "from backend.ai import _names, parse_credits\n"
+        "for whitespace in (' ', '\\t', '\\r', '\\u00a0'):\n"
+        "    gap = whitespace * 200_000\n"
+        "    assert _names('Ada' + gap + 'X') == ['Ada' + gap + 'X']\n"
+        "    assert _names('Ada' + gap + 'undX') == ['Ada' + gap + 'undX']\n"
+        "    assert _names('Ada' + gap + ',') == ['Ada']\n"
+        "    assert parse_credits('von Ada' + gap + 'X')['authors'] == ['Ada' + gap + 'X']\n"
+        "    result = parse_credits('von Ada' + gap + '/ Deutsch von Bea')\n"
+        "    assert result['authors'] == ['Ada'] and result['translators'] == ['Bea']\n"
+    )
+    subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] - Only static test code, no user input.
+        [sys.executable, "-c", script],
+        check=True,
+        timeout=15,
+    )
 
 
 def test_credit_ai_fallback_is_opt_in_gets_full_context_and_drops_invented_names(monkeypatch):
