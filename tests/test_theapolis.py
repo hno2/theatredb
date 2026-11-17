@@ -193,7 +193,7 @@ def test_production_tags_and_profile_birthday_preserve_source_identity(db, tmp_p
     assert staged["memberships"][0]["external_id"] == "9"
     assert staged["memberships"][0]["born"] == "1966-05-19T00:00:00"
     assert staged["memberships"][0]["born_precision"] == "day"
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         record = session.exec(select(SourceRecord).where(SourceRecord.external_id == "directors:9")).one()
         person = session.get(Person, record.entity_id)
@@ -327,7 +327,7 @@ def test_profile_summary_and_missing_authors_keep_source_id(db, monkeypatch, tmp
     path = tmp_path / "people.json"
     theapolis._write_json(path, theapolis.staged_records([item]))
     theapolis._write_json(path.with_suffix(".source.json"), {"items": [item]})
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     if not with_people:
         assert not result["person"]
         return
@@ -356,10 +356,10 @@ def test_staged_person_source_ids_are_checked_and_legacy_ids_remain_optional(db,
     theapolis._write_json(path, records)
     theapolis._write_json(path.with_suffix(".source.json"), {"items": [item]})
     if legacy:
-        assert len(theapolis.import_all(path)["person"]) == 3
+        assert len(theapolis.import_all(path, dach_only=False)["person"]) == 3
     else:
         with pytest.raises(ValueError, match="differs"):
-            theapolis.import_all(path)
+            theapolis.import_all(path, dach_only=False)
         with Session(db) as session:
             assert not session.exec(select(Source)).all()
 
@@ -716,7 +716,7 @@ def test_profile_error_checkpoints_completed_enrichment(monkeypatch, tmp_path, i
     assert records[0]["memberships"][0]["url"] == profile["url"]
     assert "born" not in records[0]["memberships"][0]
     with pytest.raises(ValueError, match="incomplete"):
-        theapolis.import_all(path)
+        theapolis.import_all(path, dach_only=False)
 
 
 def test_invalid_production_preserves_raw_page_and_last_valid_json(monkeypatch, tmp_path, item):
@@ -745,8 +745,8 @@ def test_accepted_import_is_idempotent_and_preserves_source_only_urls(db, tmp_pa
     path = tmp_path / "export.json"
     year_only = {**copy.deepcopy(item), "id": 124, "premierDate": None}
     path.write_text(json.dumps({"items": [item, year_only], "captured_at": "2026-11-05T12:00:00Z"}))
-    result = theapolis.import_all(path)
-    assert result == theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
+    assert result == theapolis.import_all(path, dach_only=False)
     assert {key: len(value) for key, value in result.items()} == {
         "organization": 1,
         "person": 3,
@@ -774,6 +774,74 @@ def test_accepted_import_is_idempotent_and_preserves_source_only_urls(db, tmp_pa
         assert any("produktionen/123" in (s.external_url or "") for s in session.exec(select(EntitySource)).all())
 
 
+def test_dach_import_limits_all_related_records_and_counts_distinct_productions(db, tmp_path, item):
+    items = []
+    for org_id, country in enumerate(["Deutschland", "Österreich", "Schweiz", "France", None, "Germany"], 1):
+        for production in range(2 if org_id != 6 else 1):
+            record = copy.deepcopy(item)
+            record["id"] = org_id * 100 + production
+            record["name"] = f"Production {record['id']}"
+            record["organization"].update(id=org_id, name=f"Organization {org_id}")
+            record["organization"]["location"]["country"] = country
+            record["directors"] = [{"id": org_id, "name": f"Director {org_id}"}]
+            record["creators"] = [{"id": org_id, "name": f"Author {org_id}"}]
+            items.append(record)
+    items.append(copy.deepcopy(items[-1]))
+    orphan = copy.deepcopy(item)
+    orphan.update(id=999, organization=None, directors=[{"id": 99, "name": "Orphan"}], creators=[])
+    items.append(orphan)
+    path = tmp_path / "filtered.json"
+    path.write_text(json.dumps({"items": items}))
+
+    result = theapolis.import_all(path)
+    assert {kind: len(ids) for kind, ids in result.items()} == {
+        "organization": 3,
+        "person": 6,
+        "text": 6,
+        "production": 6,
+    }
+    assert theapolis.import_all(path) == result
+    with Session(db) as session:
+        assert {org.name for org in session.exec(select(Organization))} == {
+            "Organization 1",
+            "Organization 2",
+            "Organization 3",
+        }
+        assert {person.name for person in session.exec(select(Person))} == {
+            f"{role} {number}" for role in ("Director", "Author") for number in range(1, 4)
+        }
+        assert len(session.exec(select(ProductionMembership)).all()) == 12
+        assert len(session.exec(select(TextContribution)).all()) == 6
+
+    unfiltered = theapolis.import_all(path, dach_only=False)
+    assert len(unfiltered["organization"]) == 6
+    assert len(unfiltered["production"]) == 12
+    assert len(theapolis.import_all(path, dach_only=True)["production"]) == 6
+    with Session(db) as session:
+        assert len(session.exec(select(Production)).all()) == 12
+
+
+@pytest.mark.parametrize("country", ["de", " Germany ", "AT", "austria", "ch", "Switzerland"])
+def test_dach_import_accepts_country_aliases(item, tmp_path, country):
+    item["organization"]["location"]["country"] = country
+    second = {**copy.deepcopy(item), "id": 124}
+    path = tmp_path / "countries.json"
+    path.write_text(json.dumps({"items": [item, second]}))
+    assert len(theapolis.import_all(path, dach_only=True)["production"]) == 2
+
+
+@pytest.mark.parametrize(("switch", "dach_only"), [([], True), (["--dach-only"], True), (["--all"], False)])
+def test_dach_import_cli_switch(monkeypatch, tmp_path, switch, dach_only):
+    path = tmp_path / "export.json"
+    calls = []
+    monkeypatch.setattr("sys.argv", ["theapolis", "import", "--json", str(path), *switch])
+    monkeypatch.setattr(
+        theapolis, "import_all", lambda json_path, *, dach_only: calls.append((json_path, dach_only)) or {}
+    )
+    theapolis.main()
+    assert calls == [(path, dach_only)]
+
+
 def test_role_scoped_person_ids_keep_colliding_credits_separate(db, tmp_path, item):
     item["directors"] = [{"id": 15696, "name": "Director"}]
     item["creators"] = [{"id": 15696, "name": "Author"}]
@@ -781,8 +849,8 @@ def test_role_scoped_person_ids_keep_colliding_credits_separate(db, tmp_path, it
     theapolis._write_json(path, theapolis.staged_records([item]))
     theapolis._write_json(path.with_suffix(".source.json"), {"items": [item]})
 
-    result = theapolis.import_all(path)
-    assert result == theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
+    assert result == theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         records = {
             record.external_id: record
@@ -810,7 +878,7 @@ def test_same_role_person_id_name_conflicts_fail_before_writes(db, tmp_path, ite
     path = tmp_path / "conflicting-names.json"
     path.write_text(json.dumps({"items": [item, other]}))
     with pytest.raises(ValueError, match="Inconsistent name for person ID directors:9"):
-        theapolis.import_all(path)
+        theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         assert not session.exec(select(Source)).all()
         assert not session.exec(select(ReconciliationCase)).all()
@@ -844,7 +912,7 @@ def test_all_items_validated_before_database_writes(db, tmp_path, item):
     path = tmp_path / "export.json"
     path.write_text(json.dumps({"items": [item, {**item, "id": 124, "premierDate": "not a date"}]}))
     with pytest.raises(ValueError):
-        theapolis.import_all(path)
+        theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         assert not session.exec(select(Source)).all()
         assert not session.exec(select(ReconciliationCase)).all()
@@ -853,7 +921,7 @@ def test_all_items_validated_before_database_writes(db, tmp_path, item):
 def test_legacy_api_envelope_accepted(db, tmp_path, item):
     path = tmp_path / "legacy.json"
     path.write_text(json.dumps({"data": {"items": [item]}}))
-    assert len(theapolis.import_all(path)["production"]) == 1
+    assert len(theapolis.import_all(path, dach_only=False)["production"]) == 1
 
 
 def test_staged_export_reimports_using_source_ids(db, tmp_path, item):
@@ -861,7 +929,7 @@ def test_staged_export_reimports_using_source_ids(db, tmp_path, item):
     path = tmp_path / "productions.json"
     path.write_text(json.dumps(theapolis.staged_records([item])))
     path.with_suffix(".source.json").write_text(json.dumps({"items": [item]}))
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     assert len(result["production"]) == 1
     with Session(db) as session:
         production = session.get(Production, uuid.UUID(result["production"][0]))
@@ -878,12 +946,12 @@ def test_staged_import_rejects_missing_or_mismatched_metadata_before_writes(db, 
     records = theapolis.staged_records([item])
     path.write_text(json.dumps(records))
     with pytest.raises(ValueError, match="requires source metadata"):
-        theapolis.import_all(path)
+        theapolis.import_all(path, dach_only=False)
     path.with_suffix(".source.json").write_text(json.dumps({"items": [item]}))
     records[0]["title"] = "Changed"
     path.write_text(json.dumps(records))
     with pytest.raises(ValueError, match="differs"):
-        theapolis.import_all(path)
+        theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         assert not session.exec(select(Source)).all()
 
@@ -911,8 +979,8 @@ def test_default_exports_use_shared_timestamp_scope_names_and_import_latest_full
     incomplete = tmp_path / f"99999999_999999_999999_{theapolis._export_scope(None)}_productions.json"
     theapolis._write_json(incomplete, theapolis.staged_records([item]))
     theapolis._write_json(theapolis._source_path(incomplete), {"success": False, "partial": True, "items": [item]})
-    assert theapolis.import_all() == theapolis.import_all(second)
-    assert theapolis.import_all() == theapolis.import_all(limited)
+    assert theapolis.import_all(dach_only=False) == theapolis.import_all(second, dach_only=False)
+    assert theapolis.import_all(dach_only=False) == theapolis.import_all(limited, dach_only=False)
 
 
 def test_default_import_does_not_select_limited_snapshot(db, monkeypatch, tmp_path, item):
@@ -920,13 +988,13 @@ def test_default_import_does_not_select_limited_snapshot(db, monkeypatch, tmp_pa
     limited = tmp_path / f"20261105_120000_000001_{theapolis._export_scope(1)}_productions.json"
     limited.write_text(json.dumps(theapolis.staged_records([item])))
     with pytest.raises(ValueError, match="No full Theapolis snapshot"):
-        theapolis.import_all()
+        theapolis.import_all(dach_only=False)
 
 
 def test_direct_import_preserves_conflicts_fills_blanks_and_keeps_source_observation(db, tmp_path, item):
     path = tmp_path / "import.json"
     path.write_text(json.dumps({"items": [item], "captured_at": "2026-11-01T12:00:00Z"}))
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         production = session.get(Production, uuid.UUID(result["production"][0]))
         organization = session.get(Organization, uuid.UUID(result["organization"][0]))
@@ -940,7 +1008,7 @@ def test_direct_import_preserves_conflicts_fills_blanks_and_keeps_source_observa
     item["organization"]["location"]["city"] = "Hamburg"
     item["directors"][0]["profile"] = {"birthDate": "1980", "url": f"{theapolis.SITE}/de/profil/alex"}
     path.write_text(json.dumps({"items": [item], "captured_at": "2026-11-02T12:00:00Z"}))
-    assert theapolis.import_all(path) == result
+    assert theapolis.import_all(path, dach_only=False) == result
     with Session(db) as session:
         production = session.exec(select(Production)).one()
         assert production.name == "Manual title" and production.url == "https://official.example/hamlet"
@@ -951,7 +1019,7 @@ def test_direct_import_preserves_conflicts_fills_blanks_and_keeps_source_observa
         observation = session.exec(select(SourceRecord).where(SourceRecord.entity_id == production.id)).one()
         assert observation.payload["incoming"]["name"] == "Changed source title"
         before = len(session.exec(select(SCD2History)).all())
-    assert theapolis.import_all(path) == result
+    assert theapolis.import_all(path, dach_only=False) == result
     with Session(db) as session:
         assert len(session.exec(select(SCD2History)).all()) == before
         assert not session.exec(select(ReconciliationCase)).all()
@@ -960,7 +1028,7 @@ def test_direct_import_preserves_conflicts_fills_blanks_and_keeps_source_observa
 def test_reimport_after_people_and_text_merge_reuses_survivors(db, tmp_path, item):
     path = tmp_path / "import.json"
     path.write_text(json.dumps({"items": [item, {**item, "id": 124}]}))
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     targets = {}
     for kind, ids in (("person", result["person"][:2]), ("text", result["text"])):
         preview = preview_entity_merge(kind, ids)
@@ -973,7 +1041,7 @@ def test_reimport_after_people_and_text_merge_reuses_survivors(db, tmp_path, ite
                 actor_id="test",
             )
         )
-    again = theapolis.import_all(path)
+    again = theapolis.import_all(path, dach_only=False)
     assert set(again["text"]) == {targets["text"]}
     assert len(again["person"]) == 2
     assert targets["person"] in again["person"]
@@ -993,7 +1061,7 @@ def test_import_failure_after_organization_rolls_back_all_writes(db, tmp_path, i
     path = tmp_path / "invalid.json"
     path.write_text(json.dumps({"items": [item]}))
     with pytest.raises(ValueError, match="Invalid source URL"):
-        theapolis.import_all(path)
+        theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         for model in (Organization, Person, Production, Text, Source, SourceRecord, EntitySource, SCD2History):
             assert not session.exec(select(model)).all()
@@ -1021,8 +1089,8 @@ def test_import_removes_nuls_before_domain_and_json_writes(db, tmp_path, item, c
 
     event.listen(db, "before_cursor_execute", reject_nul)
     try:
-        result = theapolis.import_all(path)
-        assert result == theapolis.import_all(path)
+        result = theapolis.import_all(path, dach_only=False)
+        assert result == theapolis.import_all(path, dach_only=False)
     finally:
         event.remove(db, "before_cursor_execute", reject_nul)
     assert "production[123].name" in caplog.text
@@ -1046,7 +1114,7 @@ def test_nul_only_name_or_corrupted_identity_fails_before_writes(db, tmp_path, i
     path = tmp_path / "invalid-nul.json"
     path.write_text(json.dumps({"items": [item, invalid]}))
     with pytest.raises(ValueError, match=r"needs a name|NUL byte in Theapolis source identity"):
-        theapolis.import_all(path)
+        theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         for model in (Source, Organization, Person, Text, Production, SourceRecord, EntitySource, SCD2History):
             assert not session.exec(select(model)).all()
@@ -1081,16 +1149,16 @@ def test_batches_are_visible_and_failed_production_batch_resumes(db, monkeypatch
 
     monkeypatch.setattr(theapolis, "add_credits_batch", fail_second_batch)
     with pytest.raises(ValueError, match="injected batch failure"):
-        theapolis.import_all(path)
+        theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         assert len(session.exec(select(Production)).all()) == 2
         assert len(session.exec(select(Text)).all()) == 2
         assert len(session.exec(select(ProductionMembership)).all()) == 4
         assert len(session.exec(select(TextContribution)).all()) == 2
     monkeypatch.setattr(theapolis, "add_credits_batch", original)
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     assert len(result["production"]) == 5
-    assert result == theapolis.import_all(path)
+    assert result == theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         assert len(session.exec(select(ProductionMembership)).all()) == 10
         assert len(session.exec(select(TextContribution)).all()) == 5
@@ -1120,7 +1188,7 @@ def test_batch_import_rejects_colliding_source_identities(db, tmp_path, item):
     path = tmp_path / "collision.json"
     path.write_text(json.dumps({"items": [item]}))
     with pytest.raises(ValueError, match="Theapolis source identity collision"):
-        theapolis.import_all(path)
+        theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         assert {person.name for person in session.exec(select(Person))} == {"First", "Second"}
         assert not session.exec(select(Production)).all()
@@ -1130,7 +1198,7 @@ def test_batch_import_rejects_colliding_source_identities(db, tmp_path, item):
 def test_newer_unchanged_observations_advance_freshness_without_domain_writes(db, tmp_path, item):
     path = tmp_path / "freshness.json"
     path.write_text(json.dumps({"items": [item], "captured_at": "2026-01-01T12:00:00Z"}))
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     writes = []
 
     def record_write(connection, cursor, statement, parameters, context, executemany):
@@ -1139,17 +1207,17 @@ def test_newer_unchanged_observations_advance_freshness_without_domain_writes(db
 
     event.listen(db, "before_cursor_execute", record_write)
     try:
-        assert theapolis.import_all(path) == result
+        assert theapolis.import_all(path, dach_only=False) == result
         assert writes == []
         path.write_text(json.dumps({"items": [item], "captured_at": "2026-03-01T12:00:00Z"}))
-        assert theapolis.import_all(path) == result
+        assert theapolis.import_all(path, dach_only=False) == result
         assert writes and all(
             statement.startswith(("UPDATE sourcerecord ", "UPDATE entitysource ")) for statement in writes
         )
         writes.clear()
         item["directors"][0]["profile"] = {"birthDate": "1980"}
         path.write_text(json.dumps({"items": [item], "captured_at": "2026-02-01T12:00:00Z"}))
-        assert theapolis.import_all(path) == result
+        assert theapolis.import_all(path, dach_only=False) == result
         assert writes == []
     finally:
         event.remove(db, "before_cursor_execute", record_write)
@@ -1171,7 +1239,7 @@ def test_newer_export_adds_only_delta_preserving_missing_records_and_conflicts(d
             }
         )
     )
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     changed = copy.deepcopy(item)
     changed["name"] = "Source title change"
     changed["directors"][0]["profile"] = {"birthDate": "1980"}
@@ -1184,7 +1252,7 @@ def test_newer_export_adds_only_delta_preserving_missing_records_and_conflicts(d
             }
         )
     )
-    again = theapolis.import_all(path)
+    again = theapolis.import_all(path, dach_only=False)
     assert len(again["person"]) == 4
     assert set(again["production"]) & set(result["production"]) == {result["production"][0]}
     with Session(db) as session:
@@ -1204,7 +1272,7 @@ def test_newer_export_adds_only_delta_preserving_missing_records_and_conflicts(d
         assert not history[0].is_current and history[0].valid_to is not None
         assert history[1].is_current and history[1].snapshot["born_precision"] == "year"
         count = len(session.exec(select(SCD2History)).all())
-    assert theapolis.import_all(path) == again
+    assert theapolis.import_all(path, dach_only=False) == again
     with Session(db) as session:
         assert len(session.exec(select(SCD2History)).all()) == count
 
@@ -1229,12 +1297,12 @@ def test_import_queries_scale_with_batches_not_records(db, tmp_path, item, size)
 
     event.listen(db, "before_cursor_execute", record_statement)
     try:
-        result = theapolis.import_all(path)
+        result = theapolis.import_all(path, dach_only=False)
         assert len(result["production"]) == size
         assert sum(statement.startswith("SELECT ") for statement in statements) < 100
         assert len(statements) < 300
         statements.clear()
-        assert theapolis.import_all(path) == result
+        assert theapolis.import_all(path, dach_only=False) == result
         assert sum(statement.startswith("SELECT ") for statement in statements) < 100
         assert len(statements) < 200
         assert not any(statement.startswith(("INSERT ", "UPDATE ", "DELETE ")) for statement in statements)
@@ -1247,12 +1315,12 @@ def test_shared_profile_urls_do_not_override_scoped_identity_during_merge(db, tm
         person["profile"] = {"url": f"{theapolis.SITE}/de/profil/shared"}
     path = tmp_path / "profiles.json"
     path.write_text(json.dumps({"items": [item]}))
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     preview = preview_entity_merge("person", result["person"][:2])
     merge_entities(
         "person", result["person"][:2], target_id=preview["target_id"], revision=preview["revision"], actor_id="test"
     )
-    assert len(theapolis.import_all(path)["person"]) == 2
+    assert len(theapolis.import_all(path, dach_only=False)["person"]) == 2
 
 
 def _old_theapolis_cases(db, item):
@@ -1317,7 +1385,7 @@ def test_explicit_migration_preserves_cases_and_reimports_idempotently(db, tmp_p
     assert all(not ids for ids in migrate_pending_cases().values())
     path = tmp_path / "import.json"
     path.write_text(json.dumps({"items": [item]}))
-    reimport = theapolis.import_all(path)
+    reimport = theapolis.import_all(path, dach_only=False)
     assert {kind: set(ids) for kind, ids in reimport.items()} == {kind: set(ids) for kind, ids in result.items()}
 
 
@@ -1391,7 +1459,7 @@ def test_migration_maps_approved_legacy_people_dependencies_for_reimport(db, tmp
         assert qualified.entity_id == approved_id
     path = tmp_path / "legacy-approved.json"
     path.write_text(json.dumps({"items": [item]}))
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     assert str(approved_id) in result["person"] and len(result["person"]) == 3
 
 
@@ -1518,7 +1586,7 @@ def test_missing_organization_stays_unknown(db, tmp_path, item):
     item["organization"] = None
     path = tmp_path / "independent.json"
     path.write_text(json.dumps({"items": [item]}))
-    result = theapolis.import_all(path)
+    result = theapolis.import_all(path, dach_only=False)
     assert not result["organization"]
     with Session(db) as session:
         production = session.get(Production, uuid.UUID(result["production"][0]))

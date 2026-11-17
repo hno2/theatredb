@@ -790,11 +790,31 @@ def _import_productions(
         add_credits_batch(session, kind, links, actor_id=ACTOR)
 
 
-def import_all(json_path: Path | None = None) -> dict[str, list[str]]:
+def _dach_import(
+    organizations: dict[str, tuple[dict, str | None]], people: dict[str, dict], productions: list[PreparedProduction]
+) -> tuple[dict[str, tuple[dict, str | None]], dict[str, dict], list[PreparedProduction]]:
+    production_ids: dict[str, set[str]] = {}
+    for production_id, org_id, _, _ in productions:
+        if org_id:
+            production_ids.setdefault(org_id, set()).add(production_id)
+    countries = {"de", "deutschland", "germany", "at", "österreich", "austria", "ch", "schweiz", "switzerland"}
+    organizations = {
+        key: value
+        for key, value in organizations.items()
+        if (value[0].get("country") or "").strip().casefold() in countries and len(production_ids.get(key, set())) > 1
+    }
+    productions = [production for production in productions if production[1] in organizations]
+    person_keys = {key for _, _, _, credits in productions for key, _ in credits}
+    return organizations, {key: value for key, value in people.items() if key in person_keys}, productions
+
+
+def import_all(json_path: Path | None = None, *, dach_only: bool = True) -> dict[str, list[str]]:
     """Accept export deltas in visible, resumable batches, preserving existing values."""
     organizations, people, productions, captured_at = _prepare_import(
         _read_import_snapshot(json_path if json_path is not None else _latest_export())
     )
+    if dach_only:
+        organizations, people, productions = _dach_import(organizations, people, productions)
     init_db()
     with get_session() as session:
         source = session.exec(select(Source).where(Source.name == "theapolis.de")).first()
@@ -875,6 +895,15 @@ def main() -> None:
         "import", aliases=["import_all"], help="Accept source records without overwriting existing values"
     )
     review.add_argument("--json", type=Path, help="Snapshot to import; defaults to latest full staged export")
+    scope = review.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--dach-only",
+        dest="dach_only",
+        action="store_true",
+        default=True,
+        help="Import only organizations in Germany, Austria or Switzerland with at least two productions (default)",
+    )
+    scope.add_argument("--all", dest="dach_only", action="store_false", help="Import all organizations and productions")
     sub.add_parser("migrate-cases", help="Explicitly accept stored pending Theapolis import cases")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -883,7 +912,11 @@ def main() -> None:
     elif args.command == "images":
         asyncio.run(download_images(args.output, concurrency=args.concurrency, limit=args.limit))
     else:
-        result = migrate_pending_cases() if args.command == "migrate-cases" else import_all(args.json)
+        result = (
+            migrate_pending_cases()
+            if args.command == "migrate-cases"
+            else import_all(args.json, dach_only=args.dach_only)
+        )
         print(json.dumps({kind: len(cases) for kind, cases in result.items()}))
 
 

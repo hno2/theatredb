@@ -76,6 +76,15 @@ uv run python -m backend.ingestion.theapolis images --concurrency 10
 uv run python -m backend.ingestion.theapolis import
 ```
 
+By default, import includes only organizations in Germany, Austria or Switzerland
+with at least two distinct productions in the snapshot, plus those productions
+and their texts and people. Use `import --all` to import the full snapshot;
+`import --dach-only` explicitly selects the default filter.
+Organizations without a recognized country, productions without an organization,
+and organizations with fewer than two productions are excluded. Partial snapshots
+may therefore exclude organizations with additional productions outside the
+snapshot. The filter does not delete records from previous imports.
+
 Import validates the entire snapshot, including source URLs, before writing.
 Embedded NUL bytes in source text are removed with field-specific warnings
 before validation, including text stored in JSON observations and audit history.
