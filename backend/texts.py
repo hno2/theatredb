@@ -87,29 +87,62 @@ def work_family(session: Session, text_id: uuid.UUID) -> list[Text]:
     """Compute an undirected translation/adaptation component; based_on never joins works."""
     if session.get(Text, text_id) is None:
         raise ValueError("Text not found")
-    # shortcut: BFS per request suits small theatre graphs; cache roots only if profiling requires it.
+    components, _ = _family_components(session, {text_id})
+    return list(
+        session.exec(select(Text).where(col(Text.id).in_(components[text_id])).order_by(Text.title, col(Text.id))).all()
+    )
+
+
+def _family_components(
+    session: Session, text_ids: set[uuid.UUID]
+) -> tuple[dict[uuid.UUID, frozenset[uuid.UUID]], set[uuid.UUID]]:
     neighbors: dict[uuid.UUID, set[uuid.UUID]] = {}
-    for edge in session.exec(select(TextLineage)).all():
-        if edge.relation in FAMILY_RELATIONS:
-            neighbors.setdefault(edge.source_text_id, set()).add(edge.derived_text_id)
-            neighbors.setdefault(edge.derived_text_id, set()).add(edge.source_text_id)
-    found = {text_id}
-    pending = deque([text_id])
-    while pending:
-        for neighbor in neighbors.get(pending.popleft(), ()):
-            if neighbor not in found:
-                found.add(neighbor)
-                pending.append(neighbor)
-    return list(session.exec(select(Text).where(col(Text.id).in_(found)).order_by(Text.title, col(Text.id))).all())
+    incoming = set()
+    edges = session.exec(
+        select(TextLineage.source_text_id, TextLineage.derived_text_id).where(
+            col(TextLineage.relation).in_(FAMILY_RELATIONS)
+        )
+    ).all()
+    for source_id, derived_id in edges:
+        neighbors.setdefault(source_id, set()).add(derived_id)
+        neighbors.setdefault(derived_id, set()).add(source_id)
+        incoming.add(derived_id)
+    components: dict[uuid.UUID, frozenset[uuid.UUID]] = {}
+    for text_id in text_ids:
+        if text_id in components:
+            continue
+        found = {text_id}
+        pending = deque([text_id])
+        while pending:
+            for neighbor in neighbors.get(pending.popleft(), ()):
+                if neighbor not in found:
+                    found.add(neighbor)
+                    pending.append(neighbor)
+        component = frozenset(found)
+        components.update(dict.fromkeys(found, component))
+    return components, incoming
 
 
 def family_roots(session: Session, text_id: uuid.UUID) -> list[Text]:
     """Return all roots, preserving multi-source adaptations rather than inventing one."""
-    family = work_family(session, text_id)
-    incoming = {
-        edge.derived_text_id for edge in session.exec(select(TextLineage)).all() if edge.relation in FAMILY_RELATIONS
+    return family_roots_many(session, [text_id])[text_id]
+
+
+def family_roots_many(session: Session, text_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, list[Text]]:
+    """Load roots for many texts in two queries, traversing each component once."""
+    requested = set(text_ids)
+    if not requested:
+        return {}
+    components, incoming = _family_components(session, requested)
+    root_ids = set(components) - incoming
+    roots = {text.id: text for text in session.exec(select(Text).where(col(Text.id).in_(root_ids))).all()}
+    if root_ids - roots.keys():
+        raise ValueError("Text not found")
+    by_component = {
+        component: sorted((roots[text_id] for text_id in component - incoming), key=lambda text: (text.title, text.id))
+        for component in set(components.values())
     }
-    return [text for text in family if text.id not in incoming]
+    return {text_id: by_component[components[text_id]] for text_id in requested}
 
 
 def _names(session: Session, texts: Iterable[Text], role: str) -> set[str]:

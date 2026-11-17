@@ -141,6 +141,11 @@ source texts. Invalid legacy language codes, self-links or cycles stop migration
 with a repair message rather than silently deleting data. Downgrading discards
 alternative titles and all but each text's first language.
 
+### Architecture decisions: performance
+
+- **Text labels:** batch family roots + joined credits. Three queries per picker,
+  not four per text. Request-local graph; no stale global ORM cache.
+
 ## Check
 
 ```bash

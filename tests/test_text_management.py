@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 from streamlit.testing.v1 import AppTest
@@ -54,6 +55,26 @@ def test_text_picker_distinguishes_translations(db):
     assert labels[str(root.id)] != labels[str(translation.id)]
     assert "de" in labels[str(translation.id)]
     assert "Schlegel" in labels[str(translation.id)]
+
+
+def test_text_picker_batches_roots_and_credits(db):
+    with Session(db) as session:
+        session.add_all(Text(title=f"Work {index}") for index in range(100))
+        session.commit()
+        texts = list(session.exec(select(Text)).all())
+    queries = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _many):
+        queries.append(statement)
+
+    event.listen(db, "before_cursor_execute", capture)
+    try:
+        assert text_labels([]) == {}
+        assert not queries
+        assert len(text_labels(texts)) == 100
+        assert len(queries) == 3
+    finally:
+        event.remove(db, "before_cursor_execute", capture)
 
 
 def test_selected_text_shows_family_and_productions(db):

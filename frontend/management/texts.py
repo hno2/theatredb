@@ -1,3 +1,4 @@
+from collections import Counter
 from uuid import UUID
 
 import pandas as pd
@@ -23,6 +24,7 @@ from backend.texts import (
     add_title,
     credit_line,
     family_roots,
+    family_roots_many,
     resolve_staged_text,
     resolve_text_case,
     work_family,
@@ -34,22 +36,34 @@ from frontend.management.uifactory import _actor_id, render_sqlmodel_crud
 
 def text_labels(texts: list[Text]) -> dict[str, str]:
     """Make text choices distinguishable without exposing raw foreign keys."""
+    if not texts:
+        return {}
     with get_session() as session:
-        people = {p.id: p.name for p in session.exec(select(Person)).all()}
+        roots_by_text = family_roots_many(session, [text.id for text in texts])
         contributions: dict[UUID, list[str]] = {}
-        for item in session.exec(select(TextContribution)).all():
-            if item.role in {"author", "translator", "adapter"} and item.person_id in people:
-                contributions.setdefault(item.text_id, []).append(f"{ROLE_LABELS[item.role]}: {people[item.person_id]}")
+        credits = session.exec(
+            select(TextContribution.text_id, TextContribution.role, Person.name)
+            .join(Person, col(Person.id) == col(TextContribution.person_id))
+            .where(
+                col(TextContribution.text_id).in_([text.id for text in texts]),
+                col(TextContribution.role).in_(["author", "translator", "adapter"]),
+            )
+            .order_by(Person.name)
+        ).all()
+        for text_id, role, name in credits:
+            if role is None:
+                raise ValueError("Text picker contribution has no role")
+            contributions.setdefault(text_id, []).append(f"{ROLE_LABELS[role]}: {name}")
         labels = {}
         for text in texts:
             details = [", ".join(text.languages), ", ".join(contributions.get(text.id, []))]
-            roots = family_roots(session, text.id)
+            roots = roots_by_text[text.id]
             roots_label = ", ".join(root.title for root in roots if root.id != text.id and root.title != text.title)
             if roots_label:
                 details.insert(0, f"Werk: {roots_label}")
             labels[str(text.id)] = text.title + (" — " + "; ".join(d for d in details if d) if any(details) else "")
-        duplicates = {label for label in labels.values() if list(labels.values()).count(label) > 1}
-        return {key: f"{label} [{key[:8]}]" if label in duplicates else label for key, label in labels.items()}
+        counts = Counter(labels.values())
+        return {key: f"{label} [{key[:8]}]" if counts[label] > 1 else label for key, label in labels.items()}
 
 
 def _titles(session: Session, text: Text) -> None:  # ruff: ignore[complex-structure]
