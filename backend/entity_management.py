@@ -431,3 +431,13 @@ def count_entities[ModelT: SQLModel](model_cls: type[ModelT]) -> int:
     """Count the number of entities of a given type."""
     with get_session() as session:
         return session.exec(select(func.count()).select_from(model_cls)).one()
+
+
+def count_entities_many(*model_classes: type[SQLModel]) -> dict[type[SQLModel], int]:
+    """Count multiple entity types in one database round trip."""
+    if not model_classes:
+        return {}
+    stmt = select(*(select(func.count()).select_from(model_cls).scalar_subquery() for model_cls in model_classes))
+    with get_session() as session:
+        values = session.execute(stmt).one()
+    return dict(zip(model_classes, values, strict=True))

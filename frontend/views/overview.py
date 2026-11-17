@@ -6,7 +6,7 @@ import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
-from backend.entity_management import count_entities, list_entities
+from backend.entity_management import count_entities_many, list_entities
 from backend.models import Award, Organization, Person, Production, Source, Text
 from frontend.views.helpers import has_coordinates
 
@@ -92,7 +92,7 @@ def render_overview() -> None:
     data = organization_data(list_entities(Organization, order_by="name"))
     mapped = data.loc[list(starmap(has_coordinates, data[["lat", "lon"]].itertuples(index=False, name=None))), :]
     cities = data.loc[data["city"] != "", ["city", "country"]].drop_duplicates()
-    counts = {model: count_entities(model) for model in (Production, Person, Text, Award, Source)}
+    counts = count_entities_many(Production, Person, Text, Award, Source)
 
     st.space("small")
     metrics = [

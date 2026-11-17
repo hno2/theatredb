@@ -149,6 +149,8 @@ alternative titles and all but each text's first language.
   local references only, explicit errors. Reject non-finite numbers at decode.
 - **Review desk:** native Streamlit 1.66 tracked tabs; run only active panel.
   Conflict badge uses SQL `COUNT`, not case hydration. No custom tab component.
+- **Homepage metrics:** combine scalar count subqueries in one SQL statement.
+  Five round trips become one; counts stay live, no cache invalidation.
 
 ## Check
 
