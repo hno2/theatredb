@@ -704,7 +704,7 @@ def _review_tab() -> None:
         kind=None if kind == "all" else kind,
         query=query,
         offset=(page - 1) * 200,
-        exclude_operations=[OPERATION],
+        exclude_operations=[OPERATION, "link_text", "text_lineage"],
         exclude_source_ids=[source.id for source in list_entities(Source) if source.name == "theapolis.de"],
     )
     if not cases:

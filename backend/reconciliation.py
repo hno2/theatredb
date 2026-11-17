@@ -37,6 +37,7 @@ from backend.models import (
     Text,
     TextContribution,
     TextLineage,
+    TextTitle,
 )
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
@@ -980,6 +981,8 @@ def _merge(
     approved_ids: Collection[uuid.UUID] = (),
 ) -> None:
     duplicate = _get(session, case.entity_type, duplicate_id)
+    if case.entity_type == EntityType.TEXT:
+        _prepare_text_merge(session, target.id, duplicate.id, actor_id)
     touched = set()
     for model, field, rows in _references(session, case.entity_type, duplicate.id):
         for row in rows:
@@ -1027,6 +1030,35 @@ def _merge(
     audit_event(session, duplicate, "delete", actor_id)
     session.delete(duplicate)
     session.flush()
+
+
+def _prepare_text_merge(session: Session, target_id: uuid.UUID, duplicate_id: uuid.UUID, actor_id: str | None) -> None:
+    """Delete future unique-key collisions before FK updates; retain notes and titles."""
+    for model, fields in (
+        (TextTitle, ("text_id", "normalized")),
+        (TextLineage, ("source_text_id", "derived_text_id", "relation")),
+    ):
+        seen: dict[tuple, TextTitle | TextLineage] = {}
+        rows = list(session.exec(select(model)).all())
+        rows.sort(key=lambda row: duplicate_id in [getattr(row, field) for field in fields])
+        for row in rows:
+            values = tuple(
+                target_id if getattr(row, field) == duplicate_id else getattr(row, field) for field in fields
+            )
+            if isinstance(row, TextLineage) and values[0] == values[1]:
+                audit_event(session, row, "delete", actor_id)
+                session.delete(row)
+            elif values in seen:
+                survivor = seen[values]
+                if isinstance(row, TextLineage) and isinstance(survivor, TextLineage) and row.notes:
+                    survivor.notes = "\n".join(dict.fromkeys(filter(None, (survivor.notes, row.notes))))
+                if isinstance(row, TextTitle) and isinstance(survivor, TextTitle) and survivor.language is None:
+                    survivor.language = row.language
+                audit_event(session, row, "delete", actor_id)
+                session.delete(row)
+            else:
+                seen[values] = row
+        session.flush()
 
 
 def _merge_options(kind: EntityType, states: list[dict], field: str, *, is_date: bool) -> list[dict]:
@@ -1338,6 +1370,11 @@ def _selected_changes(entity: Entity, options: dict, selected: list[str]) -> dic
     return changes
 
 
+def _require_general_case(case: ReconciliationCase) -> None:
+    if case.operation in {"link_text", "text_lineage"}:
+        raise ValueError("Use the text lineage inbox to resolve this case")
+
+
 def approve_case(
     case_id: uuid.UUID | str,
     *,
@@ -1357,6 +1394,7 @@ def approve_case(
         case = session.get(ReconciliationCase, uuid.UUID(str(case_id)), with_for_update=True)
         if case is None or case.status != "pending":
             raise ValueError("Case is missing or already decided")
+        _require_general_case(case)
         preview = _preview(session, case, target_id)
         if revision != preview["revision"]:
             raise ValueError("Data changed since preview. Refresh and review again.")

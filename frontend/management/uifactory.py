@@ -677,7 +677,7 @@ def _load_df(model_cls: type[SQLModel]) -> pd.DataFrame:
     return df
 
 
-INLINE_FIELDS = {"person": ("born", "died", "nationality"), "text": ("published", "language")}
+INLINE_FIELDS = {"person": ("born", "died", "nationality"), "text": ("published", "languages")}
 
 
 def _autosave_table(model_cls: type[SQLModel], original: pd.DataFrame, key: str, kind: str, actor: str | None) -> bool:
@@ -688,7 +688,13 @@ def _autosave_table(model_cls: type[SQLModel], original: pd.DataFrame, key: str,
     for index, changes in edits.items():
         entity_id = str(original.index[index])
         payload = {
-            field: value if value not in ("", None) else None
+            field: (
+                [language.strip() for language in str(value or "").split(",") if language.strip()]
+                if field == "languages"
+                else value
+                if value not in ("", None)
+                else None
+            )
             for field, value in changes.items()
             if field in INLINE_FIELDS[kind] and value != original.iloc[index][field]
         }
@@ -722,11 +728,7 @@ def _render_inline_table(
         label,
         *(["Autoren"] if kind == "text" else []),
         *INLINE_FIELDS[kind],
-        *[
-            column
-            for column in view.columns
-            if column not in {"Auswahl", label, "Autoren", *INLINE_FIELDS[kind]}
-        ],
+        *[column for column in view.columns if column not in {"Auswahl", label, "Autoren", *INLINE_FIELDS[kind]}],
     ]
     config = {
         "Auswahl": st.column_config.CheckboxColumn("Auswahl", width="small"),
@@ -736,7 +738,13 @@ def _render_inline_table(
     for field in INLINE_FIELDS[kind]:
         config[field] = st.column_config.TextColumn(
             next(item.label for item in _build_fields(model_cls) if item.name == field),
-            help="ISO-Datum: YYYY, YYYY-MM oder YYYY-MM-DD; leer zum Löschen." if field in dates else None,
+            help=(
+                "ISO-Datum: YYYY, YYYY-MM oder YYYY-MM-DD; leer zum Löschen."
+                if field in dates
+                else "Sprachcodes, durch Kommas getrennt."
+                if field == "languages"
+                else None
+            ),
         )
     key = f"table_{kind}_{epoch}_{stable_digest(df.to_dict(orient='records'))}"
     edited = st.data_editor(
@@ -765,6 +773,8 @@ def _render_table(
     actor: str | None = None,
 ) -> list[dict]:
     df_view = df.drop(columns=["id"], errors="ignore").copy()
+    if merge_kind == "text" and "languages" in df_view:
+        df_view["languages"] = df_view["languages"].map(lambda values: ", ".join(values or []))
     for f in fields:
         if f.kind == "domain_date" and f.name in df_view.columns:
             precision_field = f"{f.name}_precision"
