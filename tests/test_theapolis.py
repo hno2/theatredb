@@ -563,6 +563,33 @@ def test_profile_cache_commit_failure_propagates(monkeypatch):
         asyncio.run(theapolis._ProfileCache({}).put("Alex", None))
 
 
+def test_profile_cache_serializes_concurrent_commits(monkeypatch):
+    active = peak = 0
+    committed = []
+
+    async def to_thread(function, entry):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0)
+            function(entry)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(theapolis.asyncio, "to_thread", to_thread)
+    monkeypatch.setattr(theapolis._ProfileCache, "_put", staticmethod(committed.append))
+    cache = theapolis._ProfileCache({})
+
+    async def run():
+        await asyncio.gather(*(cache.put(f"Person {index}", None) for index in range(10)))
+
+    asyncio.run(run())
+    assert peak == 1
+    assert {entry.name for entry in committed} == set(cache.entries)
+    assert len(committed) == 10
+
+
 def test_profile_cache_cancellation_waits_for_commit(monkeypatch):
     started = threading.Event()
     release = threading.Event()

@@ -264,6 +264,7 @@ async def _profile_for_name(session: aiohttp.ClientSession, name: str) -> dict |
 class _ProfileCache:
     def __init__(self, entries: dict[str, TheapolisProfileCache]) -> None:
         self.entries = entries
+        self._write_lock = asyncio.Lock()
 
     @staticmethod
     def _load() -> dict[str, TheapolisProfileCache]:
@@ -299,13 +300,14 @@ class _ProfileCache:
 
     async def put(self, name: str, profile: dict | None) -> None:
         entry = TheapolisProfileCache(name=name, profile=profile, captured_at=time())
-        task = asyncio.create_task(asyncio.to_thread(self._put, entry))
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
-        self.entries[name] = entry
+        async with self._write_lock:
+            task = asyncio.create_task(asyncio.to_thread(self._put, entry))
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+            self.entries[name] = entry
 
 
 async def _enrich_people(

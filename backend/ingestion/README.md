@@ -137,6 +137,9 @@ uv run python -m backend.ingestion.theapolis images --concurrency 10
 uv run python -m backend.ingestion.theapolis import
 ```
 
+Profile HTTP requests stay concurrent; cache commits serialize per export.
+Avoid SQLite writer starvation; cancellation waits for an in-flight commit.
+
 By default, import includes only organizations in Germany, Austria or Switzerland
 with at least two distinct productions in the snapshot, plus those productions
 and their texts and people. Use `import --all` to import the full snapshot;
