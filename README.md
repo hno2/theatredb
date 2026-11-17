@@ -64,7 +64,11 @@ on large tables; schedule migrations outside busy import periods.
 
 Upload theatre production JSON or review reconciliation cases in **Verwaltung →
 Datenabgleich & Duplikate**. Uploads can apply conflict-free changes; ambiguous
-matches wait for review. For standalone scraping, Theapolis imports, schemas and
+matches wait for review. Productions with different known premiere years are
+imported separately without duplicate review, even when titles match. If either
+year is unknown, the usual matching checks remain. For false positives, click
+**Upload trotzdem hinzufügen** in the conflict review to keep both productions.
+For standalone scraping, Theapolis imports, schemas and
 validation, see the [ingestion guide](backend/ingestion/README.md).
 
 Source URLs are clickable in every management view: selected entities' **Sources**

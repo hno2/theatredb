@@ -2,6 +2,7 @@
 
 Matching is always restricted to the selected theatre. For every uploaded production:
 
+* productions with different known premiere years are kept separate without review,
 * same title (or same source page) without conflicting values: missing fields, people,
   text and the source are added automatically,
 * no similar title in the theatre: the production is created with its people, text and source,
@@ -747,10 +748,15 @@ def _ingest_one(
         and linked_at
         and (captured_at is None or captured_at.replace(tzinfo=dt.UTC) < linked_at.replace(tzinfo=dt.UTC))
     ):
+    premiere = item["incoming"].get("premiere")
+    year = parse_date(premiere)[0].year if premiere else None
+    candidates = [row for row in productions if year is None or row.premiere is None or row.premiere.year == year]
+    if linked and linked not in candidates:
+        linked = None
         # Older snapshot of an already imported page: only fill gaps, never override newer source data.
         return "merged" if apply(linked)[1] else "unchanged"
     name = normalize(item["incoming"]["name"])
-    exact = [linked] if linked else [row for row in productions if normalize(row.name) == name]
+    exact = [linked] if linked else [row for row in candidates if normalize(row.name) == name]
     compared = [(row, _compare(session, row, item, organization.id, source_id)["conflicts"]) for row in exact]
     clean = [row for row, conflicts in compared if not conflicts]
     if len(clean) == 1:
@@ -761,7 +767,7 @@ def _ingest_one(
             _conflict_reason(compared[0][1]) if compared[0][1] else "Mehrere gleichnamige Produktionen",
         )
     else:
-        scored = [(title_similarity(item["incoming"]["name"], row.name), row) for row in productions]
+        scored = [(title_similarity(item["incoming"]["name"], row.name), row) for row in candidates]
         best_score, best = max(scored, key=itemgetter(0), default=(0.0, None))
         if best is None or best_score < TITLE_THRESHOLD:
             productions.append(apply(None)[0])

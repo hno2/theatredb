@@ -89,7 +89,8 @@ def _theatre_label(org: Organization) -> str:
 def _import_tab() -> None:
     st.write(
         "Theater wählen und JSON hochladen. Gleiche Produktionen dieses Theaters werden automatisch ergänzt, "
-        "neue Produktionen angelegt. Nur echte Widersprüche landen unter **Produktionskonflikte**."
+        "neue Produktionen angelegt. Unterschiedliche bekannte Premierenjahre bleiben getrennt. "
+        "Nur echte Widersprüche landen unter **Produktionskonflikte**."
     )
     theatres = sorted(list_entities(Organization), key=lambda org: org.name.casefold())
     if not theatres:
@@ -433,10 +434,21 @@ def _conflict_tab() -> None:
     revision_key = f"conflict_revision_{case_id}_{choice}"
     shown_revision = st.session_state.get(revision_key, review["revision"])
     st.session_state[revision_key] = review["revision"]
-    save_col, reject_col = st.columns([3, 1])
+    save_col, add_col, reject_col = st.columns([2, 2, 1])
     action = "Als neue Produktion anlegen" if create else "Zusammenführen"
-    if save_col.button(action, type="primary", width="stretch", key=f"resolve_{case_id}"):
+    save = save_col.button(action, type="primary", width="stretch", key=f"resolve_{case_id}")
+    add_anyway = add_col.button(
+        "Upload trotzdem hinzufügen",
+        width="stretch",
+        key=f"add_anyway_{case_id}",
+        disabled=create,
+        help="Upload als eigene Produktion anlegen und den bestehenden Datensatz unverändert behalten.",
+    )
+    if save or add_anyway:
         try:
+            if add_anyway:
+                review = production_review(case_id, create=True)
+                shown_revision, create, choices = review["revision"], True, {}
             resolve_production_case(
                 case_id,
                 revision=shown_revision,

@@ -445,3 +445,67 @@ def test_upload_tab_shows_theatre_status_and_overview(db, theatre) -> None:
     metrics = {metric.label: metric.value for metric in app.metric}
     assert metrics["mit Upload-Quelle"] == "1 (100%)"
     assert metrics["Aktuell (≤ 90 Tage)"] == "1 (100%)"
+
+@pytest.mark.parametrize("title", ["Hamlet", "Hamlet: Prinz von Dänemark"])
+@pytest.mark.parametrize("precision", ["year", "day"])
+def test_different_premiere_year_is_created_without_review(db, theatre, title, precision) -> None:
+    original = save(
+        db,
+        Production(
+            name=title,
+            organization_id=theatre.id,
+            premiere=dt.datetime(2025, 1, 1),
+            premiere_precision=precision,
+        ),
+    )[0]
+    record = {**HAMLET, "premiere": "2026", "premiere_precision": "year"}
+    assert upload(theatre, record)["created"] == ["Hamlet"]
+    assert len(rows(db, Production)) == 2
+    assert rows(db, Production, Production.id == original.id)[0].premiere.year == 2025
+    assert not rows(db, ReconciliationCase)
+    assert upload(theatre, record)["unchanged"] == ["Hamlet"]
+    assert len(rows(db, Production)) == 2
+
+def test_reused_source_page_keeps_different_year_productions_separate(db, theatre) -> None:
+    for year, outcome in [(2025, "created"), (2026, "created"), (2025, "unchanged")]:
+        record = {**HAMLET, "premiere": f"{year}-02-14"}
+        assert upload(theatre, record)[outcome] == ["Hamlet"]
+    assert {row.premiere.year for row in rows(db, Production)} == {2025, 2026}
+    assert len(rows(db, ProductionMembership)) == 6
+    assert not rows(db, ReconciliationCase)
+
+@pytest.mark.parametrize(
+    ("existing_date", "incoming_date"),
+    [(dt.datetime(2026, 1, 1), "2026-02-14"), (None, "2026-02-14"), (dt.datetime(2025, 1, 1), None)],
+)
+def test_same_or_unknown_year_still_checks_conflicts(db, theatre, existing_date, incoming_date) -> None:
+    save(db, Production(name="Hamlet", organization_id=theatre.id, premiere=existing_date, description="Old"))
+    assert upload(theatre, {**HAMLET, "premiere": incoming_date})["review"] == ["Hamlet"]
+    assert len(rows(db, Production)) == 1
+    assert len(list_production_cases()) == 1
+
+def test_same_title_matches_current_year_instead_of_older_production(db, theatre) -> None:
+    save(db, Production(name="Hamlet", organization_id=theatre.id, premiere=dt.datetime(2025, 2, 14)))
+    current = save(db, Production(name="Hamlet", organization_id=theatre.id, premiere=dt.datetime(2026, 2, 14)))[0]
+    assert upload(theatre, HAMLET)["merged"] == ["Hamlet"]
+    assert rows(db, Production, Production.id == current.id)[0].description == HAMLET["description"]
+    assert len(rows(db, Production)) == 2
+    assert not rows(db, ReconciliationCase)
+
+def test_conflict_ui_adds_false_positive_upload_anyway(db, theatre) -> None:
+    original = save(db, Production(name="Fallen", organization_id=theatre.id))[0]
+    record = {**HAMLET, "title": "Mann kann auch in Höhe Fallen", "url": "https://theatre.example/p/hoehe-fallen"}
+    assert upload(theatre, record)["review"] == [record["title"]]
+    app = AppTest.from_file(str(REVIEW_APP)).run()
+    assert not app.exception
+    next(button for button in app.button if button.label == "Upload trotzdem hinzufügen").click().run()
+    assert not app.exception
+    assert {row.name for row in rows(db, Production)} == {"Fallen", record["title"]}
+    assert rows(db, Production, Production.id == original.id)[0].description is None
+    created = rows(db, Production, Production.name == record["title"])[0]
+    assert created.description == HAMLET["description"]
+    assert len(rows(db, ProductionMembership, ProductionMembership.production_id == created.id)) == 3
+    assert rows(db, EntitySource, EntitySource.entity_id == created.id)
+    assert app.tabs[0].label == "Produktionskonflikte (0)"
+    assert upload(theatre, record)["unchanged"] == [record["title"]]
+    assert len(rows(db, Production)) == 2
