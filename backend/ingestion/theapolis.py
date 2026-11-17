@@ -29,6 +29,7 @@ from backend.ingestion.snapshots import digest, snapshot_path, without_null_fiel
 from backend.ingestion.staging import validate_records
 from backend.ingestion.theapolis_import import ImportRecord, accept_records, add_credits_batch, migrate_pending_cases
 from backend.models import EntityType, Source, TheapolisProfileCache
+from backend.production_import import author_name
 from backend.reconciliation import canonical_url, validate_payload
 from backend.user_management import get_session, init_db
 
@@ -580,7 +581,7 @@ def _add_people(item: dict, people: dict) -> list[tuple[str, str]]:
     credits = []
     for group, role in (("directors", "director"), ("creators", "author")):
         for person in item.get(group) or []:
-            person_name = _name(person)
+            person_name = author_name(_name(person)) if role == "author" else _name(person)
             profile = person.get("profile") or {}
             person_id = f"{group}:{_identity(person)}"
             payload = people.setdefault(person_id, {"name": person_name, "type": []})

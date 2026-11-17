@@ -13,7 +13,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 from sqlmodel import SQLModel
 from streamlit import session_state, user
 
-from backend.config import FORM_FIELD_KINDS
+from backend.config import FORM_FIELD_KINDS, canonical_role
 from backend.date_precision import DatePrecision, iso_date, parse_date
 from backend.entity_management import create_entity, delete_entity, list_entities, list_entities_where, update_entity
 from backend.models import EntitySource, Person, Source, TextContribution
@@ -714,8 +714,13 @@ def _render_inline_table(
     order = [
         "Auswahl",
         label,
+        *(["Autoren"] if kind == "text" else []),
         *INLINE_FIELDS[kind],
-        *[column for column in view.columns if column not in {"Auswahl", label, *INLINE_FIELDS[kind]}],
+        *[
+            column
+            for column in view.columns
+            if column not in {"Auswahl", label, "Autoren", *INLINE_FIELDS[kind]}
+        ],
     ]
     config = {
         "Auswahl": st.column_config.CheckboxColumn("Auswahl", width="small"),
@@ -898,7 +903,16 @@ def render_sqlmodel_crud(
         context = search_people_for_merge(limit=len(df))
         productions = {row["id"]: "; ".join(row["productions"]) for row in context}
         df["Produktionen · Theater"] = df["id"].map(productions)
+    if merge_kind == "text" and not df.empty:
+        names = {str(p.id): p.name for p in list_entities(Person)}
+        authors: dict[str, list[str]] = {}
+        for c in list_entities(TextContribution):
+            if canonical_role(c.role) == "author" and str(c.person_id) in names:
+                authors.setdefault(str(c.text_id), []).append(names[str(c.person_id)])
+        df["Autoren"] = df["id"].map(lambda i: ", ".join(sorted(authors.get(i, []))))
     st.title(title or f"{model_cls.__name__}s Management")
+    if merge_kind == "text":
+        st.caption(f"{len(df)} Texte insgesamt")
     selected = _render_table(df, fields, model_cls, merge_kind=merge_kind, actor=actor)
     if merge_kind:
         st.caption(

@@ -91,6 +91,11 @@ def _clean(value: object) -> str | None:
     return value.strip() or None
 
 
+def author_name(value: str | None) -> str | None:
+    """Drop a leading "nach"/"von" only before a full name; "Hans von Brandenburg" stays untouched."""
+    return re.sub(r"^(?:nach|von)\s+(?=\S+\s+\S)", "", value, flags=re.IGNORECASE) if value else value
+
+
 def _credit(member: dict) -> dict:
     raw_role = _clean(member.get("role"))
     raw_types = member.get("type") or raw_role or "actor"
@@ -119,7 +124,7 @@ def _credit(member: dict) -> dict:
 def prepare_record(record: dict) -> dict:
     """Turn one validated staging record into production fields, credits and authors."""
     members = list(record.get("memberships", []))
-    author = _clean(record.get("author"))
+    author = author_name(_clean(record.get("author")))
     if author and not any(normalize(member["name"]) == normalize(author) for member in members):
         members.append({"name": author, "type": "author", "role": "author"})
     credits = [_credit(member) for member in members]
@@ -536,7 +541,8 @@ def _find_text(session: Session, title: str, author_ids: set[uuid.UUID]) -> Text
         match = next((row for row in rows if authored[row.id] & author_ids), None)
         unattributed = [row for row in rows if not authored[row.id]]
         return match or (unattributed[0] if len(unattributed) == 1 else None)
-    return rows[0] if len(rows) == 1 else None
+    unattributed = [row for row in rows if not authored[row.id]]
+    return unattributed[0] if unattributed else (rows[0] if len(rows) == 1 else None)
 
 
 def _apply_text(
