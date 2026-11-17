@@ -145,6 +145,8 @@ alternative titles and all but each text's first language.
 
 - **Text labels:** batch family roots + joined credits. Three queries per picker,
   not four per text. Request-local graph; no stale global ORM cache.
+- **AI JSON:** use `jsonschema`, not a homegrown validator. Draft 2020-12,
+  local references only, explicit errors. Reject non-finite numbers at decode.
 
 ## Check
 

@@ -12,6 +12,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 from sqlmodel import Session, col, select
 
 from backend import wikidata
@@ -44,120 +48,11 @@ def enabled() -> bool:
     return all(os.environ.get(key, "").strip() for key in ("AI_BASE_URL", "AI_API_KEY", "AI_MODEL"))
 
 
-def _check_schema(schema: dict | bool) -> None:
-    if isinstance(schema, bool):
-        return
-    supported = {
-        "type",
-        "properties",
-        "required",
-        "additionalProperties",
-        "items",
-        "enum",
-        "const",
-        "minItems",
-        "maxItems",
-        "minLength",
-        "maxLength",
-        "minimum",
-        "maximum",
-        "pattern",
-        "anyOf",
-        "oneOf",
-        "title",
-        "description",
-        "$schema",
-        "default",
-    }
-    if not isinstance(schema, dict) or set(schema) - supported:
-        raise AIError("Unsupported JSON schema; use the documented runtime-safe subset")
-    if "type" in schema:
-        types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
-        if not types or any(
-            kind not in {"object", "array", "string", "integer", "number", "boolean", "null"} for kind in types
-        ):
-            raise AIError("Invalid JSON schema type")
-    for child in schema.get("properties", {}).values():
-        _check_schema(child)
-    if "items" in schema:
-        _check_schema(schema["items"])
-    if isinstance(schema.get("additionalProperties"), dict):
-        _check_schema(schema["additionalProperties"])
-    for keyword in ("anyOf", "oneOf"):
-        for child in schema.get(keyword, []):
-            _check_schema(child)
-
-
-def _validate_containers(value: object, schema: dict, path: str) -> None:
-    if isinstance(value, dict):
-        if any(key not in value for key in schema.get("required", [])):
-            raise AIError(f"AI JSON schema mismatch at {path}: missing required property")
-        for key, item in value.items():
-            child = schema.get("properties", {}).get(key, schema.get("additionalProperties", {}))
-            if child is False:
-                raise AIError(f"AI JSON schema mismatch at {path}: unexpected property {key}")
-            if isinstance(child, dict):
-                _validate(item, child, f"{path}.{key}")
-    if isinstance(value, list):
-        if len(value) < schema.get("minItems", 0) or len(value) > schema.get("maxItems", math.inf):
-            raise AIError(f"AI JSON schema mismatch at {path}: array length")
-        for index, item in enumerate(value):
-            if "items" in schema:
-                _validate(item, schema["items"], f"{path}[{index}]")
-
-
-def _validate_scalars(value: object, schema: dict, path: str) -> None:
-    if isinstance(value, str):
-        if len(value) < schema.get("minLength", 0) or len(value) > schema.get("maxLength", math.inf):
-            raise AIError(f"AI JSON schema mismatch at {path}: string length")
-        if "pattern" in schema and re.search(schema["pattern"], value) is None:
-            raise AIError(f"AI JSON schema mismatch at {path}: pattern")
-    if (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and (
-            not math.isfinite(value)
-            or value < schema.get("minimum", -math.inf)
-            or value > schema.get("maximum", math.inf)
-        )
-    ):
-        raise AIError(f"AI JSON schema mismatch at {path}: number bounds")
-
-
-def _validate(value: object, schema: dict | bool, path: str = "$") -> None:
-    if schema is False:
-        raise AIError(f"AI JSON schema mismatch at {path}: value not allowed")
-    if schema is True:
-        return
-    kinds = {
-        "object": isinstance(value, dict),
-        "array": isinstance(value, list),
-        "string": isinstance(value, str),
-        "integer": isinstance(value, int) and not isinstance(value, bool),
-        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
-        "boolean": isinstance(value, bool),
-        "null": value is None,
-    }
-    allowed = schema.get("type")
-    if allowed is not None and not any(
-        kinds.get(kind, False) for kind in (allowed if isinstance(allowed, list) else [allowed])
-    ):
-        raise AIError(f"AI JSON schema mismatch at {path}: expected {allowed}")
-    if ("enum" in schema and value not in schema["enum"]) or ("const" in schema and value != schema["const"]):
-        raise AIError(f"AI JSON schema mismatch at {path}: disallowed value")
-    for keyword in ("anyOf", "oneOf"):
-        if keyword in schema:
-            matches = 0
-            for child in schema[keyword]:
-                try:
-                    _validate(value, child, path)
-                except AIError:
-                    continue
-                matches += 1
-            if matches == 0 or (keyword == "oneOf" and matches != 1):
-                raise AIError(f"AI JSON schema mismatch at {path}: {keyword}")
-    _validate_containers(value, schema, path)
-    _validate_scalars(value, schema, path)
+def _finite_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"Invalid JSON number: {value}")
+    return number
 
 
 def _completion_body(request: Request) -> bytes:
@@ -170,15 +65,14 @@ def _completion_body(request: Request) -> bytes:
 
 
 def complete_json(prompt: str, schema: dict) -> dict:
-    """Call an OpenAI-compatible endpoint and validate JSON without dev dependencies.
-
-    Runtime schema subset: type, properties, required, additionalProperties, items,
-    enum/const, anyOf/oneOf, numeric/string/array bounds and pattern. Unsupported
-    keywords fail closed before any request; references/formats are not supported.
-    """
+    """Validate completions with JSON Schema 2020-12; schema references stay offline."""
     if not enabled():
         raise AIDisabledError("AI disabled: set AI_BASE_URL, AI_API_KEY and AI_MODEL")
-    _check_schema(schema)
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        raise AIError(f"Invalid JSON schema: {exc.message}") from exc
+    validator = Draft202012Validator(schema, registry=Registry())
     base = os.environ["AI_BASE_URL"].strip().rstrip("/")
     parts = urlsplit(base)
     if parts.scheme not in {"http", "https"} or not parts.netloc or parts.query or parts.fragment or parts.username:
@@ -203,9 +97,9 @@ def complete_json(prompt: str, schema: dict) -> dict:
         method="POST",
     )
     try:
-        envelope = json.loads(_completion_body(request))
+        envelope = json.loads(_completion_body(request), parse_constant=_finite_number, parse_float=_finite_number)
         content = envelope["choices"][0]["message"]["content"]
-        result = json.loads(content)
+        result = json.loads(content, parse_constant=_finite_number, parse_float=_finite_number)
     except HTTPError as exc:
         raise AIError(f"AI HTTP error {exc.code}") from exc
     except (URLError, TimeoutError) as exc:
@@ -214,7 +108,12 @@ def complete_json(prompt: str, schema: dict) -> dict:
         raise AIError("AI returned invalid JSON completion") from exc
     if not isinstance(result, dict):
         raise AIError("AI completion must be a JSON object")
-    _validate(result, schema)
+    try:
+        validator.validate(result)
+    except ValidationError as exc:
+        raise AIError(f"AI JSON schema mismatch at {exc.json_path}: {exc.message}") from exc
+    except Unresolvable as exc:
+        raise AIError(f"AI JSON schema reference cannot be resolved offline: {exc.ref}") from exc
     return result
 
 

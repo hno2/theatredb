@@ -17,6 +17,8 @@ dependencies = [
 	"python-dotenv>=1.2.1",
 	"procrastinate>=3.10,<4",
 	"alembic>=1.20.1",
+	"jsonschema>=4.26.0",
+	"referencing>=0.37.0",
 ]
 
 [dependency-groups]
@@ -25,7 +27,6 @@ dev = [
     "ruff>=0.15.18",
     "pyrefly>=1.0.0",
     "pytest>=9.0.3",
-    "jsonschema>=4.26.0",
     "rfc3339-validator>=0.1.4",
     "types-pyyaml>=6.0.12.20261111",
     "types-jsonschema>=4.26.0.20261006",

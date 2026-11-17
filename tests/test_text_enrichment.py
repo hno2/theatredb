@@ -241,8 +241,36 @@ def test_ai_transport_schema_validation_and_bounded_timeout(monkeypatch):
     monkeypatch.setattr(ai, "urlopen", lambda *args, **kwargs: completion({"ids": [42]}))
     with pytest.raises(ai.AIError, match="schema mismatch"):
         ai.complete_json("choose", schema)
-    with pytest.raises(ai.AIError, match="Unsupported JSON schema"):
+    with pytest.raises(ai.AIError, match=r"schema reference.*offline"):
         ai.complete_json("choose", {"$ref": "#/something"})
+    with pytest.raises(ai.AIError, match="Invalid JSON schema"):
+        ai.complete_json("choose", {"type": "not-a-type"})
+
+
+def test_ai_local_schema_references_never_fetch_external_resources(monkeypatch):
+    configure_ai(monkeypatch)
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *args, **kwargs: pytest.fail("Schema resolution must not fetch URLs")
+    )
+    monkeypatch.setattr(ai, "urlopen", lambda *args, **kwargs: completion({"ids": ["Q1"]}))
+    schema = {
+        "$defs": {"ids": {"type": "array", "items": {"type": "string"}}},
+        "type": "object",
+        "properties": {"ids": {"$ref": "#/$defs/ids"}},
+    }
+    assert ai.complete_json("choose", schema) == {"ids": ["Q1"]}
+    schema["properties"]["ids"] = {"$ref": "https://example.invalid/schema.json"}
+    with pytest.raises(ai.AIError, match=r"schema reference.*offline"):
+        ai.complete_json("choose", schema)
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e309"])
+def test_ai_rejects_non_json_numbers(monkeypatch, number):
+    configure_ai(monkeypatch)
+    body = json.dumps({"choices": [{"message": {"content": '{"number":' + number + "}"}}]}).encode()
+    monkeypatch.setattr(ai, "urlopen", lambda *args, **kwargs: io.BytesIO(body))
+    with pytest.raises(ai.AIError, match="invalid JSON completion"):
+        ai.complete_json("choose", {"type": "object"})
 
 
 def test_ai_http_errors_are_explicit(monkeypatch):
