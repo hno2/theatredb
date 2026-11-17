@@ -153,6 +153,8 @@ alternative titles and all but each text's first language.
   Five round trips become one; counts stay live, no cache invalidation.
 - **Text credits:** fetch ancestor contributions once; inherit names in memory.
   Never scan all people to recover display spelling. Same-name strangers stay out.
+- **Publisher imports:** reuse validated metadata and identity lookup when saving.
+  One identity query per record, including replays. Standalone saves still validate.
 
 ## Check
 

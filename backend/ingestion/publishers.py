@@ -118,6 +118,16 @@ def save_publisher_observation(session: Session, text: Text, observation: Mappin
         raise ValueError("Publisher source not found")
     record = normalize_metadata({key: value for key, value in observation.items() if key != "source_id"})
     stored = _source_record(session, source_id, record)
+    _save_publisher_observation(session, text, source_id, record, stored)
+
+
+def _save_publisher_observation(
+    session: Session,
+    text: Text,
+    source_id: uuid.UUID,
+    record: PublisherText,
+    stored: SourceRecord | None,
+) -> None:
     if stored is not None and resolve_id(session, EntityType.TEXT, stored.entity_id) != text.id:
         raise ValueError(f"Publisher identity already links another text: {record.external_id or record.url}")
     link = session.exec(
@@ -290,5 +300,5 @@ def ingest_text_metadata(
             }
             session.add(result)
             continue
-        save_publisher_observation(session, result, {"source_id": str(source.id), **observation})
+        _save_publisher_observation(session, result, source.id, record, stored)
     return results

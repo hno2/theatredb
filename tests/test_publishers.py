@@ -1,6 +1,7 @@
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import ValidationError
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from backend.ingestion.publishers import (
@@ -73,6 +74,30 @@ def test_publisher_import_is_idempotent_and_preserves_url_and_ua(session, publis
     observation = session.exec(select(SourceRecord)).one()
     assert observation.payload["world_premiere"] == metadata["UA"]
     assert first.published is None
+
+
+def test_publisher_import_and_replay_reuse_source_record_lookup(session) -> None:
+    metadata = {"title": "Play", "url": "https://www.theatertexte.de/play"}
+    statements = []
+
+    def capture_sql(connection, cursor, statement, parameters, context, executemany) -> None:
+        normalized = statement.casefold()
+        if normalized.lstrip().startswith("select") and SourceRecord.__tablename__.casefold() in normalized:
+            statements.append(statement)
+
+    event.listen(session.bind, "before_cursor_execute", capture_sql)
+    try:
+        ingest_text_metadata(session, "theatertexte.de", [metadata])
+        first_import_selects = len(statements)
+        statements.clear()
+        ingest_text_metadata(session, "theatertexte.de", [metadata])
+        replay_selects = len(statements)
+    finally:
+        event.remove(session.bind, "before_cursor_execute", capture_sql)
+
+    assert (first_import_selects, replay_selects) == (1, 1)
+    observation = session.exec(select(SourceRecord)).one()
+    assert observation.payload["title"] == "Play"
 
 
 def test_publisher_validates_entire_batch_before_writing(session) -> None:
