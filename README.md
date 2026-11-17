@@ -149,12 +149,17 @@ alternative titles and all but each text's first language.
   local references only, explicit errors. Reject non-finite numbers at decode.
 - **Review desk:** native Streamlit 1.66 tracked tabs; run only active panel.
   Conflict badge uses SQL `COUNT`, not case hydration. No custom tab component.
+  Inactive widgets follow native cleanup: save edits before switching tabs.
 - **Homepage metrics:** combine scalar count subqueries in one SQL statement.
   Five round trips become one; counts stay live, no cache invalidation.
 - **Text credits:** fetch ancestor contributions once; inherit names in memory.
   Never scan all people to recover display spelling. Same-name strangers stay out.
 - **Publisher imports:** reuse validated metadata and identity lookup when saving.
   One identity query per record, including replays. Standalone saves still validate.
+
+Local SQLite samples: 100 isolated text choices, `402 -> 3` SQL statements;
+inherited musical credits, `28 -> 5`, with zero full people-table scans.
+Round-trip reductions, not production latency guarantees. Deferred work: [TODO](TODO.md#performance--reuse-follow-up).
 
 ## Check
 

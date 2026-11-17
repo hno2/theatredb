@@ -18,6 +18,37 @@
 - [ ] TheatreBW
 - [ ] Theaterverlage https://www.concordtheatricals.de/
 
+## Performance / reuse follow-up
+
+- [ ] **Startup:** management pages still run migration/queue checks per rerun.
+  Move checks to explicit startup; preserve reset/reinitialize behavior. No naive global cache.
+  See [database lifecycle](backend/user_management.py) and [reset CLI](backend/db.py).
+- [ ] **CRUD reads:** paginate/filter in SQL; fetch selected entity's sources with a scoped join,
+  not both full tables. Keep native Streamlit tables.
+  See [generic management UI](frontend/management/uifactory.py).
+- [ ] **Text detail:** batch productions by family member; avoid loading every text just to
+  render one family. See [text management](frontend/management/texts.py).
+- [ ] **People matching:** publisher missing-credit paths still scan all people per name.
+  Reuse one request-local lookup; keep ambiguity checks and source identity boundaries.
+  See [publisher imports](backend/ingestion/publishers.py) and [text resolver](backend/texts.py).
+- [ ] **Bulk text writes:** batch display-title lookups and lineage checks across flushes.
+  Preserve cycle validation, advisory locking and transaction visibility.
+  See [model flush hooks](backend/models.py).
+- [ ] **Upload overview:** aggregate coverage in SQL; scope conflict counts and source reads.
+  Overview currently loads productions, memberships and upload history into Python.
+  See [import status](backend/import_status.py).
+- [ ] **Duplicate discovery:** batch candidate reads instead of one session/search per record.
+  Keep limits and explicit identity confirmation. See [reconciliation](backend/reconciliation.py).
+- [ ] **Large public lists:** add SQL pagination/search for organization overview; fetch only
+  linked sources on organization pages. See [public views](frontend/views/).
+- [ ] **Crawler fetches:** checkpoint/cache reads use separate sessions per URL.
+  Measure connection overhead before combining; HTTP cache may survive failed runs.
+  See [crawl runner](backend/crawling/runner.py).
+- [ ] **Cross-tab drafts:** lazy review tabs clean up inactive widgets. Add explicit draft
+  persistence only if workflows need unsaved inputs across tabs; saved records unaffected.
+- [ ] **Deployment checks:** profile real PostgreSQL/network latency and run UI smoke checks
+  on exact Streamlit 1.66. Current local checks use installed 1.67; APIs verified against 1.66 docs.
+
 ## Stretch
 - [ ] Also have planned performances/ # number of performances
 - [ ] Plus show overview via which theatres have a config.
