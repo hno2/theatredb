@@ -41,13 +41,13 @@
   Keep limits and explicit identity confirmation. See [reconciliation](backend/reconciliation.py).
 - [x] **Large public lists:** add SQL pagination/search for organization overview; fetch only
   linked sources on organization pages. See [public views](frontend/views/).
-- [ ] **Crawler fetches:** checkpoint/cache reads use separate sessions per URL.
-  Measure connection overhead before combining; HTTP cache may survive failed runs.
-  See [crawl runner](backend/crawling/runner.py).
+- [x] **Crawler fetches:** measured on PostgreSQL 18.4. Combining checkpoint/cache reads
+  did not reduce median crawl time (1,215 ms separate vs. 1,324 ms combined over 61 URLs).
+  Retain separate sessions and independent HTTP-cache durability.
 - [ ] **Cross-tab drafts:** lazy review tabs clean up inactive widgets. Add explicit draft
   persistence only if workflows need unsaved inputs across tabs; saved records unaffected.
-- [ ] **Deployment checks:** profile real PostgreSQL/network latency and run UI smoke checks
-  on exact Streamlit 1.66. Current local checks use installed 1.67; APIs verified against 1.66 docs.
+- [/] **Deployment checks:** benchmarked local PostgreSQL 18.4 and smoke-tested installed
+  Streamlit 1.67. Production network latency remains unmeasured.
 
 ## Stretch
 - [ ] Also have planned performances/ # number of performances

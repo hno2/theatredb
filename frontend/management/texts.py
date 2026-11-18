@@ -179,8 +179,8 @@ def _walk_lineage(
                 endpoints, col(TextLineage.relation).in_(relations)
             )
         ).all()
-        for edge in rows:
-            edges[edge] = None
+        for source, derived, relation in rows:
+            edges[source, derived, LineageRelation(relation)] = None
         frontier = {item for source, derived, _ in rows for item in (source, derived)} - seen
         seen.update(frontier)
     return seen, list(edges)
