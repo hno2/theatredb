@@ -31,7 +31,7 @@
 - [x] **People matching:** publisher missing-credit paths still scan all people per name.
   Reuse one request-local lookup; keep ambiguity checks and source identity boundaries.
   See [publisher imports](backend/ingestion/publishers.py) and [text resolver](backend/texts.py).
-- [ ] **Bulk text writes:** batch display-title lookups and lineage checks across flushes.
+- [x] **Bulk text writes:** batch display-title lookups and scope lineage checks to affected paths.
   Preserve cycle validation, advisory locking and transaction visibility.
   See [model flush hooks](backend/models.py).
 - [ ] **Upload overview:** aggregate coverage in SQL; scope conflict counts and source reads.
