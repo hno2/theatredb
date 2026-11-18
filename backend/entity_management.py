@@ -8,6 +8,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstrumentedAttribute, Mapper, raiseload, selectinload
 from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Session, SQLModel, col, func, or_, select
+from sqlmodel.sql.expression import SelectOfScalar
 
 from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
@@ -124,16 +125,14 @@ def list_entities_where[ModelT: SQLModel](
         return list(session.exec(stmt).all())
 
 
-def entity_page[ModelT: SQLModel](
-    model_cls: type[ModelT], search: str, *, limit: int, offset: int, filters: Sequence[ColumnElement[bool]] = ()
-) -> tuple[list[ModelT], int]:
-    """Search and filter before pagination, with IDs as deterministic sort tie-breakers."""
+def _matching_entities[ModelT: SQLModel](
+    model_cls: type[ModelT], search: str, filters: Sequence[ColumnElement[bool]] = ()
+) -> SelectOfScalar[ModelT]:
     identifier = _resolve_order_by(model_cls, "id")
     label = _resolve_order_by(model_cls)
     if identifier is None or label is None:
         raise ValueError(f"{model_cls.__name__} cannot be listed")
     stmt = select(model_cls).where(*filters)
-    entity_id = None
     if search := search.strip():
         try:
             entity_id = UUID(search)
@@ -141,19 +140,33 @@ def entity_page[ModelT: SQLModel](
             fields = (
                 [label, col(Organization.city), col(Organization.country)] if model_cls is Organization else [label]
             )
-            filters = [field.icontains(search, autoescape=True) for field in fields]
+            conditions = [field.icontains(search, autoescape=True) for field in fields]
             if model_cls is Text:
-                filters.append(
+                conditions.append(
                     identifier.in_(
                         select(TextTitle.text_id).where(col(TextTitle.title).icontains(search, autoescape=True))
                     )
                 )
-            stmt = stmt.where(or_(*filters))
-    with get_session() as session:
-        if entity_id is not None:
+            stmt = stmt.where(or_(*conditions))
+        else:
             stmt = stmt.where(identifier == entity_id)
-        total = session.exec(select(func.count()).select_from(stmt.subquery())).one()
-        return list(session.exec(stmt.order_by(label, identifier).limit(limit).offset(offset)).all()), total
+    return stmt.order_by(label, identifier)
+
+
+def list_matching_entities[ModelT: SQLModel](model_cls: type[ModelT], search: str) -> list[ModelT]:
+    """Return all entities matching a directory search."""
+    with get_session() as session:
+        return list(session.exec(_matching_entities(model_cls, search)).all())
+
+
+def entity_page[ModelT: SQLModel](
+    model_cls: type[ModelT], search: str, *, limit: int, offset: int, filters: Sequence[ColumnElement[bool]] = ()
+) -> tuple[list[ModelT], int]:
+    """Search and filter before pagination, with IDs as deterministic sort tie-breakers."""
+    stmt = _matching_entities(model_cls, search, filters)
+    with get_session() as session:
+        total = session.exec(select(func.count()).select_from(stmt.order_by(None).subquery())).one()
+        return list(session.exec(stmt.limit(limit).offset(offset)).all()), total
 
 
 def entities_by_ids[ModelT: SQLModel](model_cls: type[ModelT], ids: set[UUID]) -> list[ModelT]:

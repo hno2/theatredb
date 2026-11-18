@@ -6,12 +6,10 @@ import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
-from backend.entity_management import count_entities_many, entity_page, organization_coverage
+from backend.entity_management import count_entities_many, list_matching_entities, organization_coverage
 from backend.models import Award, Organization, Person, Production, Source, Text
 from backend.reconciliation import stable_digest
 from frontend.views.helpers import has_coordinates
-
-PAGE_SIZE = 50
 
 
 def organization_data(organizations: list[Organization]) -> pd.DataFrame:
@@ -115,34 +113,26 @@ def render_overview() -> None:
         "Theater, Ort oder Land suchen",
         placeholder="Zum Beispiel: Burgtheater, Berlin oder Österreich",
     ).strip()
-    key = f"organization_directory_{stable_digest(search)}"
-    page = st.session_state.get(key, 1)
-    organizations, matches = entity_page(Organization, search, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
-    pages = max(1, (matches + PAGE_SIZE - 1) // PAGE_SIZE)
-    if page > pages:
-        st.session_state[key] = pages
-        st.rerun()
-    if pages > 1:
-        st.pagination(pages, key=key)
-    data = organization_data(organizations)
+    data = organization_data(list_matching_entities(Organization, search))
     visible = data.loc[list(starmap(has_coordinates, data[["lat", "lon"]].itertuples(index=False, name=None))), :]
 
     st.caption(
-        f"{matches} Treffer insgesamt · {len(visible)} von {len(data)} Einträgen dieser Seite auf der Karte. "
+        f"{len(data)} Treffer insgesamt · {len(visible)} davon auf der Karte. "
         "Punkt anklicken und über den Link das Theater öffnen."
     )
     if not visible.empty:
         event = st.pydeck_chart(
             theater_map(visible),
-            key=f"theater_map_{key}_{page}",
+            key=f"theater_map_{stable_digest(search)}",
             on_select="rerun",
             selection_mode="single-object",
             height=480,
+            alt="Standorte der gefundenen Theater und Organisationen",
         )
         selected = event["selection"].get("objects", {}).get("theaters", [])
         if selected:
             render_location_links(visible, selected[0]["id"])
-    elif not matches:
+    elif data.empty:
         st.info("Keine Theater gefunden. Versuche einen anderen Suchbegriff.")
     else:
         st.info("Für diese Treffer sind noch keine gültigen Koordinaten hinterlegt. Nutze das Verzeichnis unten.")

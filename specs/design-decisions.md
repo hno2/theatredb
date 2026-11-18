@@ -37,6 +37,8 @@ Short record of current design choices and constraints.
   before switching tabs; inactive widgets follow Streamlit cleanup.
 - Combine homepage metrics into one SQL statement. Keep counts live instead
   of adding cache invalidation.
+- Show all matching organizations on the homepage without pagination. Only
+  organizations with valid coordinates appear on the map.
 - Inherit text credits from ancestors in memory after one fetch. Do not scan
   all people to recover display spelling or treat same-name people as one.
 - Reuse validated publisher metadata and identity lookups when saving, while

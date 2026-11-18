@@ -68,15 +68,13 @@ def homepage(monkeypatch: pytest.MonkeyPatch) -> HomepageFixture:
         Organization(name="Ohne Position", city="Berlin", country="Deutschland"),
     ]
 
-    def page(_model, search, *, limit, offset):
-        matching = [
+    def matching_entities(_model, search):
+        return [
             item
             for item in organizations
             if any(search.casefold() in (value or "").casefold() for value in (item.name, item.city, item.country))
         ]
-        return matching[offset : offset + limit], len(matching)
-
-    monkeypatch.setattr(overview, "entity_page", page)
+    monkeypatch.setattr(overview, "list_matching_entities", matching_entities)
     monkeypatch.setattr(overview, "organization_coverage", lambda: (3, 2, 2, [("Berlin", "Deutschland", 2)]))
     monkeypatch.setattr(
         overview,
@@ -138,7 +136,7 @@ def test_selected_marker_has_internal_detail_link(homepage: HomepageFixture, mon
 
 
 def test_empty_homepage(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(overview, "entity_page", lambda *args, **kwargs: ([], 0))
+    monkeypatch.setattr(overview, "list_matching_entities", lambda *args: [])
     monkeypatch.setattr(overview, "organization_coverage", lambda: (0, 0, 0, []))
     monkeypatch.setattr(overview, "count_entities_many", lambda *models: dict.fromkeys(models, 0))
     app = AppTest.from_string(OVERVIEW_SCRIPT).run()
@@ -148,24 +146,33 @@ def test_empty_homepage(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any("Noch keine Theater erfasst" in message.value for message in app.info)
 
 
-def test_directory_search_finds_later_pages(monkeypatch, tmp_path) -> None:
+def test_homepage_map_and_directory_are_unpaginated(monkeypatch, tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'overview.db'}")
     SQLModel.metadata.create_all(engine)
     monkeypatch.setattr(user_management, "_get_engine", lambda: engine)
     with Session(engine) as session:
         session.add_all(
-            [Organization(name=f"Alpha {i:03}", city="Berlin") for i in range(60)]
-            + [Organization(name="Zeta", city="Wien [AT]")]
+            [Organization(name=f"Alpha {i:03}", city="Berlin", lat=52.5, lon=13.4) for i in range(60)]
+            + [
+                Organization(name="Ohne Position", city="Berlin"),
+                Organization(name="Zeta", city="Wien [AT]", lat=48.2, lon=16.4),
+            ]
         )
         session.commit()
     app = AppTest.from_string(OVERVIEW_SCRIPT).run()
     assert not app.exception
-    assert len(app.dataframe[0].value) == 50
-    assert app.metric[0].value == "61"
+    assert not app.pagination
+    names = list(app.dataframe[0].value["name"])
+    assert len(names) == 62
+    assert app.metric[0].value == "62"
     assert app.metric[1].value == "2"
+    layer = json.loads(app.get("deck_gl_json_chart")[0].proto.json)["layers"][0]
+    assert {row["name"] for row in layer["data"]} == set(names) - {"Ohne Position"}
     app.text_input[0].set_value("[at]").run()
     assert not app.exception
     assert list(app.dataframe[0].value["name"]) == ["Zeta"]
+    layer = json.loads(app.get("deck_gl_json_chart")[0].proto.json)["layers"][0]
+    assert [row["name"] for row in layer["data"]] == ["Zeta"]
     engine.dispose()
 
 
