@@ -9,6 +9,7 @@ from uuid import UUID
 import pandas as pd
 import streamlit as st
 from pydantic import ValidationError
+from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlmodel import SQLModel, col, select
@@ -27,7 +28,7 @@ from backend.entity_management import (
     list_entities_where,
     update_entity,
 )
-from backend.models import Person, Source, TextContribution
+from backend.models import Organization, Person, Production, Source, Text, TextContribution, TextLineage
 from backend.reconciliation import count_people_for_merge, search_people_for_merge, stable_digest
 from backend.user_management import get_session
 from frontend.management.filters import SqlFilter, render_filter_section
@@ -727,7 +728,7 @@ def _load_df(
     return df, matches
 
 
-def _page_authors(df: pd.DataFrame) -> list[str]:
+def _page_authors(df: pd.DataFrame) -> list[list[str]]:
     ids = [UUID(value) for value in df["id"]]
     with get_session() as session:
         credits = session.exec(
@@ -739,7 +740,32 @@ def _page_authors(df: pd.DataFrame) -> list[str]:
     for text_id, role, name in credits:
         if canonical_role(role) == "author":
             authors.setdefault(text_id, []).append(name)
-    return [", ".join(sorted(authors.get(text_id, []))) for text_id in ids]
+    return [sorted(authors.get(text_id, []), key=str.casefold) for text_id in ids]
+
+
+def _page_linked_texts(df: pd.DataFrame) -> list[list[str]]:
+    ids = {UUID(value) for value in df["id"]}
+    with get_session() as session:
+        edges = session.exec(
+            select(TextLineage.source_text_id, TextLineage.derived_text_id).where(
+                or_(col(TextLineage.source_text_id).in_(ids), col(TextLineage.derived_text_id).in_(ids))
+            )
+        ).all()
+    linked_ids: dict[UUID, set[UUID]] = {text_id: set() for text_id in ids}
+    for source_id, derived_id in edges:
+        if source_id in ids:
+            linked_ids[source_id].add(derived_id)
+        if derived_id in ids:
+            linked_ids[derived_id].add(source_id)
+    linked = entities_by_ids(Text, set().union(*linked_ids.values()))
+    titles = {_id_of(text): text.title for text in linked}
+    return [
+        sorted(
+            (titles[str(text_id)] for text_id in linked_ids[UUID(value)] if str(text_id) in titles),
+            key=str.casefold,
+        )
+        for value in df["id"]
+    ]
 
 
 INLINE_FIELDS = {"person": ("born", "died", "nationality"), "text": ("published", "languages")}
@@ -792,13 +818,23 @@ def _render_inline_table(
         "Auswahl",
         label,
         *(["Autoren"] if kind == "text" else []),
+        *(["linked_texts"] if kind == "text" else ["type"] if kind == "person" else []),
         *INLINE_FIELDS[kind],
-        *[column for column in view.columns if column not in {"Auswahl", label, "Autoren", *INLINE_FIELDS[kind]}],
+        *[
+            column
+            for column in view.columns
+            if column not in {"Auswahl", label, "Autoren", "linked_texts", "type", *INLINE_FIELDS[kind]}
+        ],
     ]
     config = {
         "Auswahl": st.column_config.CheckboxColumn("Auswahl", width="small"),
         label: st.column_config.TextColumn("Name" if kind == "person" else "Titel", width="medium"),
     }
+    if kind == "person":
+        config["type"] = st.column_config.ListColumn("Typ")
+    if kind == "text":
+        config["Autoren"] = st.column_config.ListColumn("Autor")
+        config["linked_texts"] = st.column_config.ListColumn("Verknüpfte Texte")
     dates = getattr(model_cls, "date_fields", ())
     for field in INLINE_FIELDS[kind]:
         config[field] = st.column_config.TextColumn(
@@ -829,6 +865,76 @@ def _render_inline_table(
     return [df.loc[entity_id].to_dict() for entity_id in selected]
 
 
+def _management_column_config(df: pd.DataFrame, model_cls: type[SQLModel]) -> dict:
+    labels = {
+        "name": "Name",
+        "premiere": "Premiere",
+        "organization": "Organisation",
+        "text": "Text",
+        "url": "Website",
+        "url_plays": "Spielplan",
+    }
+    config = {field: st.column_config.TextColumn(label) for field, label in labels.items() if field in df.columns}
+    if model_cls is Production:
+        config["organization"] = st.column_config.ListColumn("Organisation")
+        config["text"] = st.column_config.ListColumn("Text")
+
+    links = (
+        {"url": "Website", "url_plays": "Spielplan"}
+        if model_cls is Organization
+        else {"url": "Website"}
+        if model_cls is Production
+        else {"base_url": "Base URL"}
+        if model_cls is Source
+        else {}
+    )
+    for field, label in links.items():
+        if field not in df.columns:
+            continue
+        for value in df[field]:
+            if value and not web_url(value):
+                st.warning(f"{label}: Kein gültiger HTTP(S)-Link hinterlegt: {value}")
+        df[field] = df[field].map(web_url)
+        config[field] = st.column_config.LinkColumn(label)
+    return config
+
+
+def _management_column_order(df: pd.DataFrame, model_cls: type[SQLModel]) -> list[str] | None:
+    if model_cls is Organization:
+        columns = ["name", "url", "url_plays"]
+    elif model_cls is Production:
+        columns = ["name", "premiere", "organization", "text"]
+    else:
+        return None
+    return [*columns, *(column for column in df.columns if column not in columns)] if columns else None
+
+
+def _format_table_fields(df_view: pd.DataFrame, fields: list[_FieldUI]) -> None:
+    for field in fields:
+        if field.kind == "domain_date" and field.name in df_view.columns:
+            precision_field = f"{field.name}_precision"
+            df_view[field.name] = list(
+                map(_domain_date_input, df_view[field.name], df_view[precision_field], strict=True)
+            )
+            df_view.drop(columns=[precision_field], inplace=True, errors="ignore")
+    for field in fields:
+        if field.kind != "fk_select" or field.fk_model is None or field.name not in df_view.columns:
+            continue
+        entities = entities_by_ids(
+            field.fk_model, {UUID(str(value)) for value in df_view[field.name].dropna() if value}
+        )
+        lookup = (
+            field.fk_labels(entities)
+            if field.fk_labels
+            else {_id_of(entity): str(getattr(entity, field.fk_display, "")) for entity in entities}
+        )
+        display_col = field.name.removesuffix("_id")
+        df_view[display_col] = [
+            lookup.get(str(value), "") if pd.notna(value) and str(value) else "" for value in df_view[field.name]
+        ]
+        df_view.drop(columns=[field.name], inplace=True, errors="ignore")
+
+
 def _render_table(
     df: pd.DataFrame,
     fields: list[_FieldUI],
@@ -838,33 +944,18 @@ def _render_table(
     actor: str | None = None,
 ) -> list[dict]:
     df_view = df.drop(columns=["id"], errors="ignore").copy()
-    if merge_kind == "text" and "languages" in df_view:
-        df_view["languages"] = df_view["languages"].map(lambda values: ", ".join(values or []))
-    for f in fields:
-        if f.kind == "domain_date" and f.name in df_view.columns:
-            precision_field = f"{f.name}_precision"
-            df_view[f.name] = list(map(_domain_date_input, df_view[f.name], df_view[precision_field], strict=True))
-            df_view = df_view.drop(columns=[precision_field], errors="ignore")
-    for f in fields:
-        if f.kind != "fk_select" or f.fk_model is None or f.name not in df_view.columns:
-            continue
-        entities = entities_by_ids(f.fk_model, {UUID(str(v)) for v in df_view[f.name].dropna() if v})
-        lookup = (
-            f.fk_labels(entities) if f.fk_labels else {_id_of(e): str(getattr(e, f.fk_display, "")) for e in entities}
-        )
-        display_col = f.name.removesuffix("_id")
-        df_view[display_col] = [lookup.get(str(v), "") if pd.notna(v) and str(v) else "" for v in df_view[f.name]]
-        df_view = df_view.drop(columns=[f.name], errors="ignore")
+    if merge_kind == "text":
+        if "languages" in df_view:
+            df_view["languages"] = df_view["languages"].map(lambda values: ", ".join(values or []))
+        df_view["linked_texts"] = _page_linked_texts(df)
+    _format_table_fields(df_view, fields)
 
     if merge_kind:
         return _render_inline_table(df, df_view, model_cls, merge_kind, actor)
-    column_config = {}
-    if model_cls is Source and "base_url" in df_view.columns:
-        for value in df_view["base_url"]:
-            if value and not web_url(value):
-                st.warning(f"Base URL: Kein gültiger HTTP(S)-Link hinterlegt: {value}")
-        df_view["base_url"] = df_view["base_url"].map(web_url)
-        column_config["base_url"] = st.column_config.LinkColumn("Base URL")
+    if model_cls is Production:
+        for field in ("organization", "text"):
+            if field in df_view.columns:
+                df_view[field] = df_view[field].map(lambda value: [value] if value else [])
     key = f"table_{model_cls.__name__.lower()}_{stable_digest(df['id'].tolist())}"
     sel = st.dataframe(
         df_view,
@@ -872,7 +963,8 @@ def _render_table(
         key=key,
         on_select="rerun",
         selection_mode="single-row",
-        column_config=column_config,
+        column_order=_management_column_order(df_view, model_cls),
+        column_config=_management_column_config(df_view, model_cls),
     )
     sel_rows = sel.get("selection", {}).get("rows", [])
     return [df.iloc[index].to_dict() for index in sel_rows if 0 <= index < len(df)]

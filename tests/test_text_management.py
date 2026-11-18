@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,38 @@ def test_selected_text_shows_family_and_productions(db):
     assert any("Übersetzung" in item.value for item in app.text)
     assert any("Stage version" in item.value for item in app.caption)
     assert not any("Derived Texts" in item.value or "Source Texts" in item.value for item in app.subheader)
+
+
+def test_text_table_starts_with_author_and_linked_texts(db):
+    original = Text(title="Original", languages=["en"])
+    translation = Text(title="Übersetzung", languages=["de"])
+    author = Person(name="Autorin")
+    with Session(db) as session:
+        session.add_all([original, translation, author])
+        session.flush()
+        session.add_all(
+            [
+                TextLineage(
+                    source_text_id=original.id,
+                    derived_text_id=translation.id,
+                    relation=LineageRelation.TRANSLATION,
+                ),
+                TextContribution(text_id=original.id, person_id=author.id, role="author"),
+            ]
+        )
+        session.commit()
+
+    app = AppTest.from_file(str(TEXT_APP)).run()
+
+    assert not app.exception
+    table = app.dataframe[0]
+    assert list(table.proto.column_order[:4]) == ["Auswahl", "title", "Autoren", "linked_texts"]
+    row = table.value.loc[table.value["title"] == "Original"].iloc[0]
+    assert row["Autoren"] == ["Autorin"]
+    assert row["linked_texts"] == ["Übersetzung"]
+    config = json.loads(table.proto.columns)
+    assert config["Autoren"]["type_config"]["type"] == "list"
+    assert config["linked_texts"]["type_config"]["type"] == "list"
 
 
 def test_title_variant_editor_preserves_main_title(db):

@@ -13,6 +13,7 @@ from backend.models import Award, EntitySource, Organization, Person, Production
 from frontend.management.uifactory import _build_fields, _rename_existing_fk_if_changed
 
 PRODUCTION_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "productions.py"
+PERSON_APP = PRODUCTION_APP.with_name("persons.py")
 
 
 @pytest.fixture
@@ -68,10 +69,14 @@ def test_production_table_resolves_foreign_keys_to_names(db) -> None:
     table = app.dataframe[0].value
     assert "organization" in table.columns
     assert "text" in table.columns
-    assert "Example Theatre" in table["organization"].values
-    assert "Example Play" in table["text"].values
+    assert ["Example Theatre"] in table["organization"].values
+    assert ["Example Play"] in table["text"].values
     assert str(organization_id) not in str(table)
     assert str(text_id) not in str(table)
+    assert list(app.dataframe[0].proto.column_order[:4]) == ["name", "premiere", "organization", "text"]
+    config = json.loads(app.dataframe[0].proto.columns)
+    assert config["organization"]["type_config"]["type"] == "list"
+    assert config["text"]["type_config"]["type"] == "list"
 
 
 def test_search_covers_productions_beyond_first_page(db) -> None:
@@ -221,6 +226,37 @@ def test_source_management_links_only_valid_web_urls(db, url) -> None:
     else:
         assert table.value["base_url"].isna().all()
     assert len(app.warning) == int(bool(url and not url.startswith("https://")))
+
+
+def test_organization_table_starts_with_name_and_clickable_websites(db) -> None:
+    with Session(db) as session:
+        session.add(
+            Organization(name="Example Theatre", url="https://example.org", url_plays="https://example.org/plays")
+        )
+        session.commit()
+    app = AppTest.from_file(str(PRODUCTION_APP.with_name("organizations.py"))).run()
+
+    assert not app.exception
+    table = app.dataframe[0]
+    assert list(table.proto.column_order[:3]) == ["name", "url", "url_plays"]
+    config = json.loads(table.proto.columns)
+    assert config["url"]["type_config"]["type"] == "link"
+    assert config["url_plays"]["type_config"]["type"] == "link"
+    assert config["url"]["label"] == "Website"
+    assert config["url_plays"]["label"] == "Spielplan"
+
+
+def test_person_table_starts_with_name_type_and_life_dates(db) -> None:
+    with Session(db) as session:
+        session.add(Person(name="Example Person", type=["actor"]))
+        session.commit()
+    app = AppTest.from_file(str(PERSON_APP)).run()
+
+    assert not app.exception
+    table = app.dataframe[0]
+    assert list(table.proto.column_order[:5]) == ["Auswahl", "name", "type", "born", "died"]
+    assert table.value["type"].tolist() == [["actor"]]
+    assert json.loads(table.proto.columns)["type"]["type_config"]["type"] == "list"
 
 
 def test_cast_and_crew_editor_shows_person_name_without_ids(db) -> None:
