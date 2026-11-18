@@ -30,6 +30,7 @@ from backend.entity_management import (
 from backend.models import Person, Source, TextContribution
 from backend.reconciliation import count_people_for_merge, search_people_for_merge, stable_digest
 from backend.user_management import get_session
+from frontend.management.filters import SqlFilter, render_filter_section
 from frontend.management.merge import render_merge_action
 from frontend.views.organization import web_url
 
@@ -707,15 +708,18 @@ def _entity_to_row(e: SQLModel) -> dict:
 PAGE_SIZE = 50
 
 
-def _load_df(model_cls: type[SQLModel], search: str, page: int) -> tuple[pd.DataFrame, int]:
+def _load_df(
+    model_cls: type[SQLModel], search: str, page: int, filters: list[SqlFilter] | None = None
+) -> tuple[pd.DataFrame, int]:
     offset = (page - 1) * PAGE_SIZE
+    filters = filters or []
     if model_cls is Person:
-        matches = count_people_for_merge(search)
-        rows = search_people_for_merge(search, limit=PAGE_SIZE, offset=offset)
+        matches = count_people_for_merge(search, filters)
+        rows = search_people_for_merge(search, limit=PAGE_SIZE, offset=offset, filters=filters)
         for row in rows:
             row["Produktionen · Theater"] = "; ".join(row.pop("productions"))
     else:
-        entities, matches = entity_page(model_cls, search, limit=PAGE_SIZE, offset=offset)
+        entities, matches = entity_page(model_cls, search, limit=PAGE_SIZE, offset=offset, filters=filters)
         rows = [_entity_to_row(e) for e in entities]
     df = pd.DataFrame(rows)
     if not df.empty and "id" in df.columns:
@@ -962,18 +966,19 @@ def _render_item_count(model_cls: type[SQLModel], count: int) -> None:
     st.caption(f"{count} {label} insgesamt")
 
 
-def _render_crud_page(model_cls: type[SQLModel]) -> pd.DataFrame:
+def _render_crud_page(model_cls: type[SQLModel], fields: list[_FieldUI]) -> pd.DataFrame:
     kind = model_cls.__name__.lower()
     query = st.text_input("Alle Einträge durchsuchen", key=f"crud_search_{kind}").strip()
-    page_key = f"crud_page_{kind}_{stable_digest(query)}"
+    filters, filter_values = render_filter_section(model_cls, fields, key=kind)
+    page_key = f"crud_page_{kind}_{stable_digest([query, filter_values])}"
     page = st.session_state.get(page_key, 1)
-    df, matches = _load_df(model_cls, query, page)
+    df, matches = _load_df(model_cls, query, page, filters)
     pages = max(1, (matches + PAGE_SIZE - 1) // PAGE_SIZE)
     if page > pages:
         st.session_state[page_key] = pages
         st.rerun()
-    _render_item_count(model_cls, count_entities(model_cls) if query else matches)
-    if query:
+    _render_item_count(model_cls, count_entities(model_cls) if query or filters else matches)
+    if query or filters:
         st.caption(f"{matches} Treffer")
     if pages > 1:
         st.pagination(pages, key=page_key)
@@ -1023,7 +1028,7 @@ def render_sqlmodel_crud(
     fields = _build_fields(model_cls, field_overrides=field_overrides)
     actor = _actor_id()
     st.title(title or f"{model_cls.__name__}s Management")
-    df = _render_crud_page(model_cls)
+    df = _render_crud_page(model_cls, fields)
     if merge_kind == "text" and not df.empty:
         df["Autoren"] = _page_authors(df)
     selected = [] if df.empty else _render_table(df, fields, model_cls, merge_kind=merge_kind, actor=actor)

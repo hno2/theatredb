@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstrumentedAttribute, Mapper, raiseload, selectinload
+from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Session, SQLModel, col, func, or_, select
 
 from backend.reconciliation import resolve_id
@@ -123,14 +125,14 @@ def list_entities_where[ModelT: SQLModel](
 
 
 def entity_page[ModelT: SQLModel](
-    model_cls: type[ModelT], search: str, *, limit: int, offset: int
+    model_cls: type[ModelT], search: str, *, limit: int, offset: int, filters: Sequence[ColumnElement[bool]] = ()
 ) -> tuple[list[ModelT], int]:
-    """Search before pagination, with IDs as deterministic sort tie-breakers."""
+    """Search and filter before pagination, with IDs as deterministic sort tie-breakers."""
     identifier = _resolve_order_by(model_cls, "id")
     label = _resolve_order_by(model_cls)
     if identifier is None or label is None:
         raise ValueError(f"{model_cls.__name__} cannot be listed")
-    stmt = select(model_cls)
+    stmt = select(model_cls).where(*filters)
     entity_id = None
     if search := search.strip():
         try:

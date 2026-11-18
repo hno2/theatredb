@@ -1,5 +1,6 @@
 import json
 from collections.abc import Iterator
+from datetime import datetime as dt
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,44 @@ def test_search_covers_productions_beyond_first_page(db) -> None:
     assert not app.exception
     assert list(app.dataframe[0].value["name"]) == ["Zeta 100%"]
     assert app.caption[0].value == "61 Produktionen insgesamt"
+
+
+def test_filter_section_applies_sql_filters(db) -> None:
+    venue = Organization(name="Schauspielhaus")
+    with Session(db) as session:
+        session.add_all(
+            [
+                Production(name="Match", organization=venue, duration=90, tags=["Komödie"], premiere=dt(2020, 5, 1)),
+                Production(name="Other venue", organization=Organization(name="Oper"), duration=90, tags=["Komödie"]),
+                Production(name="Too long", organization=venue, duration=200, tags=["Komödie"]),
+                Production(name="Wrong tag", organization=venue, duration=90, tags=["Drama"]),
+            ]
+            + [Production(name=f"Filler {i:03}") for i in range(60)]
+        )
+        session.commit()
+
+    app = AppTest.from_file(str(PRODUCTION_APP)).run()
+    assert not app.exception
+    assert not app.expander[0].proto.expanded
+    app.text_input(key="filter_production_organization_id").set_value("schauspiel")
+    app.number_input(key="filter_production_duration_to").set_value(120)
+    app.text_input(key="filter_production_tags").set_value("komödie")
+    app.run()
+    assert not app.exception
+    assert list(app.dataframe[0].value["name"]) == ["Match"]
+    app.number_input(key="filter_production_premiere_from").set_value(2021).run()
+    assert "Keine Einträge gefunden." in [info.value for info in app.info]
+
+
+def test_person_filter_section_filters_json_types(db) -> None:
+    with Session(db) as session:
+        session.add_all([Person(name="Ada", type=["director"]), Person(name="Bea", type=["actor"])])
+        session.commit()
+
+    app = AppTest.from_file(str(PRODUCTION_APP.with_name("persons.py"))).run()
+    app.text_input(key="filter_person_type").set_value("direct").run()
+    assert not app.exception
+    assert list(app.dataframe[0].value["name"]) == ["Ada"]
 
 
 @pytest.mark.parametrize(
