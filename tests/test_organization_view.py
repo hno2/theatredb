@@ -70,7 +70,7 @@ def test_web_url(raw: str | None, expected: str | None) -> None:
 @pytest.fixture
 def profile(monkeypatch: pytest.MonkeyPatch) -> ProfileFixture:
     source = Source(name="Theaterarchiv")
-    monkeypatch.setattr(organization, "list_entities", lambda model: [source])
+    monkeypatch.setattr(organization, "entities_by_ids", lambda model, ids: [source] if source.id in ids else [])
     links = Mock()
     monkeypatch.setattr(organization, "entity_link", links)
     data = {

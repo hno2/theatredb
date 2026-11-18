@@ -39,7 +39,7 @@
   See [import status](backend/import_status.py).
 - [ ] **Duplicate discovery:** batch candidate reads instead of one session/search per record.
   Keep limits and explicit identity confirmation. See [reconciliation](backend/reconciliation.py).
-- [ ] **Large public lists:** add SQL pagination/search for organization overview; fetch only
+- [x] **Large public lists:** add SQL pagination/search for organization overview; fetch only
   linked sources on organization pages. See [public views](frontend/views/).
 - [ ] **Crawler fetches:** checkpoint/cache reads use separate sessions per URL.
   Measure connection overhead before combining; HTTP cache may survive failed runs.

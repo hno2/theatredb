@@ -176,6 +176,35 @@ def linked_sources(session: Session, kind: EntityType, entity_id: UUID) -> list[
     return [(link, name) for link, name in session.exec(stmt)]
 
 
+def organization_coverage() -> tuple[int, int, int, list[tuple[str, str, int]]]:
+    """Aggregate directory and map coverage without loading organization records."""
+    city = func.trim(func.coalesce(Organization.city, ""))
+    country = func.trim(func.coalesce(Organization.country, ""))
+    mapped = col(Organization.lat).between(-90, 90) & col(Organization.lon).between(-180, 180)
+    locations = (
+        select(city.label("city"), country.label("country"), func.count().label("entries"))
+        .select_from(Organization)
+        .where(func.length(city) > 0)
+        .group_by(city, country)
+        .subquery()
+    )
+    with get_session() as session:
+        total, positioned, places = session.exec(
+            select(
+                func.count(), func.count().filter(mapped), select(func.count()).select_from(locations).scalar_subquery()
+            ).select_from(Organization)
+        ).one()
+        top = [
+            (city_name, country_name, entries)
+            for city_name, country_name, entries in session.exec(
+                select(locations.c.city, locations.c.country, locations.c.entries)
+                .order_by(locations.c.entries.desc(), locations.c.city, locations.c.country)
+                .limit(5)
+            )
+        ]
+    return total, positioned, places, top
+
+
 def get_unique_field_values[ModelT: SQLModel](model_cls: type[ModelT], field_name: str) -> list[Any]:
     """Get a list of unique values for a specified field across all entities of the given type."""
     with get_session() as session:
