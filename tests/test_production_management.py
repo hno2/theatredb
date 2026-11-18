@@ -73,6 +73,20 @@ def test_production_table_resolves_foreign_keys_to_names(db) -> None:
     assert str(text_id) not in str(table)
 
 
+def test_search_covers_productions_beyond_first_page(db) -> None:
+    with Session(db) as session:
+        session.add_all([Production(name=f"Alpha {i:03}") for i in range(60)] + [Production(name="Zeta 100%")])
+        session.commit()
+
+    app = AppTest.from_file(str(PRODUCTION_APP)).run()
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 50
+    app.text_input(key="crud_search_production").set_value("100%").run()
+    assert not app.exception
+    assert list(app.dataframe[0].value["name"]) == ["Zeta 100%"]
+    assert app.caption[0].value == "61 Produktionen insgesamt"
+
+
 @pytest.mark.parametrize(
     ("model", "label"),
     [
