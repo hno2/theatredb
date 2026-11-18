@@ -42,7 +42,6 @@ from backend.reconciliation import (
     queue_duplicate,
     search_entities,
 )
-from backend.user_management import init_db
 from frontend.management.merge import format_value as _format
 from frontend.management.merge import styled as _styled
 from frontend.management.uifactory import _actor_id
@@ -758,7 +757,6 @@ IMPORT_TAB = "Theater-JSON hochladen"
 
 
 def _render_tabs() -> None:
-    init_db()
     labels = [
         f"Produktionskonflikte ({count_production_cases()})",
         IMPORT_TAB,

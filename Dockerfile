@@ -26,4 +26,4 @@ RUN mkdir -p /app/data/crawls && chown nonroot:nonroot /app/data/crawls
 
 ENV PATH="/app/.venv/bin:$PATH"
 USER nonroot
-CMD ["streamlit", "run", "frontend/app.py"]
+CMD ["sh", "-c", "python -m backend.db migrate && exec streamlit run frontend/app.py"]

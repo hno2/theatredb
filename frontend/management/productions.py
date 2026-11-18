@@ -1,12 +1,10 @@
 from backend.models import Organization, Person, Production, ProductionMembership, Text
-from backend.user_management import init_db
 from frontend.management.texts import text_labels
 from frontend.management.uifactory import render_sqlmodel_crud
 
 
 def main() -> None:
     """Render performance management page."""
-    init_db()
     render_sqlmodel_crud(
         model_cls=Production,
         field_overrides={

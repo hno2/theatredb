@@ -3,18 +3,6 @@ from types import SimpleNamespace
 import streamlit as st
 from streamlit.user_info import UserInfoProxy
 
-from backend.user_management import init_db
-
-
-@st.cache_resource
-def _initialize_database() -> None:
-    init_db()
-
-
-@st.cache_resource
-def _initialize_database() -> None:
-    init_db()
-
 
 def _get_effective_user() -> UserInfoProxy | SimpleNamespace:
     real_user = st.user
@@ -32,7 +20,6 @@ def _get_effective_user() -> UserInfoProxy | SimpleNamespace:
 
 
 st.set_page_config(page_title="TheaterDB", layout="wide")
-_initialize_database()
 
 user = _get_effective_user()
 st.sidebar.write(f"User: {user.name} ({user.email})")

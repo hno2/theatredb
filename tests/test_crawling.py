@@ -500,7 +500,7 @@ def postgres(monkeypatch, tmp_path: Path, request) -> Iterator[tuple[Engine, pro
             )
         )
         try:
-            SQLModel.metadata.create_all(engine)
+            user_management.migrate(engine)
             if getattr(request, "param", True):
                 with app.open():
                     app.schema_manager.apply_schema()

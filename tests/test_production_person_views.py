@@ -102,7 +102,7 @@ def credits(monkeypatch) -> tuple[dict, dict, dict, Mock]:
     fetch = Mock(return_value=[current, other, away])
     monkeypatch.setattr(production, "get_people_productions", fetch)
     monkeypatch.setattr(person, "get_people_productions", fetch)
-    monkeypatch.setattr(organization, "list_entities", lambda model: [])
+    monkeypatch.setattr(organization, "entities_by_ids", lambda model, ids: [])
     return current, other, away, fetch
 
 

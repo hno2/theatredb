@@ -1,7 +1,10 @@
 import datetime as dt
 import re
 import uuid
+from collections import defaultdict
 from enum import StrEnum
+from graphlib import CycleError, TopologicalSorter
+from itertools import batched
 from typing import Any, ClassVar, Protocol, cast
 
 from pydantic import model_validator
@@ -595,15 +598,21 @@ for _model in (Organization, Person, OrganizationMembership, Text, Production, A
 @event.listens_for(SASession, "before_flush")
 def _validate_text_changes(session: SASession, _context: object, _instances: object) -> None:
     changed = list(session.new) + list(session.dirty)
+    texts = []
+    lineage = []
     for row in changed:
         if isinstance(row, Text) and row not in session.deleted:
-            _sync_display_title(session, row)
+            texts.append(row)
         elif isinstance(row, TextTitle):
             _normalize_title_row(row)
         elif isinstance(row, TextContribution) and row.role == "source author":
             raise ValueError("Source authors must be credited on a based_on source text")
-    if any(isinstance(row, TextLineage) for row in changed):
-        _validate_lineage_graph(session, changed)
+        elif isinstance(row, TextLineage):
+            lineage.append(row)
+    if texts:
+        _sync_display_titles(session, texts)
+    if lineage:
+        _validate_lineage_graph(session, lineage)
 
 
 def _normalize_title_row(row: TextTitle) -> None:
@@ -619,25 +628,35 @@ def _normalize_title_row(row: TextTitle) -> None:
             raise ValueError("Title language must be a two-letter code")
 
 
-def _sync_display_title(session: SASession, row: Text) -> None:
+def _sync_display_titles(session: SASession, rows: list[Text]) -> None:
     from backend.reconciliation import normalize  # ruff: ignore[import-outside-top-level]
 
-    validated = Text.model_validate(row.model_dump())
-    row.languages = validated.languages
-    normalized = normalize(row.title)
-    titles = list(session.scalars(select(TextTitle).where(col(TextTitle.text_id) == row.id)))
-    titles += [title for title in session.new if isinstance(title, TextTitle) and title.text_id == row.id]
-    if not any(title.normalized == normalized or normalize(title.title) == normalized for title in titles):
-        language = next(iter(row.languages), None)
-        session.add(
-            TextTitle(
-                text=row,
-                text_id=row.id,
-                title=row.title,
-                language=language if language != "mul" else None,
-                normalized=normalized,
+    titles: dict[uuid.UUID, list[TextTitle]] = defaultdict(list)
+    for batch in batched({row.id for row in rows}, 500, strict=False):
+        for text_id, title in session.execute(
+            select(col(TextTitle.text_id), TextTitle).where(col(TextTitle.text_id).in_(batch))
+        ):
+            titles[text_id].append(title)
+    for title in session.new:
+        if isinstance(title, TextTitle):
+            parent = next(iter(sa_inspect(title).attrs.text.history.added), None)
+            titles[parent.id if parent is not None else title.text_id].append(title)
+
+    for row in rows:
+        validated = Text.model_validate(row.model_dump())
+        row.languages = validated.languages
+        normalized = normalize(row.title)
+        if not any(title.normalized == normalized or normalize(title.title) == normalized for title in titles[row.id]):
+            language = next(iter(row.languages), None)
+            session.add(
+                TextTitle(
+                    text=row,
+                    text_id=row.id,
+                    title=row.title,
+                    language=language if language != "mul" else None,
+                    normalized=normalized,
+                )
             )
-        )
 
 
 def _lineage_endpoints(row: TextLineage) -> tuple[uuid.UUID, uuid.UUID]:
@@ -651,52 +670,35 @@ def _lineage_endpoints(row: TextLineage) -> tuple[uuid.UUID, uuid.UUID]:
     return source_id, derived_id
 
 
-def _validate_lineage_graph(session: SASession, changed: list[object]) -> None:
+def _validate_lineage_graph(session: SASession, changed: list[TextLineage]) -> None:
     if session.get_bind().dialect.name == "postgresql":
         session.execute(
             text("SELECT pg_advisory_xact_lock(hashtext(current_database()), hashtext('theaterdb.textlineage'))")
         )
-    edges = {
-        row.id: (row.source_text_id, row.derived_text_id, row.relation)
-        for row in session.execute(
-            select(
-                col(TextLineage.id),
-                col(TextLineage.source_text_id),
-                col(TextLineage.derived_text_id),
-                col(TextLineage.relation),
-            )
-        )
-    }
-    for row in changed:
-        if isinstance(row, TextLineage):
-            row.relation = LineageRelation(row.relation)
-            source_id, derived_id = _lineage_endpoints(row)
-            edges[row.id] = (source_id, derived_id, row.relation)
-    deleted = {row.id for row in session.deleted if isinstance(row, TextLineage)}
+    replaced = {row.id for row in changed}
+    replaced.update(row.id for row in session.deleted if isinstance(row, TextLineage))
     children: dict[uuid.UUID, set[uuid.UUID]] = {}
-    for edge_id, (source_id, derived_id, _relation) in edges.items():
-        if edge_id in deleted:
-            continue
+    derived_ids = set()
+    for row in changed:
+        row.relation = LineageRelation(row.relation)
+        source_id, derived_id = _lineage_endpoints(row)
         if source_id == derived_id:
             raise ValueError("A text cannot derive from itself")
         children.setdefault(source_id, set()).add(derived_id)
-    _check_acyclic_texts(children)
+        derived_ids.add(derived_id)
 
-
-def _check_acyclic_texts(children: dict[uuid.UUID, set[uuid.UUID]]) -> None:
-    visited: set[uuid.UUID] = set()
-    visiting: set[uuid.UUID] = set()
-
-    def visit(text_id: uuid.UUID) -> None:
-        if text_id in visiting:
-            raise ValueError("Text lineage cycle")
-        if text_id in visited:
-            return
-        visiting.add(text_id)
-        for child in children.get(text_id, ()):
-            visit(child)
-        visiting.remove(text_id)
-        visited.add(text_id)
-
-    for text_id in children:
-        visit(text_id)
+    # Every new cycle uses a changed edge. Seed from all changed destinations
+    # to cover persisted path segments between changes, using the live transaction.
+    source = col(TextLineage.source_text_id)
+    edges = select(col(TextLineage.id), source, col(TextLineage.derived_text_id))
+    for batch in batched(derived_ids, 500, strict=False):
+        reachable = edges.where(source.in_(batch)).cte(recursive=True)
+        reachable = reachable.union(edges.join(reachable, source == reachable.c.derived_text_id))
+        for edge_id, source_id, derived_id in session.execute(select(reachable)):
+            if edge_id not in replaced:
+                children.setdefault(source_id, set()).add(derived_id)
+    try:
+        # Reversing all edges (successors as predecessors) preserves cycles.
+        TopologicalSorter(children).prepare()
+    except CycleError as error:
+        raise ValueError("Text lineage cycle") from error

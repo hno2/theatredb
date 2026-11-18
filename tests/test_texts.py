@@ -62,6 +62,31 @@ def test_unknown_and_multilingual_languages(session):
     assert session.exec(select(TextTitle)).one().language is None
 
 
+def test_display_title_batch_sees_pending_and_previously_flushed_titles(session):
+    rows = [Text(title=f"Work {i}") for i in range(10)]
+    session.add_all(rows)
+    session.add(TextTitle(text=rows[0], title="WORK 0!", language="EN"))
+    statements = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.startswith("SELECT") and "FROM texttitle" in statement:
+            statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        session.flush()
+        for row in rows:
+            row.title = row.title.upper() + "!"
+        session.flush()
+        assert len(statements) == 2  # One lookup per flush, not per text.
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    titles = session.exec(select(TextTitle)).all()
+    assert len(titles) == len(rows)
+    assert next(title for title in titles if title.text_id == rows[0].id).language == "en"
+
+
 def test_family_excludes_based_on_and_rejects_cycles(session):
     novel, musical, english, german = [Text(title=title) for title in ("Novel", "Musical", "English", "German")]
     session.add_all([novel, musical, english, german])
@@ -85,6 +110,50 @@ def test_orm_lineage_relationships_are_validated_before_flush(session):
     edge.source_text = child
     with pytest.raises(ValueError, match="itself"):
         session.flush()
+
+
+def test_lineage_batch_sees_paths_from_prior_flushes(session):
+    a, b, c, d = [Text(title=title) for title in ("A", "B", "C", "D")]
+    first = TextLineage(source_text=a, derived_text=b, relation="translation")
+    session.add_all([first, TextLineage(source_text=c, derived_text=d, relation="adaptation")])
+    session.flush()
+
+    # Neither pending edge alone closes the cycle. Rolling back the savepoint
+    # must leave earlier flushed edges visible and discard the failed changes.
+    savepoint = session.begin_nested()
+    session.add_all(
+        [
+            TextLineage(source_text=b, derived_text=c, relation="based_on"),
+            TextLineage(source_text=d, derived_text=a, relation="translation"),
+        ]
+    )
+    with pytest.raises(ValueError, match="cycle"):
+        session.flush()
+    savepoint.rollback()
+
+    session.delete(first)
+    session.add_all(
+        [
+            TextLineage(source_text=b, derived_text=c, relation="based_on"),
+            TextLineage(source_text=d, derived_text=a, relation="translation"),
+        ]
+    )
+    session.flush()
+    assert len(session.exec(select(TextLineage)).all()) == 3
+
+
+def test_lineage_batch_does_not_keep_rolled_back_edges(session):
+    first, second = Text(title="First"), Text(title="Second")
+    session.add_all([first, second])
+    session.flush()
+    savepoint = session.begin_nested()
+    session.add(TextLineage(source_text=first, derived_text=second, relation="adaptation"))
+    session.flush()
+    savepoint.rollback()
+
+    session.add(TextLineage(source_text=second, derived_text=first, relation="based_on"))
+    session.flush()
+    assert session.exec(select(TextLineage)).one().source_text_id == second.id
 
 
 def test_translation_resolver_matches_alias_and_translator_idempotently(session):

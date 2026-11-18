@@ -4,8 +4,10 @@ from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from sqlmodel import Session, SQLModel, create_engine
 from streamlit.testing.v1 import AppTest
 
+from backend import user_management
 from backend.models import Organization, Person, Production
 from frontend.views import overview
 
@@ -65,7 +67,17 @@ def homepage(monkeypatch: pytest.MonkeyPatch) -> HomepageFixture:
         Organization(name="Burgtheater", city="Wien", country="Österreich", lat=48.2, lon=16.4),
         Organization(name="Ohne Position", city="Berlin", country="Deutschland"),
     ]
-    monkeypatch.setattr(overview, "list_entities", lambda *args, **kwargs: organizations)
+
+    def page(_model, search, *, limit, offset):
+        matching = [
+            item
+            for item in organizations
+            if any(search.casefold() in (value or "").casefold() for value in (item.name, item.city, item.country))
+        ]
+        return matching[offset : offset + limit], len(matching)
+
+    monkeypatch.setattr(overview, "entity_page", page)
+    monkeypatch.setattr(overview, "organization_coverage", lambda: (3, 2, 2, [("Berlin", "Deutschland", 2)]))
     monkeypatch.setattr(
         overview,
         "count_entities_many",
@@ -126,13 +138,35 @@ def test_selected_marker_has_internal_detail_link(homepage: HomepageFixture, mon
 
 
 def test_empty_homepage(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(overview, "list_entities", lambda *args, **kwargs: [])
+    monkeypatch.setattr(overview, "entity_page", lambda *args, **kwargs: ([], 0))
+    monkeypatch.setattr(overview, "organization_coverage", lambda: (0, 0, 0, []))
     monkeypatch.setattr(overview, "count_entities_many", lambda *models: dict.fromkeys(models, 0))
     app = AppTest.from_string(OVERVIEW_SCRIPT).run()
     assert not app.exception
     assert all(metric.value == "0" for metric in app.metric)
     assert not app.dataframe
     assert any("Noch keine Theater erfasst" in message.value for message in app.info)
+
+
+def test_directory_search_finds_later_pages(monkeypatch, tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'overview.db'}")
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(user_management, "_get_engine", lambda: engine)
+    with Session(engine) as session:
+        session.add_all(
+            [Organization(name=f"Alpha {i:03}", city="Berlin") for i in range(60)]
+            + [Organization(name="Zeta", city="Wien [AT]")]
+        )
+        session.commit()
+    app = AppTest.from_string(OVERVIEW_SCRIPT).run()
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 50
+    assert app.metric[0].value == "61"
+    assert app.metric[1].value == "2"
+    app.text_input[0].set_value("[at]").run()
+    assert not app.exception
+    assert list(app.dataframe[0].value["name"]) == ["Zeta"]
+    engine.dispose()
 
 
 def test_shared_map_position_links_every_theater(homepage: HomepageFixture, monkeypatch: pytest.MonkeyPatch) -> None:

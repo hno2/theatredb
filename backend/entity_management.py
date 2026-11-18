@@ -19,8 +19,10 @@ from .models import (
     Person,
     Production,
     ProductionMembership,
+    Source,
     Text,
     TextContribution,
+    TextTitle,
 )
 
 ModelT = TypeVar("ModelT", bound=SQLModel)
@@ -118,6 +120,87 @@ def list_entities_where[ModelT: SQLModel](
         if order_expr is not None:
             stmt = stmt.order_by(order_expr)
         return list(session.exec(stmt).all())
+
+
+def entity_page[ModelT: SQLModel](
+    model_cls: type[ModelT], search: str, *, limit: int, offset: int
+) -> tuple[list[ModelT], int]:
+    """Search before pagination, with IDs as deterministic sort tie-breakers."""
+    identifier = _resolve_order_by(model_cls, "id")
+    label = _resolve_order_by(model_cls)
+    if identifier is None or label is None:
+        raise ValueError(f"{model_cls.__name__} cannot be listed")
+    stmt = select(model_cls)
+    entity_id = None
+    if search := search.strip():
+        try:
+            entity_id = UUID(search)
+        except ValueError:
+            fields = (
+                [label, col(Organization.city), col(Organization.country)] if model_cls is Organization else [label]
+            )
+            filters = [field.icontains(search, autoescape=True) for field in fields]
+            if model_cls is Text:
+                filters.append(
+                    identifier.in_(
+                        select(TextTitle.text_id).where(col(TextTitle.title).icontains(search, autoescape=True))
+                    )
+                )
+            stmt = stmt.where(or_(*filters))
+    with get_session() as session:
+        if entity_id is not None:
+            stmt = stmt.where(identifier == entity_id)
+        total = session.exec(select(func.count()).select_from(stmt.subquery())).one()
+        return list(session.exec(stmt.order_by(label, identifier).limit(limit).offset(offset)).all()), total
+
+
+def entities_by_ids[ModelT: SQLModel](model_cls: type[ModelT], ids: set[UUID]) -> list[ModelT]:
+    """Load only the rows referenced by the current page."""
+    identifier = _resolve_order_by(model_cls, "id")
+    if not ids or identifier is None:
+        return []
+    with get_session() as session:
+        return list(session.exec(select(model_cls).where(identifier.in_(ids))).all())
+
+
+def linked_sources(session: Session, kind: EntityType, entity_id: UUID) -> list[tuple[EntitySource, str | None]]:
+    """Load just the entity's source links and names using the entity-source index."""
+    stmt = (
+        select(EntitySource, Source.name)
+        .outerjoin(Source, col(EntitySource.source_id) == col(Source.id))
+        .where(EntitySource.entity_type == kind, EntitySource.entity_id == entity_id)
+        .order_by(col(EntitySource.sourced_at))
+    )
+    return [(link, name) for link, name in session.exec(stmt)]
+
+
+def organization_coverage() -> tuple[int, int, int, list[tuple[str, str, int]]]:
+    """Aggregate directory and map coverage without loading organization records."""
+    city = func.trim(func.coalesce(Organization.city, ""))
+    country = func.trim(func.coalesce(Organization.country, ""))
+    mapped = col(Organization.lat).between(-90, 90) & col(Organization.lon).between(-180, 180)
+    locations = (
+        select(city.label("city"), country.label("country"), func.count().label("entries"))
+        .select_from(Organization)
+        .where(func.length(city) > 0)
+        .group_by(city, country)
+        .subquery()
+    )
+    with get_session() as session:
+        total, positioned, places = session.exec(
+            select(
+                func.count(), func.count().filter(mapped), select(func.count()).select_from(locations).scalar_subquery()
+            ).select_from(Organization)
+        ).one()
+        top = [
+            (city_name, country_name, entries)
+            for city_name, country_name, entries in session.exec(
+                select(locations.c.city, locations.c.country, locations.c.entries)
+                .order_by(locations.c.entries.desc(), locations.c.city, locations.c.country)
+                .limit(5)
+            )
+        ]
+    return total, positioned, places, top
 
 
 def get_unique_field_values[ModelT: SQLModel](model_cls: type[ModelT], field_name: str) -> list[Any]:

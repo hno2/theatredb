@@ -11,14 +11,25 @@ import streamlit as st
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import InstrumentedAttribute
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, col, select
 from streamlit import session_state, user
 
 from backend.config import ENTITY_LABELS, FORM_FIELD_KINDS, canonical_role
 from backend.date_precision import DatePrecision, iso_date, parse_date
-from backend.entity_management import create_entity, delete_entity, list_entities, list_entities_where, update_entity
-from backend.models import EntitySource, Person, Source, TextContribution
-from backend.reconciliation import search_people_for_merge, stable_digest
+from backend.entity_management import (
+    count_entities,
+    create_entity,
+    delete_entity,
+    entities_by_ids,
+    entity_page,
+    linked_sources,
+    list_entities,
+    list_entities_where,
+    update_entity,
+)
+from backend.models import Person, Source, TextContribution
+from backend.reconciliation import count_people_for_merge, search_people_for_merge, stable_digest
+from backend.user_management import get_session
 from frontend.management.merge import render_merge_action
 from frontend.views.organization import web_url
 
@@ -416,19 +427,19 @@ def _render_member_rows(
     actor: str | None,
 ) -> None:
     header_cols = st.columns([*[3] * len(fields), 1])
-    for col, f in zip(header_cols[:-1], fields, strict=False):
-        col.markdown(f"**{f.label}**")
+    for column, f in zip(header_cols[:-1], fields, strict=False):
+        column.markdown(f"**{f.label}**")
     for member in members:
         m_dict = member.model_dump(mode="python")
         m_id = str(m_dict["id"])
         row_cols = st.columns([*[3] * len(fields), 1])
-        for col, f in zip(row_cols[:-1], fields, strict=False):
+        for column, f in zip(row_cols[:-1], fields, strict=False):
             val = m_dict.get(f.name)
             if f.kind == "domain_date" and val is not None:
                 val = _domain_date_input(val, m_dict.get(f"{f.name}_precision"))
             if f.kind == "fk_select" and f.name in fk_lookups:
                 val = fk_lookups[f.name].get(str(val) if val is not None else "", str(val) or "—")
-            col.write(str(val) if val is not None else "—")
+            column.write(str(val) if val is not None else "—")
         if row_cols[-1].button("✕", key=f"del_{child_name}_{m_id}", help="Remove"):
             delete_entity(child_model, entity_id=m_id, actor_id=actor)
             st.rerun()
@@ -693,17 +704,38 @@ def _entity_to_row(e: SQLModel) -> dict:
     return row
 
 
-def _load_df(model_cls: type[SQLModel]) -> pd.DataFrame:
+PAGE_SIZE = 50
+
+
+def _load_df(model_cls: type[SQLModel], search: str, page: int) -> tuple[pd.DataFrame, int]:
+    offset = (page - 1) * PAGE_SIZE
     if model_cls is Person:
-        rows = search_people_for_merge(limit=None)
+        matches = count_people_for_merge(search)
+        rows = search_people_for_merge(search, limit=PAGE_SIZE, offset=offset)
         for row in rows:
             row["Produktionen · Theater"] = "; ".join(row.pop("productions"))
     else:
-        rows = [_entity_to_row(e) for e in list_entities(model_cls, order_by=None)]
+        entities, matches = entity_page(model_cls, search, limit=PAGE_SIZE, offset=offset)
+        rows = [_entity_to_row(e) for e in entities]
     df = pd.DataFrame(rows)
     if not df.empty and "id" in df.columns:
         df = df.set_index("id", drop=False)
-    return df
+    return df, matches
+
+
+def _page_authors(df: pd.DataFrame) -> list[str]:
+    ids = [UUID(value) for value in df["id"]]
+    with get_session() as session:
+        credits = session.exec(
+            select(TextContribution.text_id, TextContribution.role, Person.name)
+            .join(Person, col(Person.id) == col(TextContribution.person_id))
+            .where(col(TextContribution.text_id).in_(ids))
+        ).all()
+    authors: dict[UUID, list[str]] = {}
+    for text_id, role, name in credits:
+        if canonical_role(role) == "author":
+            authors.setdefault(text_id, []).append(name)
+    return [", ".join(sorted(authors.get(text_id, []))) for text_id in ids]
 
 
 INLINE_FIELDS = {"person": ("born", "died", "nationality"), "text": ("published", "languages")}
@@ -812,7 +844,7 @@ def _render_table(
     for f in fields:
         if f.kind != "fk_select" or f.fk_model is None or f.name not in df_view.columns:
             continue
-        entities = list_entities(f.fk_model, order_by=_order_expr(f.fk_model, f.fk_display))
+        entities = entities_by_ids(f.fk_model, {UUID(str(v)) for v in df_view[f.name].dropna() if v})
         lookup = (
             f.fk_labels(entities) if f.fk_labels else {_id_of(e): str(getattr(e, f.fk_display, "")) for e in entities}
         )
@@ -829,7 +861,7 @@ def _render_table(
                 st.warning(f"Base URL: Kein gültiger HTTP(S)-Link hinterlegt: {value}")
         df_view["base_url"] = df_view["base_url"].map(web_url)
         column_config["base_url"] = st.column_config.LinkColumn("Base URL")
-    key = f"table_{model_cls.__name__.lower()}"
+    key = f"table_{model_cls.__name__.lower()}_{stable_digest(df['id'].tolist())}"
     sel = st.dataframe(
         df_view,
         hide_index=True,
@@ -894,28 +926,21 @@ def _render_sources_for_selected(model_cls: type[SQLModel], sel_row: dict) -> No
     if not entity_id or entity_type is None:
         return
 
-    source_name_by_id = {
-        str(s.model_dump(mode="python").get("id")): str(getattr(s, "name", "")) for s in list_entities(Source)
-    }
+    with get_session() as session:
+        links = linked_sources(session, entity_type, UUID(entity_id))
     source_rows = []
-    for es in list_entities(EntitySource, order_by="sourced_at"):
-        data = es.model_dump(mode="python")
-        if str(data.get("entity_id")) != entity_id:
-            continue
-        if str(data.get("entity_type")) != str(entity_type):
-            continue
-        source_id = str(data.get("source_id") or "")
-        external_url = data.get("external_url")
+    for es, name in links:
+        external_url = es.external_url
         if external_url and not web_url(external_url):
             st.warning(f"Quelle: Kein gültiger HTTP(S)-Link hinterlegt: {external_url}")
         source_rows.append(
             {
-                "source": source_name_by_id.get(source_id, source_id),
+                "source": str(es.source_id) if name is None else name,
                 "external_url": web_url(external_url),
-                "external_id": data.get("external_id"),
-                "title": data.get("title"),
-                "sourced_at": data.get("sourced_at"),
-                "reviewed": data.get("reviewed"),
+                "external_id": es.external_id,
+                "title": es.title,
+                "sourced_at": es.sourced_at,
+                "reviewed": es.reviewed,
             }
         )
 
@@ -935,6 +960,36 @@ def _render_item_count(model_cls: type[SQLModel], count: int) -> None:
     label = ENTITY_LABELS.get(entity_type.value) if entity_type is not None else None
     label = label or ("Quellen" if model_cls is Source else f"{model_cls.__name__}s")
     st.caption(f"{count} {label} insgesamt")
+
+
+def _render_crud_page(model_cls: type[SQLModel]) -> pd.DataFrame:
+    kind = model_cls.__name__.lower()
+    query = st.text_input("Alle Einträge durchsuchen", key=f"crud_search_{kind}").strip()
+    page_key = f"crud_page_{kind}_{stable_digest(query)}"
+    page = st.session_state.get(page_key, 1)
+    df, matches = _load_df(model_cls, query, page)
+    pages = max(1, (matches + PAGE_SIZE - 1) // PAGE_SIZE)
+    if page > pages:
+        st.session_state[page_key] = pages
+        st.rerun()
+    _render_item_count(model_cls, count_entities(model_cls) if query else matches)
+    if query:
+        st.caption(f"{matches} Treffer")
+    if pages > 1:
+        st.pagination(pages, key=page_key)
+    if df.empty:
+        st.info("Keine Einträge gefunden.")
+    return df
+
+
+def _render_add_controls(model_cls: type[SQLModel], fields: list[_FieldUI], actor: str | None) -> None:
+    if not any(field.fk_model for field in fields):
+        _render_add_form(model_cls, fields, actor)
+        return
+    add = st.expander("Eintrag hinzufügen", key=f"crud_add_{model_cls.__name__.lower()}", on_change="rerun")
+    if add.open:
+        with add:
+            _render_add_form(model_cls, fields, actor)
 
 
 def render_sqlmodel_crud(
@@ -967,20 +1022,15 @@ def render_sqlmodel_crud(
     """
     fields = _build_fields(model_cls, field_overrides=field_overrides)
     actor = _actor_id()
-    df = _load_df(model_cls)
-    if merge_kind == "text" and not df.empty:
-        names = {str(p.id): p.name for p in list_entities(Person)}
-        authors: dict[str, list[str]] = {}
-        for c in list_entities(TextContribution):
-            if canonical_role(c.role) == "author" and str(c.person_id) in names:
-                authors.setdefault(str(c.text_id), []).append(names[str(c.person_id)])
-        df["Autoren"] = df["id"].map(lambda i: ", ".join(sorted(authors.get(i, []))))
     st.title(title or f"{model_cls.__name__}s Management")
-    _render_item_count(model_cls, len(df))
-    selected = _render_table(df, fields, model_cls, merge_kind=merge_kind, actor=actor)
+    df = _render_crud_page(model_cls)
+    if merge_kind == "text" and not df.empty:
+        df["Autoren"] = _page_authors(df)
+    selected = [] if df.empty else _render_table(df, fields, model_cls, merge_kind=merge_kind, actor=actor)
     if merge_kind:
         st.caption(
-            "Auswahl anklicken zum Bearbeiten oder Zusammenführen. Einfache Felder werden direkt gespeichert; "
+            "Einträge auf dieser Seite zum Bearbeiten oder Zusammenführen auswählen. "
+            "Für seitenübergreifende Duplikate den Datenabgleich verwenden. Einfache Felder werden direkt gespeichert; "
             "Datumsangaben als YYYY, YYYY-MM oder YYYY-MM-DD. Ohne Feldkonflikte wird sofort zusammengeführt."
         )
         render_merge_action(merge_kind, selected, actor)
@@ -994,6 +1044,6 @@ def render_sqlmodel_crud(
             _render_inline_relations(str(sel_row.get("id")), inline_relations, actor)
     elif not selected:
         st.caption(f"Select row to edit {model_cls.__name__}.")
-        _render_add_form(model_cls, fields, actor)
+        _render_add_controls(model_cls, fields, actor)
     else:
         st.caption(f"{len(selected)} Datensätze für die Zusammenführung ausgewählt.")

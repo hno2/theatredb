@@ -13,6 +13,7 @@ from backend.import_status import scrape_overview, theatre_status
 from backend.ingestion.staged_to_db import import_staged_productions
 from backend.models import (
     EntitySource,
+    EntityType,
     ImportRun,
     Organization,
     Person,
@@ -25,6 +26,7 @@ from backend.models import (
     TextContribution,
 )
 from backend.production_import import (
+    OPERATION,
     TITLE_THRESHOLD,
     ingest_records,
     list_production_cases,
@@ -634,6 +636,91 @@ def test_overview_counts_theatres_with_recent_uploads(db, theatre) -> None:
     overview = scrape_overview(recent_days=90, now=CAPTURE + dt.timedelta(days=5))
     assert (overview["theatres"], overview["uploaded"], overview["recent"]) == (3, 2, 1)
     assert [row["theatre"] for row in overview["rows"]] == ["Altes Theater", "Staatstheater"]
+
+
+def test_overview_uses_latest_data_date_without_loading_history(db, theatre) -> None:
+    old, new = save(db, Source(name="Previous source"), Source(name="Current source"))
+    save(
+        db,
+        ImportRun(organization_id=theatre.id, source_id=old.id, imported_at=CAPTURE, website="previous.example"),
+        ImportRun(
+            organization_id=theatre.id,
+            source_id=new.id,
+            imported_at=CAPTURE + dt.timedelta(days=1),
+            website="current.example",
+        ),
+        ImportRun(
+            organization_id=theatre.id,
+            source_id=old.id,
+            imported_at=CAPTURE + dt.timedelta(days=2),
+            captured_at=CAPTURE - dt.timedelta(days=1),
+            website="archive.theapolis.de",
+        ),
+    )
+    now = CAPTURE + dt.timedelta(days=91)
+    overview = scrape_overview(now=now)
+    detail = theatre_status(theatre.id, now=now)
+    assert (overview["theatres"], overview["uploaded"], overview["recent"]) == (1, 1, 1)
+    (row,) = overview["rows"]
+    assert row == {key: value for key, value in detail.items() if key != "runs"}
+    assert row["latest"]["source"] == "Current source"
+    assert not row["latest"]["captured_known"]
+    assert row["own_hosts"] == ["current.example", "previous.example"]
+    assert row["productions"] == row["scraped"] == row["own_website"] == 0
+    assert [run["source"] for run in detail["runs"]] == ["Previous source", "Current source", "Previous source"]
+
+
+def test_status_counts_distinct_productions_and_scoped_pending_conflicts(db, theatre) -> None:
+    source, person, other = save(db, Source(name="Uploads"), Person(name="Player"), Organization(name="Other"))
+    production, linked = save(
+        db,
+        Production(name="One", organization_id=theatre.id, description="\t\u2003\n"),
+        Production(name="Two", organization_id=theatre.id, description=" Details "),
+    )
+    save(
+        db,
+        ImportRun(organization_id=theatre.id, source_id=source.id, website="example.org"),
+        *(
+            SourceRecord(
+                source_id=source.id,
+                entity_type=EntityType.PRODUCTION,
+                entity_id=production.id,
+                record_key=key,
+                external_url="https://someone@WWW.Example.org:443/show",
+            )
+            for key in ("first", "second")
+        ),
+        EntitySource(
+            source_id=source.id,
+            entity_type=EntityType.PRODUCTION,
+            entity_id=linked.id,
+            external_url="//example.org/other",
+        ),
+        *(
+            ProductionMembership(production_id=production.id, person_id=person.id, role=role)
+            for role in ("\tREGIE\u2003", "director", "actor", "ACTOR")
+        ),
+        *(
+            ReconciliationCase(
+                key=key,
+                entity_type=EntityType.PRODUCTION,
+                operation=operation,
+                status=status,
+                context=context,
+                reason="Conflict",
+            )
+            for key, operation, status, context in (
+                ("scoped", OPERATION, "pending", {"organization_id": str(theatre.id)}),
+                ("other", OPERATION, "pending", {"organization_id": str(other.id)}),
+                ("approved", OPERATION, "approved", {"organization_id": str(theatre.id)}),
+                ("other-operation", "different", "pending", {"organization_id": str(theatre.id)}),
+                ("missing-context", OPERATION, "pending", {}),
+            )
+        ),
+    )
+    (row,) = scrape_overview()["rows"]
+    assert (row["productions"], row["scraped"], row["own_website"], row["open_conflicts"]) == (2, 1, 2, 1)
+    assert row["fields"] == {"description": 1, "premiere": 0, "director": 1, "cast": 1, "text": 0}
 
 
 def test_upload_tab_shows_theatre_status_and_overview(db, theatre) -> None:

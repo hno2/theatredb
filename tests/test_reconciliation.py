@@ -370,6 +370,31 @@ def test_search_manual_pair_with_different_names_and_discovery(db) -> None:
     assert case.status == "pending"
 
 
+def test_duplicate_discovery_batches_candidates_and_keeps_review_confirmation(db) -> None:
+    organization, director = save(db, Organization(name="Shared theatre"), Person(name="Shared director"))
+    records = save(db, *(Production(name="Shared production", organization_id=organization.id) for _ in range(5)))
+    save(
+        db,
+        *(ProductionMembership(production_id=record.id, person_id=director.id, role="director") for record in records),
+    )
+
+    statements = []
+
+    def count_statement(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    event.listen(db, "before_cursor_execute", count_statement)
+    try:
+        pairs = discover_duplicates("production", limit=5)
+    finally:
+        event.remove(db, "before_cursor_execute", count_statement)
+
+    assert len(pairs) == 5
+    assert all(pair["right"]["recommendation"] == "strong" for pair in pairs)
+    assert len(statements) <= 10
+    assert count(db, ReconciliationCase) == 0
+
+
 def test_invalid_payloads_do_not_create_records(db, source) -> None:
     with pytest.raises(ValueError, match="protected"):
         propose_record("person", {"name": "Person", "id": str(uuid.uuid4())}, source_id=source.id, external_id="1")
@@ -931,8 +956,8 @@ def test_people_management_loads_once_and_shows_total(db, people_count) -> None:
         event.remove(db, "before_cursor_execute", record_statement)
     assert not app.exception
     assert app.caption[0].value == f"{people_count} Personen insgesamt"
-    # One types query, one people query, and (for nonempty pages) one credits query.
-    assert len(statements) == (3 if people else 2)
+    # One types query, one count, one people page and (for nonempty pages) one credits query.
+    assert len(statements) == (4 if people else 3)
     if people:
         assert app.dataframe[0].value["Produktionen · Theater"].tolist() == [
             "Hamlet · Theater nicht hinterlegt",

@@ -1,8 +1,10 @@
 from collections import Counter
+from collections.abc import Iterable
 from uuid import UUID
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy import or_
 from sqlmodel import Session, col, select
 
 from backend.ai import parse_credits, propose_text_lineage, suggest_titles
@@ -20,50 +22,62 @@ from backend.models import (
 )
 from backend.reconciliation import decide_case, ensure_credit, normalize
 from backend.texts import (
+    FAMILY_RELATIONS,
+    _inherited_names,  # ruff: ignore[import-private-name]
     add_lineage,
     add_title,
-    credit_line,
     family_roots,
     family_roots_many,
     resolve_staged_text,
     resolve_text_case,
-    work_family,
 )
-from backend.user_management import get_session, init_db
+from backend.user_management import get_session
 from backend.wikidata import create_text_stub, enrich_text, search_texts
 from frontend.management.uifactory import _actor_id, render_sqlmodel_crud
+
+LABEL_ROLES = ("author", "translator", "adapter")
+CREDIT_ROLES = ("composer", "author", "lyricist", "translator", "adapter")
+LineageEdge = tuple[UUID, UUID, LineageRelation]
+
+
+def _contributions(session: Session, ids: set[UUID], roles: tuple[str, ...]) -> Iterable[tuple[UUID, str | None, str]]:
+    return session.exec(
+        select(TextContribution.text_id, TextContribution.role, Person.name)
+        .join(Person, col(Person.id) == col(TextContribution.person_id))
+        .where(col(TextContribution.text_id).in_(ids), col(TextContribution.role).in_(roles))
+        .order_by(Person.name)
+    ).all()
+
+
+def _format_labels(
+    texts: list[Text], roots_by_text: dict[UUID, list[Text]], credits: Iterable[tuple[UUID, str | None, str]]
+) -> dict[str, str]:
+    contributions: dict[UUID, list[str]] = {}
+    for text_id, role, name in credits:
+        if role is None:
+            raise ValueError("Text picker contribution has no role")
+        if role in LABEL_ROLES:
+            contributions.setdefault(text_id, []).append(f"{ROLE_LABELS[role]}: {name}")
+    labels = {}
+    for text in texts:
+        details = [", ".join(text.languages), ", ".join(contributions.get(text.id, []))]
+        roots_label = ", ".join(
+            root.title for root in roots_by_text[text.id] if root.id != text.id and root.title != text.title
+        )
+        if roots_label:
+            details.insert(0, f"Werk: {roots_label}")
+        labels[str(text.id)] = text.title + (" — " + "; ".join(d for d in details if d) if any(details) else "")
+    counts = Counter(labels.values())
+    return {key: f"{label} [{key[:8]}]" if counts[label] > 1 else label for key, label in labels.items()}
 
 
 def text_labels(texts: list[Text]) -> dict[str, str]:
     """Make text choices distinguishable without exposing raw foreign keys."""
     if not texts:
         return {}
+    ids = {text.id for text in texts}
     with get_session() as session:
-        roots_by_text = family_roots_many(session, [text.id for text in texts])
-        contributions: dict[UUID, list[str]] = {}
-        credits = session.exec(
-            select(TextContribution.text_id, TextContribution.role, Person.name)
-            .join(Person, col(Person.id) == col(TextContribution.person_id))
-            .where(
-                col(TextContribution.text_id).in_([text.id for text in texts]),
-                col(TextContribution.role).in_(["author", "translator", "adapter"]),
-            )
-            .order_by(Person.name)
-        ).all()
-        for text_id, role, name in credits:
-            if role is None:
-                raise ValueError("Text picker contribution has no role")
-            contributions.setdefault(text_id, []).append(f"{ROLE_LABELS[role]}: {name}")
-        labels = {}
-        for text in texts:
-            details = [", ".join(text.languages), ", ".join(contributions.get(text.id, []))]
-            roots = roots_by_text[text.id]
-            roots_label = ", ".join(root.title for root in roots if root.id != text.id and root.title != text.title)
-            if roots_label:
-                details.insert(0, f"Werk: {roots_label}")
-            labels[str(text.id)] = text.title + (" — " + "; ".join(d for d in details if d) if any(details) else "")
-        counts = Counter(labels.values())
-        return {key: f"{label} [{key[:8]}]" if counts[label] > 1 else label for key, label in labels.items()}
+        return _format_labels(texts, family_roots_many(session, ids), _contributions(session, ids, LABEL_ROLES))
 
 
 def _titles(session: Session, text: Text) -> None:  # ruff: ignore[complex-structure]
@@ -135,8 +149,8 @@ def _titles(session: Session, text: Text) -> None:  # ruff: ignore[complex-struc
                 st.error(str(exc))
 
 
-def _enrich(session: Session, text: Text) -> None:
-    if text.id not in {root.id for root in family_roots(session, text.id)}:
+def _enrich(session: Session, text: Text, is_root: bool) -> None:
+    if not is_root:
         st.caption("Wikidata-Anreicherung ist am Ursprung der Werkfamilie verfügbar.")
         return
     if st.button("Verknüpftes Wikidata-Werk anreichern", key=f"enrich_{text.id}"):
@@ -150,72 +164,158 @@ def _enrich(session: Session, text: Text) -> None:
             st.error(f"Anreicherung fehlgeschlagen: {exc}")
 
 
-def _family(session: Session, text: Text) -> None:  # ruff: ignore[complex-structure]
-    members = work_family(session, text.id)
-    all_texts = {t.id: t for t in session.exec(select(Text)).all()}
-    edges = session.exec(select(TextLineage)).all()
-    member_ids = {t.id for t in members}
-    labels = text_labels(list(all_texts.values()))
-    st.subheader("Werkfamilie")
-    st.write(credit_line(session, text.id))
-    ancestors, frontier = set(), set(member_ids)
+def _walk_lineage(
+    session: Session, seeds: set[UUID], relations: Iterable[LineageRelation], *, reverse: bool | None
+) -> tuple[set[UUID], list[LineageEdge]]:
+    """Fetch one frontier at a time; None follows edges in both directions."""
+    seen, frontier = set(seeds), seeds
+    edges: dict[LineageEdge, None] = {}
     while frontier:
-        parents = {
-            edge.source_text_id
-            for edge in edges
-            if edge.relation == LineageRelation.BASED_ON
-            and edge.derived_text_id in frontier
-            and edge.source_text_id not in ancestors
-            and edge.source_text_id not in member_ids
-        }
-        ancestors.update(parents)
-        frontier = parents
+        outgoing = col(TextLineage.source_text_id).in_(frontier)
+        incoming = col(TextLineage.derived_text_id).in_(frontier)
+        endpoints = outgoing if reverse is False else incoming if reverse is True else or_(outgoing, incoming)
+        rows = session.exec(
+            select(TextLineage.source_text_id, TextLineage.derived_text_id, TextLineage.relation).where(
+                endpoints, col(TextLineage.relation).in_(relations)
+            )
+        ).all()
+        for source, derived, relation in rows:
+            edges[source, derived, LineageRelation(relation)] = None
+        frontier = {item for source, derived, _ in rows for item in (source, derived)} - seen
+        seen.update(frontier)
+    return seen, list(edges)
+
+
+def _roots_by_text(texts: dict[UUID, Text], edges: list[LineageEdge]) -> dict[UUID, list[Text]]:
+    neighbors: dict[UUID, set[UUID]] = {}
+    derived_ids = set()
+    for source, derived, _ in edges:
+        neighbors.setdefault(source, set()).add(derived)
+        neighbors.setdefault(derived, set()).add(source)
+        derived_ids.add(derived)
+    roots_by_text: dict[UUID, list[Text]] = {}
+    for text_id in texts:
+        if text_id in roots_by_text:
+            continue
+        component, frontier = {text_id}, {text_id}
+        while frontier:
+            frontier = {neighbor for item in frontier for neighbor in neighbors.get(item, ())} - component
+            component.update(frontier)
+        roots = sorted((texts[item] for item in component - derived_ids), key=lambda t: (t.title, t.id))
+        roots_by_text.update(dict.fromkeys(component, roots))
+    return roots_by_text
+
+
+def _detail_credit_line(
+    text: Text, upstream: list[LineageEdge], contributions: Iterable[tuple[UUID, str | None, str]]
+) -> str:
+    parents: dict[UUID, set[UUID]] = {}
+    sources = set()
+    for source, derived, relation in upstream:
+        if relation == LineageRelation.BASED_ON:
+            sources.add(source)
+        else:
+            parents.setdefault(derived, set()).add(source)
+    credits: dict[tuple[UUID, str | None], set[str]] = {}
+    for text_id, role, name in contributions:
+        credits.setdefault((text_id, role), set()).add(name)
+    parts = []
+    for role in CREDIT_ROLES:
+        names = (
+            _inherited_names(text.id, role, parents, credits)
+            if role in {"composer", "author", "lyricist"}
+            else credits.get((text.id, role), set())
+        )
+        if names:
+            label = "Buch" if role == "author" and text.genre == "musical" else ROLE_LABELS[role]
+            parts.append(f"{label} {', '.join(sorted(names))}")
+    names = {name for source in sources for name in _inherited_names(source, "author", parents, credits)}
+    if names:
+        parts.append(f"nach {', '.join(sorted(names))}")
+    return " · ".join(parts)
+
+
+def _based_on_ancestors(member_ids: set[UUID], upstream: list[LineageEdge]) -> set[UUID]:
+    parents: dict[UUID, set[UUID]] = {}
+    for source, derived, relation in upstream:
+        if relation == LineageRelation.BASED_ON:
+            parents.setdefault(derived, set()).add(source)
+    seen, frontier = set(member_ids), member_ids
+    while frontier:
+        frontier = {parent for item in frontier for parent in parents.get(item, ())} - seen
+        seen.update(frontier)
+    return seen - member_ids
+
+
+def _family(session: Session, text: Text) -> tuple[set[UUID], bool]:  # ruff: ignore[complex-structure]
+    member_ids, family_edges = _walk_lineage(session, {text.id}, FAMILY_RELATIONS, reverse=None)
+    upstream_ids, upstream = _walk_lineage(session, member_ids, LineageRelation, reverse=True)
+    # Credits follow all incoming relations; visible sources follow only based-on edges.
+    ancestors = _based_on_ancestors(member_ids, upstream)
+    downstream_ids, _ = _walk_lineage(session, member_ids, (LineageRelation.BASED_ON,), reverse=False)
+    descendants = downstream_ids - member_ids
+    relatives = ancestors | descendants
+    label_ids, label_edges = _walk_lineage(session, relatives, FAMILY_RELATIONS, reverse=None)
+    visible_ids = member_ids | relatives
+    texts = {text.id: text}
+    if other_ids := (member_ids | label_ids) - {text.id}:
+        texts.update(
+            (item.id, item)
+            for item in session.exec(select(Text).where(col(Text.id).in_(other_ids)).order_by(Text.title, col(Text.id)))
+        )
+    roots = _roots_by_text(texts, family_edges + label_edges)
+    credits = list(_contributions(session, upstream_ids | visible_ids, CREDIT_ROLES))
+    labels = _format_labels([item for item in texts.values() if item.id in visible_ids], roots, credits)
+    productions: dict[UUID | None, list[str]] = {}
+    for text_id, name in session.exec(
+        select(Production.text_id, Production.name).where(col(Production.text_id).in_(member_ids))
+    ):
+        productions.setdefault(text_id, []).append(name)
+
+    st.subheader("Werkfamilie")
+    st.write(_detail_credit_line(text, upstream, credits))
     if ancestors:
         st.write("Vorlage: " + " → ".join(labels[str(i)] for i in sorted(ancestors, key=lambda x: labels[str(x)])))
-    children: dict[UUID, list[TextLineage]] = {}
-    for edge in edges:
-        if (
-            edge.relation in {LineageRelation.TRANSLATION, LineageRelation.ADAPTATION}
-            and edge.source_text_id in member_ids
-            and edge.derived_text_id in member_ids
-        ):
-            children.setdefault(edge.source_text_id, []).append(edge)
-    derived = {edge.derived_text_id for edges_ in children.values() for edge in edges_}
+    children: dict[UUID, list[tuple[UUID, LineageRelation]]] = {}
+    for source, derived, relation in family_edges:
+        children.setdefault(source, []).append((derived, relation))
+    derived_ids = {derived for _, derived, _ in family_edges}
     shown: set[UUID] = set()
 
     def show(item_id: UUID, depth: int, relation: str = "") -> None:
-        if item_id in shown or item_id not in all_texts:
+        if item_id in shown:
             return
         shown.add(item_id)
         st.text(f"{'  ' * depth}{'↳ ' if depth else ''}{relation}{labels[str(item_id)]}")
-        productions = session.exec(select(Production).where(Production.text_id == item_id)).all()
-        if productions:
-            st.caption("Produktionen: " + ", ".join(p.name for p in productions))
-        for edge in sorted(children.get(item_id, []), key=lambda e: labels[str(e.derived_text_id)]):
-            show(edge.derived_text_id, depth + 1, f"{LINEAGE_LABELS[edge.relation]}: ")
+        if names := productions.get(item_id):
+            st.caption("Produktionen: " + ", ".join(names))
+        for derived, kind in sorted(children.get(item_id, []), key=lambda edge: labels[str(edge[0])]):
+            show(derived, depth + 1, f"{LINEAGE_LABELS[kind]}: ")
 
-    for item in sorted(members, key=lambda t: labels[str(t.id)]):
-        if item.id not in derived:
-            show(item.id, 0)
-    for item in members:
-        show(item.id, 0)
-    descendants, frontier = set(), set(member_ids)
-    while frontier:
-        following = {
-            edge.derived_text_id
-            for edge in edges
-            if edge.relation == LineageRelation.BASED_ON
-            and edge.source_text_id in frontier
-            and edge.derived_text_id not in descendants
-            and edge.derived_text_id not in member_ids
-        }
-        descendants.update(following)
-        frontier = following
+    for item_id in sorted(member_ids, key=lambda item: labels[str(item)]):
+        if item_id not in derived_ids:
+            show(item_id, 0)
+    for item_id in sorted(member_ids, key=lambda item: (texts[item].title, item)):
+        show(item_id, 0)
     if descendants:
         st.write(
             "Darauf basierende Werke: "
             + ", ".join(labels[str(i)] for i in sorted(descendants, key=lambda x: labels[str(x)]))
         )
+    return member_ids, text.id not in derived_ids
+
+
+def _text_options(session: Session, query: str, excluded: set[UUID], suggested: str = "") -> dict[str, str]:
+    stmt = select(Text).where(col(Text.id).not_in(excluded))
+    if query:
+        aliases = select(TextTitle.text_id).where(col(TextTitle.title).icontains(query, autoescape=True))
+        stmt = stmt.where(or_(col(Text.title).icontains(query, autoescape=True), col(Text.id).in_(aliases)))
+    rows = list(session.exec(stmt.order_by(col(Text.title), col(Text.id)).limit(50)))
+    if suggested and all(str(row.id) != suggested for row in rows):
+        suggested_row = session.get(Text, UUID(suggested))
+        if suggested_row is not None:
+            rows.append(suggested_row)
+    return text_labels(rows)
 
 
 def _link(session: Session, text: Text) -> None:
@@ -232,16 +332,10 @@ def _link(session: Session, text: Text) -> None:
         key=f"direction_{text.id}",
     )
     query = st.text_input("Titel in Datenbank suchen", key=f"link_query_{text.id}").strip()
-    texts = session.exec(select(Text)).all()
-    variants = session.exec(select(TextTitle)).all()
-    matches = {v.text_id for v in variants if query.casefold() in v.title.casefold()} if query else set()
-    choices = [
-        t for t in texts if t.id != text.id and query and (query.casefold() in t.title.casefold() or t.id in matches)
-    ]
-    labels = text_labels(choices)
+    labels = _text_options(session, query, {text.id}) if query else {}
     chosen = st.selectbox(
         "Passendes Werk",
-        [None, *[str(t.id) for t in choices]],
+        [None, *labels],
         format_func=lambda i: labels[i] if i else "Bitte wählen",
         key=f"link_target_{text.id}",
     )
@@ -282,7 +376,7 @@ def _link(session: Session, text: Text) -> None:
     created_id = st.session_state.get(f"wikidata_created_{text.id}")
     if (
         created_id
-        and created_id in {str(t.id) for t in texts}
+        and session.get(Text, UUID(created_id)) is not None
         and st.checkbox("Neu angelegten Wikidata-Treffer verknüpfen", key=f"use_stub_{text.id}")
     ):
         chosen = created_id
@@ -312,7 +406,7 @@ def _production_adapters(session: Session, production: Production, names: list[s
         ensure_credit(session, production, person.id, "adapter", None, _actor_id())
 
 
-def _credit(session: Session, text: Text) -> None:  # ruff: ignore[complex-structure]
+def _credit(session: Session, text: Text, family_ids: set[UUID]) -> None:  # ruff: ignore[complex-structure]
     st.subheader("Credit übernehmen")
     credit = st.text_area("Credit einfügen", key=f"credit_{text.id}")
     if not credit.strip():
@@ -330,20 +424,17 @@ def _credit(session: Session, text: Text) -> None:  # ruff: ignore[complex-struc
         language = st.text_input(
             "Sprache der erkannten Übersetzung (ISO 639-1, optional)", key=f"credit_lang_{text.id}"
         ).strip()
-        family_ids = {member.id for member in work_family(session, text.id)}
         source_id = None
         if parsed["source_authors"] or parsed["source_titles"] or parsed["source_notes"]:
-            sources = [item for item in session.exec(select(Text)).all() if item.id not in family_ids]
-            source_labels = text_labels(sources)
+            source_query = st.text_input("Vorlagentitel suchen", key=f"credit_source_search_{text.id}").strip()
+            source_labels = _text_options(session, source_query, family_ids)
             source_id = st.selectbox(
                 "Vorlage zum nach-Credit (optional)",
                 [None, *source_labels],
                 format_func=lambda value: source_labels[value] if value else "Keine Vorlage verknüpfen",
                 key=f"credit_source_{text.id}",
             )
-        productions = [
-            production for production in session.exec(select(Production)).all() if production.text_id in family_ids
-        ]
+        productions = session.exec(select(Production).where(col(Production.text_id).in_(family_ids))).all()
         choices = {str(production.id): production for production in productions}
         production_labels = {key: production.name for key, production in choices.items()}
         production_id = st.selectbox(
@@ -438,11 +529,15 @@ def _credit(session: Session, text: Text) -> None:  # ruff: ignore[complex-struc
 
 
 def _lineage_proposal(session: Session, text: Text) -> None:
-    edges = session.exec(select(TextLineage)).all()
-    if any(edge.source_text_id == text.id or edge.derived_text_id == text.id for edge in edges):
+    incident_edge = session.exec(
+        select(TextLineage.id)
+        .where(or_(col(TextLineage.source_text_id) == text.id, col(TextLineage.derived_text_id) == text.id))
+        .limit(1)
+    ).first()
+    if incident_edge is not None:
         return
-    others = [item for item in session.exec(select(Text)).all() if item.id != text.id]
-    labels = text_labels(others)
+    query = st.text_input("Kandidatentitel suchen", key=f"ai_candidate_search_{text.id}").strip()
+    labels = _text_options(session, query, {text.id})
     selected = st.multiselect(
         "Mögliche Vorlagen für KI-Prüfung",
         list(labels),
@@ -468,11 +563,11 @@ def _selected(row: dict) -> None:
     with get_session() as session:
         text = session.get(Text, UUID(str(row["id"])))
         if text:
-            _family(session, text)
+            family_ids, is_root = _family(session, text)
             _titles(session, text)
-            _enrich(session, text)
+            _enrich(session, text, is_root)
             _link(session, text)
-            _credit(session, text)
+            _credit(session, text, family_ids)
             _lineage_proposal(session, text)
 
 
@@ -488,26 +583,26 @@ def _inbox() -> None:
         if not cases:
             st.caption("Keine offenen Text-Prüffälle.")
             return
-        texts = list(session.exec(select(Text)).all())
-        labels = text_labels(texts)
         for case in cases:
             with st.expander(f"{case.operation}: {case.incoming.get('title') or case.reason}"):
                 st.write(case.reason)
                 st.json({"Vorschlag": case.incoming, "Kontext": case.context})
-                options = [None, *[str(t.id) for t in texts]]
                 suggested = str(case.target_id or case.context.get("suggested_target_id") or "")
+                query = st.text_input("Texttitel suchen", key=f"case_search_{case.id}").strip()
+                labels = _text_options(session, query, set(), suggested)
+                options = [None, *labels]
                 target_label = "Vorlage für den neuen Text" if case.context.get("pending_derived") else "Ziel"
                 target = st.selectbox(
                     target_label,
                     options,
-                    format_func=lambda i: labels[i] if i else "Bitte wählen",
+                    format_func=lambda i, labels=labels: labels[i] if i else "Bitte wählen",
                     index=options.index(suggested) if suggested in options else 0,
                     key=f"case_target_{case.id}",
                 )
                 source = st.selectbox(
                     "Vorlage / Ausgangstext (optional)",
                     options,
-                    format_func=lambda i: labels[i] if i else "Keine Änderung",
+                    format_func=lambda i, labels=labels: labels[i] if i else "Keine Änderung",
                     key=f"case_source_{case.id}",
                 )
                 relation = st.selectbox(
@@ -543,7 +638,6 @@ def _inbox() -> None:
 
 def main() -> None:
     """Render text management page."""
-    init_db()
     render_sqlmodel_crud(
         model_cls=Text,
         merge_kind="text",

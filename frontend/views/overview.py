@@ -6,9 +6,12 @@ import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
-from backend.entity_management import count_entities_many, list_entities
+from backend.entity_management import count_entities_many, entity_page, organization_coverage
 from backend.models import Award, Organization, Person, Production, Source, Text
+from backend.reconciliation import stable_digest
 from frontend.views.helpers import has_coordinates
+
+PAGE_SIZE = 50
 
 
 def organization_data(organizations: list[Organization]) -> pd.DataFrame:
@@ -89,15 +92,13 @@ def render_overview() -> None:
         "und die Theaterlandschaft gemeinsam zu erkunden."
     )
 
-    data = organization_data(list_entities(Organization, order_by="name"))
-    mapped = data.loc[list(starmap(has_coordinates, data[["lat", "lon"]].itertuples(index=False, name=None))), :]
-    cities = data.loc[data["city"] != "", ["city", "country"]].drop_duplicates()
+    total, positioned, places, top = organization_coverage()
     counts = count_entities_many(Production, Person, Text, Award, Source)
 
     st.space("small")
     metrics = [
-        ("Theater & Organisationen", len(data), "Alle erfassten Häuser und Organisationen."),
-        ("Orte", len(cities), "Erfasste Kombinationen aus Ort und Land; fehlende Ortsangaben zählen nicht."),
+        ("Theater & Organisationen", total, "Alle erfassten Häuser und Organisationen."),
+        ("Orte", places, "Erfasste Kombinationen aus Ort und Land; fehlende Ortsangaben zählen nicht."),
         ("Produktionen", counts[Production], "Alle in der Datenbank erfassten Produktionen."),
         ("Personen", counts[Person], "Alle in der Datenbank erfassten Personen."),
     ]
@@ -114,20 +115,26 @@ def render_overview() -> None:
         "Theater, Ort oder Land suchen",
         placeholder="Zum Beispiel: Burgtheater, Berlin oder Österreich",
     ).strip()
-    filtered = data
-    if search:
-        searchable = data["name"] + " " + data["city"] + " " + data["country"]
-        filtered = data.loc[searchable.str.contains(search, case=False, regex=False), :]
-    visible = mapped.loc[mapped.index.intersection(filtered.index), :]
+    key = f"organization_directory_{stable_digest(search)}"
+    page = st.session_state.get(key, 1)
+    organizations, matches = entity_page(Organization, search, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
+    pages = max(1, (matches + PAGE_SIZE - 1) // PAGE_SIZE)
+    if page > pages:
+        st.session_state[key] = pages
+        st.rerun()
+    if pages > 1:
+        st.pagination(pages, key=key)
+    data = organization_data(organizations)
+    visible = data.loc[list(starmap(has_coordinates, data[["lat", "lon"]].itertuples(index=False, name=None))), :]
 
     st.caption(
-        f"{len(visible)} von {len(filtered)} Treffern auf der Karte. "
+        f"{matches} Treffer insgesamt · {len(visible)} von {len(data)} Einträgen dieser Seite auf der Karte. "
         "Punkt anklicken und über den Link das Theater öffnen."
     )
     if not visible.empty:
         event = st.pydeck_chart(
             theater_map(visible),
-            key=f"theater_map_{search.casefold()}",
+            key=f"theater_map_{key}_{page}",
             on_select="rerun",
             selection_mode="single-object",
             height=480,
@@ -135,7 +142,7 @@ def render_overview() -> None:
         selected = event["selection"].get("objects", {}).get("theaters", [])
         if selected:
             render_location_links(visible, selected[0]["id"])
-    elif filtered.empty:
+    elif not matches:
         st.info("Keine Theater gefunden. Versuche einen anderen Suchbegriff.")
     else:
         st.info("Für diese Treffer sind noch keine gültigen Koordinaten hinterlegt. Nutze das Verzeichnis unten.")
@@ -147,20 +154,16 @@ def render_overview() -> None:
             "Jeder Punkt steht für eine erfasste Organisation mit gültigen Koordinaten. "
             "Mehrere Häuser können am selben Standort liegen."
         )
-        coverage = len(mapped) / len(data) if len(data) else 0
+        coverage = positioned / total if total else 0
         st.progress(coverage, text=f"{coverage:.0%} der Einträge mit Kartenposition")
-        st.caption(
-            f"{len(data) - len(mapped)} Einträge ohne gültige Koordinaten. Sie bleiben im Verzeichnis auffindbar."
-        )
+        st.caption(f"{total - positioned} Einträge ohne gültige Koordinaten. Sie bleiben im Verzeichnis auffindbar.")
     with cities_column:
         st.markdown("#### Orte mit vielen Einträgen")
-        locations = data.loc[data["city"] != "", ["city", "country"]].copy()
-        if not locations.empty:
-            locations["Ort"] = locations.apply(
-                lambda row: " · ".join(part for part in (row["city"], row["country"]) if part),
-                axis=1,
+        if top:
+            top_cities = pd.DataFrame(
+                [(" · ".join(filter(None, (city, country))), count) for city, country, count in top],
+                columns=["Ort", "Einträge"],
             )
-            top_cities = locations["Ort"].value_counts().head(5).rename("Einträge").reset_index()
             st.bar_chart(
                 top_cities,
                 x="Ort",
@@ -175,10 +178,10 @@ def render_overview() -> None:
             st.caption("Noch keine Ortsangaben vorhanden.")
 
     st.subheader("Theaterverzeichnis")
-    st.caption("Alle Suchtreffer, auch ohne Kartenposition. Über „Ansehen“ öffnest du den jeweiligen Eintrag.")
-    if not filtered.empty:
+    st.caption("Auch Treffer ohne Kartenposition werden angezeigt. Über „Ansehen“ öffnest du den jeweiligen Eintrag.")
+    if not data.empty:
         st.dataframe(
-            filtered[["name", "city", "country", "detail"]],
+            data[["name", "city", "country", "detail"]],
             hide_index=True,
             column_config={
                 "name": st.column_config.TextColumn("Theater / Organisation", width="large"),
@@ -187,7 +190,7 @@ def render_overview() -> None:
                 "detail": st.column_config.LinkColumn("Eintrag", display_text="Ansehen"),
             },
         )
-    elif data.empty:
+    elif not total:
         st.info("Noch keine Theater erfasst. Sobald Einträge vorliegen, erscheinen sie hier und auf der Karte.")
     st.divider()
     st.caption(
