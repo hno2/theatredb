@@ -21,8 +21,8 @@ from backend.models import (
     Text,
     TextContribution,
 )
-from backend.reconciliation import canonical_url, ensure_credit, normalize, resolve_id, stable_digest
-from backend.texts import family_roots, resolve_staged_text
+from backend.reconciliation import canonical_url, normalize, resolve_id, stable_digest
+from backend.texts import CreditPeople, family_roots, resolve_staged_text
 
 PUBLISHERS = {
     "theatertexte.de": "https://www.theatertexte.de/",
@@ -194,7 +194,9 @@ def _known_metadata(session: Session, text: Text, payload: dict) -> dict:
     return previous
 
 
-def _replay(session: Session, source: Source, stored: SourceRecord, metadata: dict) -> Text | ReconciliationCase:
+def _replay(
+    session: Session, source: Source, stored: SourceRecord, metadata: dict, people: CreditPeople
+) -> Text | ReconciliationCase:
     text = session.get(Text, resolve_id(session, EntityType.TEXT, stored.entity_id))
     if text is None:
         raise ValueError("Publisher identity points to a missing text")
@@ -230,11 +232,11 @@ def _replay(session: Session, source: Source, stored: SourceRecord, metadata: di
         if case.status != "approved":
             return case
         return text
-    _fill_known_text(session, text, metadata)
+    _fill_known_text(session, text, metadata, people)
     return text
 
 
-def _fill_known_text(session: Session, text: Text, metadata: dict) -> None:
+def _fill_known_text(session: Session, text: Text, metadata: dict, people: CreditPeople) -> None:
     updates = {}
     for key in ("genre", "published", "published_precision"):
         if getattr(text, key) is None and metadata.get(key) is not None:
@@ -256,16 +258,7 @@ def _fill_known_text(session: Session, text: Text, metadata: dict) -> None:
             is not None
         ):
             continue
-        for name in metadata.get(f"{role}s", []):
-            people = [
-                person for person in session.exec(select(Person)).all() if normalize(person.name) == normalize(name)
-            ]
-            if len(people) > 1:
-                raise ValueError(f"Ambiguous person credit: {name}")
-            person = people[0] if people else Person(name=name, type=[role])
-            session.add(person)
-            session.flush()
-            ensure_credit(session, target, person.id, role, None, None)
+        people.add_credits(target, metadata.get(f"{role}s", []), role)
 
 
 def ingest_text_metadata(
@@ -282,12 +275,15 @@ def ingest_text_metadata(
         session.add(source)
         session.flush()
     results = []
+    people = CreditPeople(session)
     for record in validated:
         observation = record.model_dump(mode="json", exclude_none=True)
         metadata = record.model_dump(mode="json", exclude={"url", "external_id", "world_premiere"}, exclude_none=True)
         stored = _source_record(session, source.id, record)
         result = (
-            _replay(session, source, stored, metadata) if stored is not None else resolve_staged_text(session, metadata)
+            _replay(session, source, stored, metadata, people)
+            if stored is not None
+            else resolve_staged_text(session, metadata, people=people)
         )
         results.append(result)
         if isinstance(result, ReconciliationCase):

@@ -13,7 +13,7 @@ from backend.ingestion.publishers import (
     save_publisher_observation,
 )
 from backend.ingestion.staging import staging_schema, validate_records
-from backend.models import EntitySource, ReconciliationCase, Source, SourceRecord, Text
+from backend.models import EntitySource, Person, ReconciliationCase, Source, SourceRecord, Text, TextContribution
 from backend.texts import add_title, resolve_text_case
 
 
@@ -98,6 +98,65 @@ def test_publisher_import_and_replay_reuse_source_record_lookup(session) -> None
     assert (first_import_selects, replay_selects) == (1, 1)
     observation = session.exec(select(SourceRecord)).one()
     assert observation.payload["title"] == "Play"
+
+
+def test_publisher_shares_people_lookup_across_replay_and_nested_import(session) -> None:
+    publisher = "theatertexte.de"
+    blank = {"title": "Play", "url": "https://example.org/play"}
+    existing = Person(name="Éva—Müller", type=["director"])
+    session.add(existing)
+    replay_target = ingest_text_metadata(session, publisher, [blank])[0]
+    records = [
+        {**blank, "authors": ["E\u0301VA MÜLLER"], "composers": ["New—Person"]},
+        {
+            "title": "New Play",
+            "url": "https://example.org/new",
+            "authors": ["NEW PERSON"],
+            "translators": ["éva müller"],
+            "based_on": {"title": "Novel", "authors": ["new person"]},
+        },
+    ]
+    scans = []
+
+    def capture_sql(connection, cursor, statement, parameters, context, executemany) -> None:
+        if " ".join(statement.casefold().split()).endswith(" from person"):
+            scans.append(statement)
+
+    event.listen(session.bind, "before_cursor_execute", capture_sql)
+    try:
+        ingest_text_metadata(session, publisher, [blank])
+        assert not scans
+        replay, imported = ingest_text_metadata(session, publisher, records)
+    finally:
+        event.remove(session.bind, "before_cursor_execute", capture_sql)
+
+    assert len(scans) == 1
+    assert replay.id == replay_target.id
+    created = session.exec(select(Person).where(Person.id != existing.id)).one()
+    assert (created.name, created.type) == ("New—Person", ["composer"])
+    assert existing.type == ["director"]
+    novel = session.exec(select(Text).where(Text.title == "Novel")).one()
+    credits = session.exec(select(TextContribution)).all()
+    assert {(c.text_id, c.role, c.person_id) for c in credits} == {
+        (replay.id, "author", existing.id),
+        (replay.id, "composer", created.id),
+        (imported.id, "author", created.id),
+        (imported.id, "translator", existing.id),
+        (novel.id, "author", created.id),
+    }
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_publisher_rejects_ambiguous_people_in_a_new_batch(session, replay) -> None:
+    publisher = "theatertexte.de"
+    original = {"title": "Original", "url": "https://example.org/original", "authors": ["Same Name"]}
+    ingest_text_metadata(session, publisher, [original])
+    target = {"title": "Target", "url": "https://example.org/target"}
+    if replay:
+        ingest_text_metadata(session, publisher, [target])
+    session.add(Person(name="SAME—NAME", type=["translator"]))
+    with pytest.raises(ValueError, match="Ambiguous person credit: Same Name"):
+        ingest_text_metadata(session, publisher, [{**target, "authors": ["Same Name"]}])
 
 
 def test_publisher_validates_entire_batch_before_writing(session) -> None:

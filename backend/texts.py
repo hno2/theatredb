@@ -157,20 +157,38 @@ def _names(session: Session, texts: Iterable[Text], role: str) -> set[str]:
     return {normalize(name) for name in rows}
 
 
-def _people(session: Session, names: Iterable[str], role: str, text: Text) -> None:
-    for name in dict.fromkeys(name.strip() for name in names if name.strip()):
-        person = _credit_person(session, name, role)
-        ensure_credit(session, text, person.id, role, None, None)
+class CreditPeople:
+    """Lazy name lookup for one import or resolution, not a session-wide cache."""
 
+    def __init__(self, session: Session) -> None:
+        """Bind the lookup to the caller's session."""
+        self._session = session
+        self._ids_by_name: dict[str, list[uuid.UUID]] | None = None
 
-def _credit_person(session: Session, name: str, role: str) -> Person:
-    matches = [person for person in session.exec(select(Person)).all() if normalize(person.name) == normalize(name)]
-    if len(matches) > 1:
-        raise ValueError(f"Ambiguous person credit: {name}")
-    person = matches[0] if matches else Person(name=name, type=[role])
-    session.add(person)
-    session.flush()
-    return person
+    def person_id(self, name: str, role: str) -> uuid.UUID:
+        """Reuse the unique normalized match or create a person for this role."""
+        if self._ids_by_name is None:
+            ids_by_name: dict[str, list[uuid.UUID]] = {}
+            for person_id, stored_name in self._session.exec(select(Person.id, Person.name)):
+                ids_by_name.setdefault(normalize(stored_name), []).append(person_id)
+            self._ids_by_name = ids_by_name
+        key = normalize(name)
+        matches = self._ids_by_name.get(key, [])
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous person credit: {name}")
+        if matches:
+            self._session.flush()
+            return matches[0]
+        person = Person(name=name, type=[role])
+        self._session.add(person)
+        self._session.flush()
+        self._ids_by_name[key] = [person.id]
+        return person.id
+
+    def add_credits(self, text: Text, names: Iterable[str], role: str) -> None:
+        """Attach credits in input order without duplicating them."""
+        for name in dict.fromkeys(name.strip() for name in names if name.strip()):
+            ensure_credit(self._session, text, self.person_id(name, role), role, None, None)
 
 
 def _link_case(session: Session, payload: dict, candidates: list[Text], reason: str) -> Text | ReconciliationCase:
@@ -202,6 +220,8 @@ def resolve_text(
     translators: Iterable[str] = (),
     language: str | None = None,
     based_on: Text | dict | str | None = None,
+    *,
+    people: CreditPeople | None = None,
 ) -> Text | ReconciliationCase:
     """Match titles across families, then choose the credited translation without guessing."""
     normalized = normalize(title)
@@ -225,16 +245,17 @@ def resolve_text(
         payload["based_on"] = {"text_id": str(based_on.id)} if isinstance(based_on, Text) else based_on
     if len(families) > 1:
         return _link_case(session, payload, title_matches, "Several works share this title; select a text.")
+    people = people or CreditPeople(session)
     if families:
-        return _choose_family_text(session, next(iter(families.values())), title_matches, payload)
-    source = _resolve_source(session, based_on)
+        return _choose_family_text(session, next(iter(families.values())), title_matches, payload, people)
+    source = _resolve_source(session, based_on, people)
     if isinstance(source, ReconciliationCase):
         return _source_review(session, source, payload)
     text = Text.model_validate({"title": title, "languages": [language] if language else []})
     session.add(text)
     session.flush()
-    _people(session, authors, "author", text)
-    _people(session, translators, "translator", text)
+    people.add_credits(text, authors, "author")
+    people.add_credits(text, translators, "translator")
     if source is not None:
         add_lineage(session, source.id, text.id, LineageRelation.BASED_ON)
     return text
@@ -253,7 +274,9 @@ def _source_review(session: Session, source: ReconciliationCase, payload: dict) 
     return case
 
 
-def _resolve_source(session: Session, source: Text | dict | str | None) -> Text | ReconciliationCase | None:
+def _resolve_source(
+    session: Session, source: Text | dict | str | None, people: CreditPeople
+) -> Text | ReconciliationCase | None:
     if source is None or isinstance(source, Text):
         return source
     if isinstance(source, dict) and "text_id" in source:
@@ -261,15 +284,15 @@ def _resolve_source(session: Session, source: Text | dict | str | None) -> Text 
         if text is None:
             raise ValueError("Source text not found")
         return text
-    return resolve_staged_text(session, {"title": source} if isinstance(source, str) else source)
+    return resolve_staged_text(session, {"title": source} if isinstance(source, str) else source, people=people)
 
 
 def _choose_family_text(
-    session: Session, family: list[Text], title_matches: list[Text], payload: dict
+    session: Session, family: list[Text], title_matches: list[Text], payload: dict, people: CreditPeople
 ) -> Text | ReconciliationCase:
     title, language = payload["title"], payload["language"]
     if payload["translators"]:
-        return _resolve_translation(session, family, payload)
+        return _resolve_translation(session, family, payload, people)
     matching = [text for text in family if text in title_matches]
     matching_language = [
         text for text in family if language and text.languages and text.languages[0] == language.lower()
@@ -279,13 +302,15 @@ def _choose_family_text(
         if len(matches) == 1:
             root_authors = _names(session, roots, "author")
             if not root_authors and payload["authors"] and len(roots) == 1:
-                _people(session, payload["authors"], "author", roots[0])
+                people.add_credits(roots[0], payload["authors"], "author")
             add_title(session, matches[0], title, language if language != "mul" else None)
             return matches[0]
     return _link_case(session, payload, matching, "Select the most specific known text.")
 
 
-def _resolve_translation(session: Session, family: list[Text], payload: dict) -> Text | ReconciliationCase:
+def _resolve_translation(
+    session: Session, family: list[Text], payload: dict, people: CreditPeople
+) -> Text | ReconciliationCase:
     translator_names = {normalize(name) for name in payload["translators"]}
     language = payload["language"]
     matches = [
@@ -305,18 +330,26 @@ def _resolve_translation(session: Session, family: list[Text], payload: dict) ->
     text = Text.model_validate({"title": payload["title"], "languages": [language or "de"], "genre": roots[0].genre})
     session.add(text)
     session.flush()
-    _people(session, payload["translators"], "translator", text)
+    people.add_credits(text, payload["translators"], "translator")
     add_lineage(session, roots[0].id, text.id, LineageRelation.TRANSLATION)
     return text
 
 
-def resolve_staged_text(session: Session, data: dict) -> Text | ReconciliationCase:
+def resolve_staged_text(
+    session: Session, data: dict, *, people: CreditPeople | None = None
+) -> Text | ReconciliationCase:
     """Use one normalized contract for theatre and publisher text metadata."""
+    people = people or CreditPeople(session)
     original_title = data.get("original_title")
     authors = data.get("authors", [])
     if original_title:
         root = resolve_text(
-            session, original_title, authors, language=data.get("original_language"), based_on=data.get("based_on")
+            session,
+            original_title,
+            authors,
+            language=data.get("original_language"),
+            based_on=data.get("based_on"),
+            people=people,
         )
         if isinstance(root, ReconciliationCase):
             return root
@@ -324,10 +357,18 @@ def resolve_staged_text(session: Session, data: dict) -> Text | ReconciliationCa
             root.genre = data["genre"]
         language = data.get("language")
         add_title(session, root, data["title"], language if language != "mul" else None)
-        result = resolve_text(session, data["title"], authors, data.get("translators", []), data.get("language"))
+        result = resolve_text(
+            session, data["title"], authors, data.get("translators", []), data.get("language"), people=people
+        )
     else:
         result = resolve_text(
-            session, data["title"], authors, data.get("translators", []), data.get("language"), data.get("based_on")
+            session,
+            data["title"],
+            authors,
+            data.get("translators", []),
+            data.get("language"),
+            data.get("based_on"),
+            people=people,
         )
     if isinstance(result, Text):
         if data.get("genre") and result.genre is None:
@@ -342,7 +383,7 @@ def resolve_staged_text(session: Session, data: dict) -> Text | ReconciliationCa
             )
             result.published, result.published_precision = validated.published, validated.published_precision
         for role in ("composer", "lyricist"):
-            _people(session, data.get(f"{role}s", []), role, result)
+            people.add_credits(result, data.get(f"{role}s", []), role)
         session.add(result)
     return result
 
@@ -453,6 +494,7 @@ def _apply_text_link(session: Session, case: ReconciliationCase, text: Text, act
     if case.context.get("production_id"):
         production_ids.append(case.context["production_id"])
     adapters = case.context.get("production_adapter_names", {})
+    people = CreditPeople(session)
     for production_id in dict.fromkeys(production_ids):
         production = session.get(Production, uuid.UUID(str(production_id)), with_for_update=True)
         if production is None:
@@ -469,8 +511,7 @@ def _apply_text_link(session: Session, case: ReconciliationCase, text: Text, act
             session.add(production)
             audit_event(session, production, "update", actor_id)
         for name in adapters.get(str(production.id), []):
-            person = _credit_person(session, name, "adapter")
-            ensure_credit(session, production, person.id, "adapter", None, actor_id)
+            ensure_credit(session, production, people.person_id(name, "adapter"), "adapter", None, actor_id)
     if observations := case.context.get("publisher_observations"):
         from backend.ingestion.publishers import resolve_publisher_observations  # ruff: ignore[import-outside-top-level]
 
@@ -482,6 +523,7 @@ def _reviewed_text(session: Session, case: ReconciliationCase, text: Text, actor
     if case.context.get("pending_derived"):
         return _complete_derived(session, case, text, actor_id)
     translators = case.incoming.get("translators", [])
+    people = CreditPeople(session)
     if translators and not {normalize(name) for name in translators} <= _names(session, [text], "translator"):
         result = _resolve_translation(
             session,
@@ -492,13 +534,14 @@ def _reviewed_text(session: Session, case: ReconciliationCase, text: Text, actor
                 "translators": translators,
                 "language": case.incoming.get("language"),
             },
+            people,
         )
         if isinstance(result, ReconciliationCase):
             raise ValueError("Choose a specific translation")
         text = result
     roots = family_roots(session, text.id)
     if len(roots) == 1 and not _names(session, roots, "author"):
-        _people(session, case.incoming.get("authors", []), "author", roots[0])
+        people.add_credits(roots[0], case.incoming.get("authors", []), "author")
     if title := case.incoming.get("title"):
         language = case.incoming.get("language")
         add_title(session, text, title, language if language != "mul" else None)

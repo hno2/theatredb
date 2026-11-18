@@ -28,7 +28,7 @@
   See [generic management UI](frontend/management/uifactory.py).
 - [ ] **Text detail:** batch productions by family member; avoid loading every text just to
   render one family. See [text management](frontend/management/texts.py).
-- [ ] **People matching:** publisher missing-credit paths still scan all people per name.
+- [x] **People matching:** publisher missing-credit paths still scan all people per name.
   Reuse one request-local lookup; keep ambiguity checks and source identity boundaries.
   See [publisher imports](backend/ingestion/publishers.py) and [text resolver](backend/texts.py).
 - [ ] **Bulk text writes:** batch display-title lookups and lineage checks across flushes.
