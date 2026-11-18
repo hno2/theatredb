@@ -34,7 +34,7 @@
 - [x] **Bulk text writes:** batch display-title lookups and scope lineage checks to affected paths.
   Preserve cycle validation, advisory locking and transaction visibility.
   See [model flush hooks](backend/models.py).
-- [ ] **Upload overview:** aggregate coverage in SQL; scope conflict counts and source reads.
+- [x] **Upload overview:** aggregate coverage in SQL; scope conflict counts and source reads.
   Overview currently loads productions, memberships and upload history into Python.
   See [import status](backend/import_status.py).
 - [ ] **Duplicate discovery:** batch candidate reads instead of one session/search per record.
