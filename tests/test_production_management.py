@@ -74,6 +74,33 @@ def test_production_table_resolves_foreign_keys_to_names(db) -> None:
 
 
 @pytest.mark.parametrize(
+    ("model", "label"),
+    [
+        (Organization, "Organisationen"),
+        (Person, "Personen"),
+        (Production, "Produktionen"),
+        (Text, "Texte"),
+        (Award, "Auszeichnungen"),
+        (Source, "Quellen"),
+    ],
+)
+def test_management_pages_show_item_count(db, model, label) -> None:
+    field = "title" if model is Text else "name"
+    with Session(db) as session:
+        session.add_all([model(**{field: f"Example {index}"}) for index in range(2)])
+        session.commit()
+
+    app = AppTest.from_string(
+        f"from backend.models import {model.__name__}\n"
+        "from frontend.management.uifactory import render_sqlmodel_crud\n"
+        f"render_sqlmodel_crud(model_cls={model.__name__})"
+    ).run()
+
+    assert not app.exception
+    assert app.caption[0].value == f"2 {label} insgesamt"
+
+
+@pytest.mark.parametrize(
     "model,record_url",
     [
         (Organization, "https://example.org/records/123"),

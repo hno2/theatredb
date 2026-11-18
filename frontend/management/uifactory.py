@@ -14,7 +14,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 from sqlmodel import SQLModel
 from streamlit import session_state, user
 
-from backend.config import FORM_FIELD_KINDS, canonical_role
+from backend.config import ENTITY_LABELS, FORM_FIELD_KINDS, canonical_role
 from backend.date_precision import DatePrecision, iso_date, parse_date
 from backend.entity_management import create_entity, delete_entity, list_entities, list_entities_where, update_entity
 from backend.models import EntitySource, Person, Source, TextContribution
@@ -930,7 +930,14 @@ def _render_sources_for_selected(model_cls: type[SQLModel], sel_row: dict) -> No
     )
 
 
-def render_sqlmodel_crud(  # ruff: ignore[complex-structure]
+def _render_item_count(model_cls: type[SQLModel], count: int) -> None:
+    entity_type = getattr(model_cls, "_entity_type", None)
+    label = ENTITY_LABELS.get(entity_type.value) if entity_type is not None else None
+    label = label or ("Quellen" if model_cls is Source else f"{model_cls.__name__}s")
+    st.caption(f"{count} {label} insgesamt")
+
+
+def render_sqlmodel_crud(
     *,
     model_cls: type[SQLModel],
     title: str | None = None,
@@ -969,10 +976,7 @@ def render_sqlmodel_crud(  # ruff: ignore[complex-structure]
                 authors.setdefault(str(c.text_id), []).append(names[str(c.person_id)])
         df["Autoren"] = df["id"].map(lambda i: ", ".join(sorted(authors.get(i, []))))
     st.title(title or f"{model_cls.__name__}s Management")
-    if merge_kind == "person":
-        st.caption(f"{len(df)} Personen insgesamt")
-    if merge_kind == "text":
-        st.caption(f"{len(df)} Texte insgesamt")
+    _render_item_count(model_cls, len(df))
     selected = _render_table(df, fields, model_cls, merge_kind=merge_kind, actor=actor)
     if merge_kind:
         st.caption(
