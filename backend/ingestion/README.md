@@ -147,6 +147,7 @@ uv run python -m backend.ingestion.theapolis import
 ```
 
 Default import uses the DACH filter. Use `import --all` for the full export.
+`import` logs total wall time on completion or failure.
 Theapolis sends country and sometimes a state or canton in `organization.location.country`.
 The shared [`backend.locations`](../locations.py) helper resolves country codes,
 English/German country names, and unambiguous ISO subdivision names offline using
@@ -158,6 +159,25 @@ previously imported region labels that still match their stored source observati
 Partial exports, such as `download --max-pages 1`, are not selected by default.
 See the [product specification](../../specs/specification.md) for filtering,
 matching, conflict, and resume behavior.
+
+Production premiere types come from the API's `type.pill` (for example `UA`
+or `DEA`), falling back to `type.name`, and are retained as tags alongside genre.
+Downloads fetch organization descriptions through the paginated organization
+directory, not one request per production. Public person `biographyText` and
+`extraBiographyText` are preserved as descriptions; HTML is converted to Markdown.
+Production descriptions are imported when supplied; the production list and
+detail endpoints sampled in November 2026 did not expose one.
+Existing nonempty descriptions are never overwritten.
+
+Download again to collect organization descriptions and biographies. Older
+positive profile-cache entries are refreshed once to include biography data.
+Old exports remain importable and gain premiere tags from their raw source
+metadata; new exports validate those tags and descriptions against staged JSON.
+
+Cross-role matching batches compatible Theapolis-only people, their foreign-key
+references, source mappings, redirects, review decisions, and audit history.
+Mixed-source identities retain the reviewed merge path. Schema migration `0006`
+indexes person references so matching does not scan every credit table per name.
 
 To merge records manually, use **Verwaltung → Personen / Texte → Zusammenführen**.
 

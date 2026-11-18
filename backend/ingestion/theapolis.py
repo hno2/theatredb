@@ -11,23 +11,31 @@ import uuid
 from collections.abc import Awaitable, Callable, Generator, Iterable
 from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
+from functools import lru_cache
 from itertools import batched
 from pathlib import Path
 from time import monotonic, time
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import aiohttp
+from markdownify import markdownify
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
-from sqlmodel import Session, SQLModel, select
+from sqlmodel import Session, SQLModel, col, select
 from tqdm import tqdm
 
 from backend.config import IMAGE_SIGNATURES
 from backend.date_precision import parse_date
 from backend.ingestion.snapshots import digest, snapshot_path, without_null_fields
 from backend.ingestion.staging import validate_records
-from backend.ingestion.theapolis_import import ImportRecord, accept_records, add_credits_batch, migrate_pending_cases
+from backend.ingestion.theapolis_import import (
+    ImportRecord,
+    accept_records,
+    add_credits_batch,
+    merge_scoped_people,
+    migrate_pending_cases,
+)
 from backend.locations import split_country
 from backend.models import EntityType, Source, SourceRecord, TheapolisProfileCache
 from backend.production_import import author_name
@@ -171,6 +179,11 @@ def _production_tags(item: dict) -> list[str]:
         tags.append(genre["name"].strip())
     elif isinstance(genre, str) and genre.strip():
         tags.append(genre.strip())
+    production_type = item.get("type") or {}
+    if isinstance(production_type, dict):
+        label = production_type.get("pill") or production_type.get("name")
+        if isinstance(label, str) and label.strip():
+            tags.append(label.strip())
     for tag in item.get("tags") or []:
         value = tag.get("name") if isinstance(tag, dict) else tag
         if isinstance(value, str) and value.strip():
@@ -178,6 +191,21 @@ def _production_tags(item: dict) -> list[str]:
     if item.get("independent") is True:
         tags.append("Freie Darstellende Künste")
     return list(dict.fromkeys(tags))
+
+
+@lru_cache(maxsize=4096)
+def _description_text(value: str) -> str:
+    return markdownify(value).strip()
+
+
+def _description(item: dict) -> dict[str, str]:
+    value = item.get("description")
+    if value is None:
+        return {}
+    if not isinstance(value, str):
+        raise TypeError(f"Invalid Theapolis description for {item.get('id')!r}")
+    text = _description_text(value)
+    return {"description": text} if text else {}
 
 
 def _profile_birthday(profile: dict) -> dict:
@@ -214,6 +242,7 @@ def staged_records(items: list[dict]) -> list[dict]:
                     member.update(_profile_birthday(profile))
                     if profile.get("url"):
                         member["url"] = profile["url"]
+                member.update(_description(person.get("profile") or {}) or _description(person))
                 members.append(member)
         fields = premiere_fields(item)
         tags = _production_tags(item)
@@ -223,6 +252,7 @@ def staged_records(items: list[dict]) -> list[dict]:
                 "url": f"https://www2.theapolis.de/de/produktionen/{quote(_identity(item), safe='')}",
                 **fields,
                 "tags": tags,
+                **_description(item),
                 "memberships": members,
             }
         )
@@ -256,11 +286,16 @@ async def _profile_for_name(session: aiohttp.ClientSession, name: str) -> dict |
     if not isinstance(profile, dict) or profile.get("slug") != slug:
         raise ValueError(f"Theapolis profile identity changed for {slug!r}")
     personal_data = profile.get("personalData") or {}
-    return {
+    result = {
         "slug": slug,
         "url": f"{SITE}/de/profil/{quote(slug, safe='')}",
         "birthDate": personal_data.get("birthDate") or personal_data.get("birthData"),
     }
+    biography = "\n\n".join(
+        dict.fromkeys(value for key in ("biographyText", "extraBiographyText") if (value := profile.get(key)))
+    )
+    result["description"] = biography or None
+    return result
 
 
 class _ProfileCache:
@@ -285,7 +320,10 @@ class _ProfileCache:
 
     def get(self, name: str) -> tuple[bool, dict | None]:
         entry = self.entries.get(name)
-        return (True, entry.profile) if entry and entry.captured_at >= time() - 30 * 86400 else (False, None)
+        current = entry and entry.captured_at >= time() - 30 * 86400
+        # Older cache entries have no biography field and need one refresh.
+        complete = entry and (entry.profile is None or "description" in entry.profile)
+        return (True, entry.profile) if current and complete else (False, None)
 
     @staticmethod
     def _put(entry: TheapolisProfileCache) -> None:
@@ -301,7 +339,11 @@ class _ProfileCache:
             session.commit()
 
     async def put(self, name: str, profile: dict | None) -> None:
-        entry = TheapolisProfileCache(name=name, profile=profile, captured_at=time())
+        entry = TheapolisProfileCache(
+            name=name,
+            profile={**profile, "description": profile.get("description")} if profile else None,
+            captured_at=time(),
+        )
         async with self._write_lock:
             task = asyncio.create_task(asyncio.to_thread(self._put, entry))
             try:
@@ -360,6 +402,43 @@ async def _enrich_people(
     )
 
 
+async def _enrich_organizations(
+    session: aiohttp.ClientSession,
+    items: list[dict],
+    concurrency: int,
+    *,
+    checkpoint: Callable[[], None] | None = None,
+) -> None:
+    organizations: dict[str, list[dict]] = {}
+    for item in items:
+        if organization := item.get("organization"):
+            organizations.setdefault(_identity(organization), []).append(organization)
+    if not organizations:
+        return
+    found = set()
+
+    async def page(number: int) -> dict:
+        query = urlencode({"page": number, "items": 500})
+        result = json.loads(await _fetch(session, f"{SITE}/api/de/organizations?{query}"))
+        if result.get("success") is not True:
+            raise ValueError(f"Theapolis rejected organization page {number}")
+        data = result["data"]
+        for organization in data["items"]:
+            identity = _identity(organization)
+            for target in organizations.get(identity, ()):
+                if organization.get("description"):
+                    target["description"] = organization["description"]
+                found.add(identity)
+        return data
+
+    first = await page(1)
+    pages = math.ceil(first["totalCount"] / first["numItemsPerPage"])
+    with tqdm(total=pages, initial=1, desc="Organization pages", unit="page") as progress:
+        await _parallel(range(2, pages + 1), page, concurrency, progress=progress, checkpoint=checkpoint)
+    if missing := organizations.keys() - found:
+        LOG.warning("%s Theapolis organizations missing from directory; production summaries retained", len(missing))
+
+
 def _source_path(path: Path) -> Path:
     return path.with_suffix(".source.json")
 
@@ -391,6 +470,7 @@ async def download(output: Path | None = None, *, concurrency: int = 10, max_pag
     page_items: dict[int, list[dict]] = {}
     metadata = {
         "success": False,
+        "format_version": 2,
         "captured_at": dt.datetime.now(dt.UTC).isoformat(),
         "partial": True,
         "items": items,
@@ -425,6 +505,7 @@ async def download(output: Path | None = None, *, concurrency: int = 10, max_pag
         if not items:
             raise ValueError("Theapolis returned no productions")
         try:
+            await _enrich_organizations(session, items, concurrency, checkpoint=_periodic_checkpoint(checkpoint))
             await _enrich_people(
                 session,
                 items,
@@ -593,6 +674,7 @@ def _add_people(item: dict, people: dict) -> list[tuple[str, str]]:
                 raise ValueError(f"Inconsistent name for person ID {person_id}")
             if profile.get("url"):
                 payload["profile_url"] = profile["url"]
+            payload.update(_description(profile) or _description(person))
             payload.update(_profile_birthday(profile))
             if role not in payload["type"]:
                 payload["type"].append(role)
@@ -600,10 +682,12 @@ def _add_people(item: dict, people: dict) -> list[tuple[str, str]]:
     return credits
 
 
-def _organization(item: dict) -> tuple[dict, str | None]:
+def _organization(item: dict, previous: dict) -> tuple[dict, str | None]:
     location = item.get("location") or {}
     country, region = split_country(location.get("country"))
-    payload = {"name": _name(item), "city": location.get("city"), "country": country}
+    payload = {"name": _name(item), "city": location.get("city"), "country": country, **_description(item)}
+    if previous.get("description") and not payload.get("description"):
+        payload["description"] = previous["description"]
     if region:
         payload["region"] = region
     if geolocation := location.get("geolocation"):
@@ -653,9 +737,9 @@ def _prepare_import(
             raise TypeError(f"Invalid Theapolis organization for production {production_id}")
         org_id = _identity(org) if org else None
         if org_id:
-            organizations[org_id] = _organization(org)
+            organizations[org_id] = _organization(org, organizations.get(org_id, ({}, None))[0])
         credits = _add_people(item, people)
-        payload = {"name": name, **premiere_fields(item), "tags": _production_tags(item)}
+        payload = {"name": name, **premiere_fields(item), "tags": _production_tags(item), **_description(item)}
         productions.append((production_id, org_id, payload, credits))
     for key, (payload, url) in organizations.items():
         organizations[key] = (
@@ -704,10 +788,24 @@ def _read_import_snapshot(json_path: Path) -> dict:
             for member, source_member in zip(record["memberships"], source_record["memberships"], strict=False):
                 if member["external_id"] is None:
                     source_member["external_id"] = None
+        if source.get("format_version", 1) < 2:
+            _legacy_staged_metadata(actual, expected, source["items"])
         if actual != expected:
             raise ValueError("Staged JSON differs from its Theapolis source metadata; re-export both files")
         snapshot = source
     return snapshot
+
+
+def _legacy_staged_metadata(actual: list[dict], expected: list[dict], items: list[dict]) -> None:
+    """Compare old staged files without fields the old exporter never extracted."""
+    for record, source_record, item in zip(actual, expected, items, strict=False):
+        if record["tags"] != source_record["tags"] and record["tags"] == _production_tags({**item, "type": None}):
+            source_record["tags"] = record["tags"]
+        if not record["description"]:
+            source_record["description"] = None
+        for member, source_member in zip(record["memberships"], source_record["memberships"], strict=False):
+            if not member["description"]:
+                source_member["description"] = None
 
 
 @contextmanager
@@ -801,33 +899,49 @@ def _merge_people_by_name(session: Session, source_id: uuid.UUID, names: set[str
     groups: dict[str, dict[str, set[uuid.UUID]]] = {}
     LOG.info("Loading Theapolis people for cross-role matching")
     records = session.exec(
-        select(SourceRecord).where(SourceRecord.source_id == source_id, SourceRecord.entity_type == EntityType.PERSON)
-    ).all()
-    for record in records:
-        group, _, source_id_part = (record.external_id or "").partition(":")
-        name = record.payload.get("incoming", {}).get("name")
+        select(
+            SourceRecord.external_id, SourceRecord.entity_id, col(SourceRecord.payload)["incoming"]["name"].as_string()
+        ).where(SourceRecord.source_id == source_id, SourceRecord.entity_type == EntityType.PERSON)
+    )
+    for external_id, identity, name in records:
+        group, _, source_id_part = (external_id or "").partition(":")
         if group in {"directors", "creators"} and source_id_part and name in names:
-            groups.setdefault(name, {}).setdefault(group, set()).add(record.entity_id)
+            groups.setdefault(name, {}).setdefault(group, set()).add(identity)
     session.commit()
+    # Connected name groups can share an identity after an earlier manual merge.
+    selections: dict[str, set[uuid.UUID]] = {}
+    owners: dict[uuid.UUID, str] = {}
+    for name, roles in groups.items():
+        if {"directors", "creators"} <= roles.keys():
+            identities = set().union(*roles.values())
+            if len(identities) < 2:
+                continue
+            related = {owners[identity] for identity in identities if identity in owners}
+            for previous in related:
+                identities.update(selections.pop(previous))
+            selections[name] = identities
+            owners.update(dict.fromkeys(identities, name))
     redirects = {}
-    for name, roles in tqdm(groups.items(), total=len(groups), desc="Matching people", unit="name"):
-        if not {"directors", "creators"} <= roles.keys():
-            continue
-        identities = {redirects.get(identity, identity) for role in roles.values() for identity in role}
-        if len(identities) < 2:
-            continue
-        preview = preview_entity_merge(EntityType.PERSON, identities)
-        if any(field["conflict"] for field in preview["fields"]):
-            raise ValueError(f"Conflicting fields for Theapolis person {name!r}; merge manually before reimporting")
-        target = merge_entities(
-            EntityType.PERSON,
-            identities,
-            target_id=preview["target_id"],
-            revision=preview["revision"],
-            actor_id=ACTOR,
-        )
-        redirects.update(dict.fromkeys(identities, target))
-        redirects.update({identity: target if value in identities else value for identity, value in redirects.items()})
+    with tqdm(total=len(selections), desc="Matching people", unit="name") as progress:
+        for number, batch in enumerate(batched(selections.items(), BATCH_SIZE, strict=False), 1):
+            with _import_batch(session, "matching people", number):
+                merged, deferred = merge_scoped_people(session, source_id, dict(batch), actor_id=ACTOR)
+                redirects.update(merged)
+            for name, identities in deferred.items():
+                preview = preview_entity_merge(EntityType.PERSON, identities)
+                if any(field["conflict"] for field in preview["fields"]):
+                    raise ValueError(
+                        f"Conflicting fields for Theapolis person {name!r}; merge manually before reimporting"
+                    )
+                target = merge_entities(
+                    EntityType.PERSON,
+                    identities,
+                    target_id=preview["target_id"],
+                    revision=preview["revision"],
+                    actor_id=ACTOR,
+                )
+                redirects.update(dict.fromkeys(identities, target))
+            progress.update(len(batch))
     session.expire_all()
     return redirects
 
@@ -955,12 +1069,15 @@ def main() -> None:
         asyncio.run(download(args.json, concurrency=args.concurrency, max_pages=args.max_pages))
     elif args.command == "images":
         asyncio.run(download_images(args.output, concurrency=args.concurrency, limit=args.limit))
+    elif args.command == "migrate-cases":
+        print(json.dumps({kind: len(cases) for kind, cases in migrate_pending_cases().items()}))
     else:
-        result = (
-            migrate_pending_cases()
-            if args.command == "migrate-cases"
-            else import_all(args.json, dach_only=args.dach_only)
-        )
+        started = monotonic()
+        try:
+            result = import_all(args.json, dach_only=args.dach_only)
+        finally:
+            elapsed = monotonic() - started
+            LOG.info("Theapolis import took %dm %.1fs", elapsed // 60, elapsed % 60)
         print(json.dumps({kind: len(cases) for kind, cases in result.items()}))
 
 

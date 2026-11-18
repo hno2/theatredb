@@ -82,7 +82,7 @@ FORM_FIELD_KINDS: dict[object, str] = {
     dt.datetime: "datetime",
     uuid.UUID: "uuid",
 }
-LINK_IDENTITY_FIELDS = {
+LINK_IDENTITY_FIELDS: dict[type, tuple[str, ...]] = {
     ProductionMembership: ("production_id", "person_id", "role", "character"),
     TextContribution: ("text_id", "person_id", "role"),
     OrganizationMembership: (

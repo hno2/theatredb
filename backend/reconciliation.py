@@ -1275,7 +1275,8 @@ def _merge_options(kind: EntityType, states: list[dict], field: str, *, is_date:
     return values
 
 
-def _merge_fields(kind: EntityType, states: list[dict]) -> tuple[dict, list[dict]]:
+def merge_entity_fields(kind: EntityType, states: list[dict]) -> tuple[dict, list[dict]]:
+    """Combine person/text fields with shared list, date precision, and conflict rules."""
     model = Person if kind == EntityType.PERSON else Text
     result = dict(states[0]["record"])
     fields = []
@@ -1319,7 +1320,7 @@ def _entity_merge_preview(
         raise ValueError("Selected records no longer exist. Refresh and review again.")
     ordered = sorted(records, key=lambda record: (record.id != target_id, record.id))
     states = [_state(session, kind, record) for record in ordered]
-    result, fields = _merge_fields(kind, states)
+    result, fields = merge_entity_fields(kind, states)
     return {
         "kind": kind.value,
         "target_id": str(target_id),

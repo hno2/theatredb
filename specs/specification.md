@@ -44,7 +44,14 @@ administrative tools for imports, review, and data maintenance.
 - Theapolis intentionally merges director and creator records with exactly
   matching names, including records from earlier imports. This can merge
   different people who share a name; conflicting fields stop import for manual
-  resolution. Other-source matching uses its own review workflow.
+  resolution. Compatible Theapolis-only groups merge in bounded transactions
+  with references, source identities, redirects, decisions, and audit history
+  preserved; groups involving other sources retain the reviewed merge path.
+  Other-source matching uses its own review workflow.
+- Theapolis premiere types (including `UA`) become production tags.
+  Organization directory descriptions and public person biographies are
+  downloaded and fill empty descriptions; supplied production descriptions
+  follow the same rule. Missing descriptions are not invented.
 
 ## Managed crawls
 

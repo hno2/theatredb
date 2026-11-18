@@ -372,7 +372,7 @@ class OrganizationMembership(DomainModel, table=True):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     organization_id: uuid.UUID = Field(foreign_key="organization.id", index=True)
-    person_id: uuid.UUID = Field(foreign_key="person.id")
+    person_id: uuid.UUID = Field(foreign_key="person.id", index=True)
     role: str | None = None  # e.g. "artistic director", "ensemble member", etc.
     start_date: dt.datetime | None = Field(default=None, sa_type=DateTime)
     start_date_precision: DatePrecision | None = None
@@ -459,7 +459,7 @@ class TextContribution(SQLModel, table=True):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     text_id: uuid.UUID = Field(foreign_key="text.id", index=True)
-    person_id: uuid.UUID = Field(foreign_key="person.id")
+    person_id: uuid.UUID = Field(foreign_key="person.id", index=True)
     role: str | None = None
 
     text: Text = Relationship(back_populates="contributions")
@@ -532,7 +532,7 @@ class ProductionMembership(SQLModel, table=True):
     # person assignment with role name in this specific play (e.g. "Regie")
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     production_id: uuid.UUID = Field(foreign_key="production.id", index=True)
-    person_id: uuid.UUID = Field(foreign_key="person.id")
+    person_id: uuid.UUID = Field(foreign_key="person.id", index=True)
     role: str | None = None  # e.g. "Regie", "Schauspieler", "Dramaturgie", etc. # TODO: define somewhere else
     character: str | None = None  # for actors
 
@@ -570,7 +570,7 @@ class AwardNomination(DomainModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     award_id: uuid.UUID = Field(foreign_key="award.id")
     production_id: uuid.UUID | None = Field(default=None, foreign_key="production.id")  # optional: ties to a production
-    person_id: uuid.UUID | None = Field(default=None, foreign_key="person.id")  # optional: ties to a person
+    person_id: uuid.UUID | None = Field(default=None, foreign_key="person.id", index=True)  # optional: ties to a person
     category: str  # e.g. "Best Director", "Best Set Design"
     date: dt.datetime = Field(sa_type=DateTime)
     date_precision: DatePrecision

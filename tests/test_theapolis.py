@@ -17,15 +17,22 @@ from sqlmodel import Session, SQLModel, col, create_engine, select
 from yarl import URL
 
 from backend import user_management
+from backend.config import canonical_role
+from backend.date_precision import DatePrecision
 from backend.entity_management import browse_entities, list_entities
 from backend.import_status import theatre_status
 from backend.ingestion import theapolis
 from backend.ingestion.staging import staging_schema, validate_records
 from backend.ingestion.theapolis_import import migrate_pending_cases
 from backend.models import (
+    Award,
+    AwardNomination,
+    AwardResult,
+    EntityRedirect,
     EntitySource,
     EntityType,
     Organization,
+    OrganizationMembership,
     Person,
     Production,
     ProductionMembership,
@@ -131,6 +138,10 @@ def test_export_paginates_parallel_and_preserves_dates(monkeypatch, tmp_path, it
         nonlocal active, peak
         if "/api/de/profiles?" in url:
             return b'{"success": true, "data": {"items": []}}'
+        if "/api/de/organizations?" in url:
+            return json.dumps(
+                {"success": True, "data": {"totalCount": 1, "numItemsPerPage": 500, "items": [item["organization"]]}}
+            ).encode()
         page = int(parse_qs(urlsplit(url).query)["page"][0])
         requested.append(page)
         active += 1
@@ -181,7 +192,8 @@ def test_production_tags_and_profile_birthday_preserve_source_identity(db, tmp_p
         "skills": [{"title": "Fechten"}],
     }
     item["genre"] = {"name": "Schauspiel"}
-    item["tags"] = ["UA", {"name": "Musical"}]
+    item["type"] = {"id": 1, "name": "Uraufführung", "pill": "UA"}
+    item["tags"] = [{"name": "Musical"}]
     item["independent"] = True
     item["directors"][0]["profile"] = profile
     path = tmp_path / "profile-export.json"
@@ -210,6 +222,103 @@ def test_production_tags_and_profile_birthday_preserve_source_identity(db, tmp_p
             "Freie Darstellende Künste",
         ]
         assert result["person"]
+
+
+def test_download_imports_live_api_shaped_types_and_descriptions(db, monkeypatch, tmp_path, item):
+    item["type"] = {"id": 1, "name": "Uraufführung", "pill": "UA"}
+    item["description"] = "<p>Production <strong>summary</strong>.</p>"
+    organization = {**item["organization"], "description": "<p>Theatre &amp; opera.</p>"}
+    calls = []
+
+    async def fetch(session, url):
+        calls.append(url)
+        await asyncio.sleep(0)
+        if "/api/de/productions?" in url:
+            data = {"totalCount": 1, "numItemsPerPage": 500, "items": [item]}
+        elif "/api/de/organizations?" in url:
+            page = int(parse_qs(urlsplit(url).query)["page"][0])
+            data = {"totalCount": 1000, "numItemsPerPage": 500, "items": [organization] if page == 2 else []}
+        elif "/api/de/profiles?" in url:
+            name = parse_qs(urlsplit(url).query)["search"][0]
+            data = {"items": [{"name": "Alex", "slug": "alex"}] if name == "Alex" else []}
+        else:
+            assert url.endswith("/de/people/api/show/alex")
+            return json.dumps(
+                {
+                    "code": 200,
+                    "error": False,
+                    "data": {
+                        "profile": {
+                            "slug": "alex",
+                            "biographyText": "<p>Bio <strong>one</strong>.</p>",
+                            "extraBiographyText": "<p>Extra.</p>",
+                        }
+                    },
+                }
+            ).encode()
+        return json.dumps({"success": True, "data": data}).encode()
+
+    monkeypatch.setattr(theapolis, "_fetch", fetch)
+    path = asyncio.run(theapolis.download(tmp_path / "descriptions.json", concurrency=2))
+    staged = json.loads(path.read_text())[0]
+    assert staged["tags"] == ["UA"]
+    assert staged["description"] == "Production **summary**."
+    assert staged["memberships"][0]["description"] == "Bio **one**.\n\nExtra."
+    raw = json.loads(theapolis._source_path(path).read_text())
+    assert raw["items"][0]["organization"]["description"] == organization["description"]
+    assert len([url for url in calls if "/api/de/organizations?" in url]) == 2
+    result = theapolis.import_all(path, dach_only=False)
+    with Session(db) as session:
+        assert session.exec(select(Organization)).one().description == "Theatre & opera."
+        assert session.exec(select(Production)).one().description == "Production **summary**."
+        person = session.exec(select(Person).where(Person.name == "Alex")).one()
+        assert person.description == "Bio **one**.\n\nExtra."
+        person.description = "Manual biography"
+        session.commit()
+    assert theapolis.import_all(path, dach_only=False) == result
+    with Session(db) as session:
+        assert session.exec(select(Person).where(Person.name == "Alex")).one().description == "Manual biography"
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_old_export_metadata_is_upgraded_but_new_exports_remain_checked(db, tmp_path, item, version):
+    legacy = theapolis.staged_records([item])
+    item["type"] = {"id": 1, "name": "Uraufführung", "pill": "UA"}
+    item["description"] = "<p>Source description.</p>"
+    path = tmp_path / "legacy-metadata.json"
+    theapolis._write_json(path, legacy)
+    theapolis._write_json(theapolis._source_path(path), {"format_version": version, "items": [item]})
+    if version == 2:
+        with pytest.raises(ValueError, match="differs"):
+            theapolis.import_all(path, dach_only=False)
+    else:
+        theapolis.import_all(path, dach_only=False)
+        with Session(db) as session:
+            production = session.exec(select(Production)).one()
+            assert production.tags == ["UA"]
+            assert production.description == "Source description."
+
+
+def test_legacy_export_still_rejects_missing_explicit_source_tags(tmp_path, item):
+    item["tags"] = ["UA"]
+    item["type"] = {"pill": "UA"}
+    records = theapolis.staged_records([item])
+    records[0]["tags"] = []
+    path = tmp_path / "edited-legacy.json"
+    theapolis._write_json(path, records)
+    theapolis._write_json(theapolis._source_path(path), {"items": [item]})
+    with pytest.raises(ValueError, match="differs"):
+        theapolis.import_all(path, dach_only=False)
+
+
+def test_repeated_organization_keeps_available_description(db, tmp_path, item):
+    first = copy.deepcopy(item)
+    first["organization"]["description"] = "<p>Theatre description.</p>"
+    path = tmp_path / "organization-description.json"
+    path.write_text(json.dumps({"items": [first, {**item, "id": 124}]}))
+    theapolis.import_all(path, dach_only=False)
+    with Session(db) as session:
+        assert session.exec(select(Organization)).one().description == "Theatre description."
 
 
 @pytest.mark.parametrize("birthday", [" ", "unknown", "1966-02-31", "1966-00-00"])
@@ -276,6 +385,7 @@ def test_profile_lookup_uses_unique_slug_in_person_url(monkeypatch):
         "slug": "alex-profile",
         "url": f"{theapolis.SITE}/de/profil/alex-profile",
         "birthDate": "1966-05-19",
+        "description": None,
     }
     assert len(calls) == 2
 
@@ -499,6 +609,25 @@ def test_profile_cache_reuses_found_and_missing_profiles_and_expires(monkeypatch
     assert calls == ["Alex", "Other Alex"]
 
 
+def test_profile_cache_refreshes_legacy_entries_for_biographies(monkeypatch, item):
+    theapolis._ProfileCache._put(
+        TheapolisProfileCache(name="Alex", profile={"slug": "alex"}, captured_at=theapolis.time())
+    )
+    lookup = AsyncMock(return_value={"slug": "alex", "description": "<p>Biography.</p>"})
+    monkeypatch.setattr(theapolis, "_profile_for_name", lookup)
+
+    async def run():
+        async with theapolis._session(1) as session:
+            records = [copy.deepcopy(item)]
+            await theapolis._enrich_people(session, records, 1, cache=await theapolis._ProfileCache.load())
+            return records
+
+    assert asyncio.run(run())[0]["directors"][0]["profile"]["description"] == "<p>Biography.</p>"
+    lookup.reset_mock()
+    asyncio.run(run())
+    lookup.assert_not_called()
+
+
 def test_profile_cache_resumes_after_error_without_caching_failure(monkeypatch, tmp_path, item):
     calls = []
     failing = True
@@ -668,6 +797,10 @@ def test_export_with_placeholder_birthday_completes(monkeypatch, tmp_path, item,
 
     async def fetch(session, url):
         await asyncio.sleep(0)
+        if "/api/de/organizations?" in url:
+            return json.dumps(
+                {"success": True, "data": {"totalCount": 1, "numItemsPerPage": 500, "items": [item["organization"]]}}
+            ).encode()
         return json.dumps(
             {"success": True, "data": {"totalCount": 1, "numItemsPerPage": 500, "items": [item]}}
         ).encode()
@@ -719,6 +852,10 @@ def test_profile_error_checkpoints_completed_enrichment(monkeypatch, tmp_path, i
 
     async def fetch(session, url):
         await asyncio.sleep(0)
+        if "/api/de/organizations?" in url:
+            return json.dumps(
+                {"success": True, "data": {"totalCount": 1, "numItemsPerPage": 500, "items": [item["organization"]]}}
+            ).encode()
         return json.dumps(
             {"success": True, "data": {"totalCount": 1, "numItemsPerPage": 500, "items": [item]}}
         ).encode()
@@ -997,6 +1134,150 @@ def test_cross_role_merge_rejects_conflicting_person_fields(db, monkeypatch, tmp
         }
 
 
+def test_batched_cross_role_merge_preserves_all_references_and_audits(db, monkeypatch, tmp_path, item):
+    item["creators"] = [{"id": 77, "name": "Alex"}]
+    path = tmp_path / "references.json"
+    path.write_text(json.dumps({"items": [item]}))
+    with monkeypatch.context() as patch:
+        patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
+        result = theapolis.import_all(path, dach_only=False)
+    identities = sorted(uuid.UUID(identity) for identity in result["person"])
+    target, duplicate = identities
+    alias = uuid.uuid4()
+    with Session(db) as session:
+        production = session.exec(select(Production)).one()
+        text = session.exec(select(Text)).one()
+        organization = session.exec(select(Organization)).one()
+        award = Award(name="Test award")
+        session.add(award)
+        session.flush()
+        session.add_all(
+            [
+                EntityRedirect(entity_type=EntityType.PERSON, old_id=alias, target_id=duplicate),
+                ReconciliationCase(
+                    key="pending-alias",
+                    entity_type=EntityType.PERSON,
+                    operation="merge",
+                    target_id=target,
+                    duplicate_id=alias,
+                    reason="Review",
+                ),
+                *[
+                    row
+                    for person_id in identities
+                    for row in (
+                        ProductionMembership(production_id=production.id, person_id=person_id, role="Regie"),
+                        TextContribution(text_id=text.id, person_id=person_id, role="author"),
+                        OrganizationMembership(organization_id=organization.id, person_id=person_id, role="director"),
+                        AwardNomination(
+                            award_id=award.id,
+                            person_id=person_id,
+                            category="Direction",
+                            date=dt.datetime(2026, 1, 1),
+                            date_precision=DatePrecision.YEAR,
+                            result=AwardResult.NOMINATED,
+                        ),
+                    )
+                ],
+            ]
+        )
+        session.commit()
+    result = theapolis.import_all(path, dach_only=False)
+    assert result["person"] == [str(target)]
+    with Session(db) as session:
+        assert session.get(Person, duplicate) is None
+        memberships = session.exec(select(ProductionMembership)).all()
+        assert len(memberships) == 2
+        assert {(row.person_id, canonical_role(row.role)) for row in memberships} == {
+            (target, "director"),
+            (target, "author"),
+        }
+        for model in (TextContribution, OrganizationMembership, AwardNomination):
+            assert [row.person_id for row in session.exec(select(model))] == [target]
+        assert {row.target_id for row in session.exec(select(EntityRedirect))} == {target}
+        assert (
+            session.exec(select(ReconciliationCase).where(ReconciliationCase.key == "pending-alias")).one().status
+            == "approved"
+        )
+        records = session.exec(select(SourceRecord).where(SourceRecord.entity_type == EntityType.PERSON)).all()
+        assert {record.entity_id for record in records} == {target}
+        assert all(record.payload["merged_sources"] for record in records)
+        deleted = session.exec(select(SCD2History).where(SCD2History.operation == "delete")).all()
+        assert {row.entity_name for row in deleted} >= {"person", "textcontribution", "productionmembership"}
+        assert all(not row.is_current and row.valid_to is not None for row in deleted)
+        person_history = session.exec(
+            select(SCD2History).where(SCD2History.entity_name == "person", SCD2History.entity_id == str(duplicate))
+        ).all()
+        assert all(not row.is_current for row in person_history)
+    assert theapolis.import_all(path, dach_only=False) == result
+
+
+def test_matching_keeps_other_source_identities_on_reviewed_path(db, monkeypatch, tmp_path, item):
+    item["creators"] = [{"id": 77, "name": "Alex"}]
+    path = tmp_path / "mixed-source.json"
+    path.write_text(json.dumps({"items": [item]}))
+    with monkeypatch.context() as patch:
+        patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
+        result = theapolis.import_all(path, dach_only=False)
+    with Session(db) as session:
+        source = Source(name="Other source")
+        session.add(source)
+        session.flush()
+        source_id = source.id
+        session.add(
+            EntitySource(
+                source_id=source_id,
+                entity_type=EntityType.PERSON,
+                entity_id=uuid.UUID(result["person"][1]),
+                external_id="other:123",
+            )
+        )
+        session.commit()
+    result = theapolis.import_all(path, dach_only=False)
+    with Session(db) as session:
+        person = session.exec(select(Person)).one()
+        assert {link.source_id for link in person.sources} >= {source_id}
+        record = session.exec(select(SourceRecord).where(SourceRecord.source_id == source_id)).one()
+        assert record.external_id == "other:123" and record.entity_id == person.id
+    assert theapolis.import_all(path, dach_only=False) == result
+
+
+@pytest.mark.parametrize("size", [50, 200])
+@pytest.mark.parametrize("existing_duplicates", [False, True])
+def test_cross_role_matching_uses_bounded_queries(db, monkeypatch, tmp_path, item, size, existing_duplicates):
+    items = [
+        {
+            **item,
+            "id": identity,
+            "directors": [{"id": identity, "name": f"Person {identity}"}],
+            "creators": [{"id": identity, "name": f"Person {identity}"}],
+        }
+        for identity in range(size)
+    ]
+    path = tmp_path / "cross-role-batch.json"
+    path.write_text(json.dumps({"items": items}))
+    if existing_duplicates:
+        with monkeypatch.context() as patch:
+            patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
+            theapolis.import_all(path, dach_only=False)
+    statements = []
+
+    def record_statement(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(db, "before_cursor_execute", record_statement)
+    try:
+        result = theapolis.import_all(path, dach_only=False)
+        assert len(result["person"]) == size
+        assert len(statements) < 100
+        assert sum(statement.startswith("SELECT ") for statement in statements) < 60
+        statements.clear()
+        assert theapolis.import_all(path, dach_only=False) == result
+        assert not any(statement.startswith(("INSERT ", "UPDATE ", "DELETE ")) for statement in statements)
+    finally:
+        event.remove(db, "before_cursor_execute", record_statement)
+
+
 def test_import_reports_cross_role_matching_before_productions(db, tmp_path, item, caplog, capsys):
     path = tmp_path / "progress.json"
     path.write_text(json.dumps({"items": [item]}))
@@ -1100,6 +1381,10 @@ def test_default_exports_use_shared_timestamp_scope_names_and_import_latest_full
         await asyncio.sleep(0)
         if "/api/de/profiles?" in url:
             return b'{"success": true, "data": {"items": []}}'
+        if "/api/de/organizations?" in url:
+            return json.dumps(
+                {"success": True, "data": {"totalCount": 1, "numItemsPerPage": 500, "items": [item["organization"]]}}
+            ).encode()
         return json.dumps(
             {"success": True, "data": {"totalCount": 1, "numItemsPerPage": 500, "items": [item]}}
         ).encode()

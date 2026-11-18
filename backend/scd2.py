@@ -26,12 +26,17 @@ class SCD2History(SQLModel, table=True):
 
 
 def add_scd2_events(
-    session: Session, *, inserted: Sequence[SQLModel], updated: Sequence[SQLModel], actor_id: str | None
+    session: Session,
+    *,
+    inserted: Sequence[SQLModel],
+    updated: Sequence[SQLModel],
+    actor_id: str | None,
+    deleted: Sequence[SQLModel] = (),
 ) -> None:
     """Audit an import batch without querying history for newly allocated identities."""
     now = dt.datetime.now(dt.UTC)
     versions = {}
-    keys = [(type(row).__name__.lower(), str(row.model_dump()["id"])) for row in updated]
+    keys = [(type(row).__name__.lower(), str(row.model_dump()["id"])) for row in [*updated, *deleted]]
     if keys:
         identity = tuple_(SCD2History.entity_name, SCD2History.entity_id)
         versions = {
@@ -49,7 +54,7 @@ def add_scd2_events(
             execution_options={"synchronize_session": False},
         )
     events = []
-    for operation, rows in (("insert", inserted), ("update", updated)):
+    for operation, rows in (("insert", inserted), ("update", updated), ("delete", deleted)):
         for row in rows:
             name, entity_id = type(row).__name__.lower(), str(row.model_dump()["id"])
             events.append(
@@ -59,7 +64,8 @@ def add_scd2_events(
                     "operation": operation,
                     "version": versions.get((name, entity_id), 0) + 1,
                     "valid_from": now,
-                    "is_current": True,
+                    "valid_to": now if operation == "delete" else None,
+                    "is_current": operation != "delete",
                     "actor_id": actor_id,
                     "snapshot": row.model_dump(mode="json"),
                 }
