@@ -26,7 +26,7 @@
 - [x] **CRUD reads:** paginate/filter in SQL; fetch selected entity's sources with a scoped join,
   not both full tables. Keep native Streamlit tables.
   See [generic management UI](frontend/management/uifactory.py).
-- [ ] **Text detail:** batch productions by family member; avoid loading every text just to
+- [x] **Text detail:** batch productions by family member; avoid loading every text just to
   render one family. See [text management](frontend/management/texts.py).
 - [x] **People matching:** publisher missing-credit paths still scan all people per name.
   Reuse one request-local lookup; keep ambiguity checks and source identity boundaries.
