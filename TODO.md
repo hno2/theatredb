@@ -20,7 +20,7 @@
 
 ## Performance / reuse follow-up
 
-- [ ] **Startup:** management pages still run migration/queue checks per rerun.
+- [x] **Startup:** management pages still run migration/queue checks per rerun.
   Move checks to explicit startup; preserve reset/reinitialize behavior. No naive global cache.
   See [database lifecycle](backend/user_management.py) and [reset CLI](backend/db.py).
 - [ ] **CRUD reads:** paginate/filter in SQL; fetch selected entity's sources with a scoped join,

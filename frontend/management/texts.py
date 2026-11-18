@@ -29,7 +29,7 @@ from backend.texts import (
     resolve_text_case,
     work_family,
 )
-from backend.user_management import get_session, init_db
+from backend.user_management import get_session
 from backend.wikidata import create_text_stub, enrich_text, search_texts
 from frontend.management.uifactory import _actor_id, render_sqlmodel_crud
 
@@ -543,7 +543,6 @@ def _inbox() -> None:
 
 def main() -> None:
     """Render text management page."""
-    init_db()
     render_sqlmodel_crud(
         model_cls=Text,
         merge_kind="text",

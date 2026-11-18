@@ -12,7 +12,6 @@ from backend.crawling.config import RecordCrawl, TheatreCrawl
 from backend.entity_management import list_entities
 from backend.ingestion.configurable import CONFIG_DIR, load_config
 from backend.models import CrawlRun, Organization, Source
-from backend.user_management import init_db
 from frontend.management.uifactory import _actor_id, render_sqlmodel_crud
 from frontend.views.organization import render_web_link
 
@@ -207,7 +206,6 @@ def _history(history: list[CrawlRun]) -> None:
 
 def main() -> None:
     """Render source metadata and source-owned crawler configuration/history."""
-    init_db()
     st.title("Quellen & Crawls")
     crawls, metadata = st.tabs(["Crawler", "Quellen bearbeiten"])
     with metadata:

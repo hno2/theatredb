@@ -17,6 +17,7 @@ Install project dependencies, start PostgreSQL, then start the app:
 ```bash
 uv sync --all-groups
 docker compose up -d --wait db
+uv run python -m backend.db migrate
 uv run streamlit run frontend/app.py
 ```
 
