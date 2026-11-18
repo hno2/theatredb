@@ -8,7 +8,7 @@ import json
 import re
 import unicodedata
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from contextlib import nullcontext
 from difflib import SequenceMatcher
 from operator import itemgetter
@@ -18,6 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 from sqlalchemy import Boolean, Integer, String, Uuid, and_, cast, func, literal, or_, union_all, values
 from sqlalchemy import column as sql_column
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import CTE
 from sqlmodel import Session, SQLModel, col, select
 from sqlmodel.sql.expression import Select, SelectOfScalar
@@ -114,11 +115,17 @@ def _get(session: Session, kind: EntityType, entity_id: uuid.UUID | str) -> Enti
 
 
 def _entity_search_statement(
-    session: Session, kind: EntityType, query: str, *, limit: int | None, offset: int
+    session: Session,
+    kind: EntityType,
+    query: str,
+    *,
+    limit: int | None,
+    offset: int,
+    filters: Sequence[ColumnElement[bool]] = (),
 ) -> SelectOfScalar[Entity]:
     model = ENTITY_MODELS[kind]
     label = getattr(model, "title" if kind == EntityType.TEXT else "name")
-    stmt = select(model)
+    stmt = select(model).where(*filters)
     if query.strip():
         try:
             entity_id = uuid.UUID(query.strip())
@@ -136,17 +143,19 @@ def search_entities(kind: EntityType | str, query: str = "", *, limit: int = 50,
         return [entity_snapshot(row) for row in session.exec(stmt).all()]
 
 
-def count_people_for_merge(query: str) -> int:
+def count_people_for_merge(query: str, filters: Sequence[ColumnElement[bool]] = ()) -> int:
     """Count all matching people using the same filter as the paged table."""
     with get_session() as session:
-        stmt = _entity_search_statement(session, EntityType.PERSON, query, limit=None, offset=0)
+        stmt = _entity_search_statement(session, EntityType.PERSON, query, limit=None, offset=0, filters=filters)
         return session.exec(select(func.count()).select_from(stmt.order_by(None).offset(None).subquery())).one()
 
 
-def search_people_for_merge(query: str = "", *, limit: int | None = 100, offset: int = 0) -> list[dict]:
+def search_people_for_merge(
+    query: str = "", *, limit: int | None = 100, offset: int = 0, filters: Sequence[ColumnElement[bool]] = ()
+) -> list[dict]:
     """Fetch people and production/theatre context in two queries; None loads all people."""
     with get_session() as session:
-        stmt = _entity_search_statement(session, EntityType.PERSON, query, limit=limit, offset=offset)
+        stmt = _entity_search_statement(session, EntityType.PERSON, query, limit=limit, offset=offset, filters=filters)
         people = [entity_snapshot(row) for row in session.exec(stmt).all()]
         if not people:
             return []
