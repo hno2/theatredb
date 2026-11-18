@@ -147,6 +147,14 @@ uv run python -m backend.ingestion.theapolis import
 ```
 
 Default import uses the DACH filter. Use `import --all` for the full export.
+Theapolis sends country and sometimes a state or canton in `organization.location.country`.
+The shared [`backend.locations`](../locations.py) helper resolves country codes,
+English/German country names, and unambiguous ISO subdivision names offline using
+`pycountry`, storing regions in `Organization.region` and countries in
+`Organization.country`. A small alias list covers local spellings absent from
+the package. Country-only labels leave the region unset; unknown or ambiguous
+labels are retained as-is with `--all`. Reimport the latest snapshot to repair
+previously imported region labels that still match their stored source observation.
 Partial exports, such as `download --max-pages 1`, are not selected by default.
 See the [product specification](../../specs/specification.md) for filtering,
 matching, conflict, and resume behavior.

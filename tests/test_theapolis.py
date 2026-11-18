@@ -801,7 +801,7 @@ def test_accepted_import_is_idempotent_and_preserves_source_only_urls(db, tmp_pa
 
 def test_dach_import_limits_all_related_records_and_counts_distinct_productions(db, tmp_path, item):
     items = []
-    for org_id, country in enumerate(["Deutschland", "Österreich", "Schweiz", "France", None, "Germany"], 1):
+    for org_id, country in enumerate(["Nordrhein-Westfalen", "Wien", "Kanton Bern", "France", None, "Germany"], 1):
         for production in range(2 if org_id != 6 else 1):
             record = copy.deepcopy(item)
             record["id"] = org_id * 100 + production
@@ -827,10 +827,10 @@ def test_dach_import_limits_all_related_records_and_counts_distinct_productions(
     }
     assert theapolis.import_all(path) == result
     with Session(db) as session:
-        assert {org.name for org in session.exec(select(Organization))} == {
-            "Organization 1",
-            "Organization 2",
-            "Organization 3",
+        assert {org.name: (org.country, org.region) for org in session.exec(select(Organization))} == {
+            "Organization 1": ("Deutschland", "Nordrhein-Westfalen"),
+            "Organization 2": ("Österreich", "Wien"),
+            "Organization 3": ("Schweiz", "Bern"),
         }
         assert {person.name for person in session.exec(select(Person))} == {
             f"{role} {number}" for role in ("Director", "Author") for number in range(1, 4)
@@ -844,15 +844,59 @@ def test_dach_import_limits_all_related_records_and_counts_distinct_productions(
     assert len(theapolis.import_all(path, dach_only=True)["production"]) == 6
     with Session(db) as session:
         assert len(session.exec(select(Production)).all()) == 12
+        foreign = session.exec(select(Organization).where(Organization.name == "Organization 4")).one()
+        assert (foreign.country, foreign.region) == ("Frankreich", None)
 
 
-@pytest.mark.parametrize("country", ["de", " Germany ", "AT", "austria", "ch", "Switzerland"])
-def test_dach_import_accepts_country_aliases(item, tmp_path, country):
+@pytest.mark.parametrize(
+    ("country", "expected"),
+    [
+        ("de", "Deutschland"),
+        (" Germany ", "Deutschland"),
+        ("AT", "Österreich"),
+        ("austria", "Österreich"),
+        ("ch", "Schweiz"),
+        ("Switzerland", "Schweiz"),
+    ],
+)
+def test_dach_import_accepts_country_aliases(db, item, tmp_path, country, expected):
     item["organization"]["location"]["country"] = country
     second = {**copy.deepcopy(item), "id": 124}
     path = tmp_path / "countries.json"
     path.write_text(json.dumps({"items": [item, second]}))
     assert len(theapolis.import_all(path, dach_only=True)["production"]) == 2
+    with Session(db) as session:
+        org = session.exec(select(Organization)).one()
+        assert (org.country, org.region) == (expected, None)
+
+
+@pytest.mark.parametrize(
+    ("existing_country", "expected"),
+    [
+        ("Kanton Tessin", ("Schweiz", "Tessin")),
+        ("Italien", ("Italien", None)),
+    ],
+)
+def test_reimport_repairs_only_unchanged_legacy_region(db, tmp_path, item, existing_country, expected):
+    path = tmp_path / "legacy.json"
+    location = item["organization"]["location"]
+    location.update(city="Lugano", country="Schweiz")
+    path.write_text(json.dumps({"items": [item], "captured_at": "2026-11-01T12:00:00Z"}))
+    result = theapolis.import_all(path, dach_only=False)
+    with Session(db) as session:
+        org = session.exec(select(Organization)).one()
+        org.country = existing_country
+        record = session.exec(select(SourceRecord).where(SourceRecord.entity_id == org.id)).one()
+        record.payload = {**record.payload, "incoming": {**record.payload["incoming"], "country": "Kanton Tessin"}}
+        session.commit()
+
+    location["country"] = "Kanton Tessin"
+    path.write_text(json.dumps({"items": [item], "captured_at": "2026-11-02T12:00:00Z"}))
+    assert theapolis.import_all(path, dach_only=False) == result
+    assert theapolis.import_all(path, dach_only=False) == result
+    with Session(db) as session:
+        org = session.exec(select(Organization)).one()
+        assert (org.country, org.region) == expected
 
 
 @pytest.mark.parametrize(("switch", "dach_only"), [([], True), (["--dach-only"], True), (["--all"], False)])

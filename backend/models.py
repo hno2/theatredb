@@ -311,6 +311,7 @@ class Organization(SourceMixin, DomainModel, table=True):
     zip_code: str | None = None
     city: str | None = None
     country: str | None = None
+    region: str | None = None
     lat: float | None = None
     lon: float | None = None
     description: str | None = None

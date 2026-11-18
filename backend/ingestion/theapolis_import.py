@@ -8,10 +8,12 @@ from sqlalchemy import insert
 from sqlmodel import Session, SQLModel, col, func, or_, select
 
 from backend.config import ENTITY_MODELS, canonical_role
+from backend.locations import split_country
 from backend.models import (
     EntityRedirect,
     EntitySource,
     EntityType,
+    Organization,
     Person,
     Production,
     ProductionMembership,
@@ -138,8 +140,22 @@ def _observe(
         source.sourced_at = captured_at
 
 
-def _fill_blanks(entity: SQLModel, payload: dict) -> bool:
+def _fill_blanks(entity: SQLModel, payload: dict, previous: SourceRecord | None) -> bool:
     changes = _enrich(entity, payload)
+    if isinstance(entity, Organization):
+        country, legacy_region = split_country(entity.country)
+        if entity.country and country != payload.get("country"):
+            changes.pop("region", None)
+        elif (
+            legacy_region
+            and previous is not None
+            and previous.entity_id == entity.id
+            and previous.payload.get("incoming", {}).get("country") == entity.country
+        ):
+            # Repair only a region still stored verbatim from the previous Theapolis observation.
+            changes["country"] = country
+            if entity.region in EMPTY:
+                changes["region"] = payload.get("region") or legacy_region
     if not any(getattr(entity, field) != value for field, value in changes.items()):
         return False
     validated = revalidate(entity, changes)
@@ -240,7 +256,7 @@ def accept_records(
         )
         if not unchanged and not older:
             changed.add(identity)
-            if _fill_blanks(entity, payload) and identity not in inserted:
+            if _fill_blanks(entity, payload, record) and identity not in inserted:
                 updated[identity] = entity
         _save_observation(source_id, kind, identity, incoming, captured_at, by_key, sources)
         if captured_at:

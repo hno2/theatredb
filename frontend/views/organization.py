@@ -116,9 +116,11 @@ def render_location(data: dict) -> None:
         locality = " ".join(str(data[field]) for field in ("zip_code", "city") if data.get(field))
         if locality:
             st.text(locality)
+        if data.get("region") and data["region"] != data.get("city"):
+            st.text(data["region"])
         if data.get("country"):
             st.text(data["country"])
-        if not any(data.get(field) for field in ("street", "zip_code", "city", "country")):
+        if not any(data.get(field) for field in ("street", "zip_code", "city", "region", "country")):
             st.caption("Noch keine Adresse hinterlegt.")
         render_web_link("Website", data.get("url"), official=True)
         render_web_link("Spielplan", data.get("url_plays"), official=True)

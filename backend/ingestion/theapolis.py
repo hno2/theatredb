@@ -28,6 +28,7 @@ from backend.date_precision import parse_date
 from backend.ingestion.snapshots import digest, snapshot_path, without_null_fields
 from backend.ingestion.staging import validate_records
 from backend.ingestion.theapolis_import import ImportRecord, accept_records, add_credits_batch, migrate_pending_cases
+from backend.locations import split_country
 from backend.models import EntityType, Source, SourceRecord, TheapolisProfileCache
 from backend.production_import import author_name
 from backend.reconciliation import canonical_url, merge_entities, preview_entity_merge, validate_payload
@@ -39,6 +40,7 @@ DEFAULT_IMAGES = Path("data/theapolis/images")
 ACTOR = "theapolis-ingestion"
 LOG = logging.getLogger(__name__)
 BATCH_SIZE = 500
+DACH_COUNTRIES = frozenset(split_country(code)[0] for code in ("DE", "AT", "CH"))
 type PreparedProduction = tuple[str, str | None, dict, list[tuple[str, str]]]
 
 
@@ -600,7 +602,10 @@ def _add_people(item: dict, people: dict) -> list[tuple[str, str]]:
 
 def _organization(item: dict) -> tuple[dict, str | None]:
     location = item.get("location") or {}
-    payload = {"name": _name(item), "city": location.get("city"), "country": location.get("country")}
+    country, region = split_country(location.get("country"))
+    payload = {"name": _name(item), "city": location.get("city"), "country": country}
+    if region:
+        payload["region"] = region
     if geolocation := location.get("geolocation"):
         lat, lon = map(float, geolocation.split(","))
         if not math.isfinite(lat) or not math.isfinite(lon) or not -90 <= lat <= 90 or not -180 <= lon <= 180:
@@ -834,11 +839,10 @@ def _dach_import(
     for production_id, org_id, _, _ in productions:
         if org_id:
             production_ids.setdefault(org_id, set()).add(production_id)
-    countries = {"de", "deutschland", "germany", "at", "österreich", "austria", "ch", "schweiz", "switzerland"}
     organizations = {
         key: value
         for key, value in organizations.items()
-        if (value[0].get("country") or "").strip().casefold() in countries and len(production_ids.get(key, set())) > 1
+        if value[0].get("country") in DACH_COUNTRIES and len(production_ids.get(key, set())) > 1
     }
     productions = [production for production in productions if production[1] in organizations]
     person_keys = {key for _, _, _, credits in productions for key, _ in credits}
