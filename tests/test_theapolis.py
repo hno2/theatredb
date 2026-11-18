@@ -201,7 +201,7 @@ def test_production_tags_and_profile_birthday_preserve_source_identity(db, tmp_p
         assert record.external_url == profile["url"]
         assert person.born == dt.datetime(1966, 5, 19)
         assert person.born_precision == "day"
-        assert person.type == ["director"]
+        assert set(person.type) == {"director", "author"}
         assert "tags" not in record.payload["incoming"]
         assert session.exec(select(Production)).one().tags == [
             "Schauspiel",
@@ -336,12 +336,13 @@ def test_profile_summary_and_missing_authors_keep_source_id(db, monkeypatch, tmp
     assert author["name"] == "Alex"
     assert "url" not in author and "born" not in author
     with Session(db) as session:
-        assert not session.exec(select(ReconciliationCase)).all()
+        assert not session.exec(select(ReconciliationCase).where(ReconciliationCase.status == "pending")).all()
         records = session.exec(select(SourceRecord).where(SourceRecord.entity_type == "person")).all()
         assert {record.external_id for record in records} == {"directors:9", "creators:9", "creators:10"}
     with Session(db) as session:
         sources = session.exec(select(EntitySource).where(EntitySource.entity_type == "person")).all()
-        assert {source.external_id for source in sources} == {"directors:9", "creators:9", "creators:10"}
+        assert len(sources) == 2
+        assert "creators:10" in {source.external_id for source in sources}
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -356,7 +357,7 @@ def test_staged_person_source_ids_are_checked_and_legacy_ids_remain_optional(db,
     theapolis._write_json(path, records)
     theapolis._write_json(path.with_suffix(".source.json"), {"items": [item]})
     if legacy:
-        assert len(theapolis.import_all(path, dach_only=False)["person"]) == 3
+        assert len(theapolis.import_all(path, dach_only=False)["person"]) == 2
     else:
         with pytest.raises(ValueError, match="differs"):
             theapolis.import_all(path, dach_only=False)
@@ -562,6 +563,33 @@ def test_profile_cache_commit_failure_propagates(monkeypatch):
         asyncio.run(theapolis._ProfileCache({}).put("Alex", None))
 
 
+def test_profile_cache_serializes_concurrent_commits(monkeypatch):
+    active = peak = 0
+    committed = []
+
+    async def to_thread(function, entry):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0)
+            function(entry)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(theapolis.asyncio, "to_thread", to_thread)
+    monkeypatch.setattr(theapolis._ProfileCache, "_put", staticmethod(committed.append))
+    cache = theapolis._ProfileCache({})
+
+    async def run():
+        await asyncio.gather(*(cache.put(f"Person {index}", None) for index in range(10)))
+
+    asyncio.run(run())
+    assert peak == 1
+    assert {entry.name for entry in committed} == set(cache.entries)
+    assert len(committed) == 10
+
+
 def test_profile_cache_cancellation_waits_for_commit(monkeypatch):
     started = threading.Event()
     release = threading.Event()
@@ -749,17 +777,14 @@ def test_accepted_import_is_idempotent_and_preserves_source_only_urls(db, tmp_pa
     assert result == theapolis.import_all(path, dach_only=False)
     assert {key: len(value) for key, value in result.items()} == {
         "organization": 1,
-        "person": 3,
+        "person": 2,
         "text": 2,
         "production": 2,
     }
     with Session(db) as session:
-        assert not session.exec(select(ReconciliationCase)).all()
+        assert not session.exec(select(ReconciliationCase).where(ReconciliationCase.status == "pending")).all()
         persons = session.exec(select(Person)).all()
-        assert {tuple(p.type) for p in persons if p.name == "Alex"} == {
-            ("director",),
-            ("author",),
-        }
+        assert [set(p.type) for p in persons if p.name == "Alex"] == [{"director", "author"}]
     with Session(db) as session:
         productions = session.exec(select(Production).order_by(col(Production.premiere))).all()
         assert len(productions) == 2
@@ -871,6 +896,73 @@ def test_role_scoped_person_ids_keep_colliding_credits_separate(db, tmp_path, it
         assert {credit.person.name for credit in text.contributions} == {"Author"}
 
 
+@pytest.mark.parametrize("existing_duplicates", [False, True])
+def test_same_name_cross_role_merge_preserves_credits_and_source_ids(
+    db, monkeypatch, tmp_path, item, existing_duplicates
+):
+    item["creators"] = [{"id": 77, "name": "Alex"}]
+    other = copy.deepcopy(item)
+    other["id"] = 124
+    item["creators"] = []
+    other["directors"] = []
+    path = tmp_path / "cross-role.json"
+    path.write_text(json.dumps({"items": [item, other]}))
+
+    if existing_duplicates:
+        with monkeypatch.context() as patch:
+            patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
+            old = theapolis.import_all(path, dach_only=False)
+        assert len(old["person"]) == 2
+    else:
+        path.write_text(json.dumps({"items": [item]}))
+        assert len(theapolis.import_all(path, dach_only=False)["person"]) == 1
+        path.write_text(json.dumps({"items": [other]}))
+
+    result = theapolis.import_all(path, dach_only=False)
+    assert len(result["person"]) == 1
+    assert theapolis.import_all(path, dach_only=False) == result
+    with Session(db) as session:
+        person = session.exec(select(Person)).one()
+        assert set(person.type) == {"director", "author"}
+        records = session.exec(select(SourceRecord).where(SourceRecord.entity_type == EntityType.PERSON)).all()
+        assert {record.external_id for record in records} == {"directors:9", "creators:77"}
+        assert {record.entity_id for record in records} == {person.id}
+        assert {(credit.person_id, credit.role) for credit in session.exec(select(ProductionMembership))} == {
+            (person.id, "director"),
+            (person.id, "author"),
+        }
+        assert {(credit.person_id, credit.role) for credit in session.exec(select(TextContribution))} == {
+            (person.id, "author")
+        }
+
+
+def test_cross_role_merge_rejects_conflicting_person_fields(db, monkeypatch, tmp_path, item):
+    item["creators"] = [{"id": 77, "name": "Alex", "profile": {"birthDate": "1980"}}]
+    item["directors"][0]["profile"] = {"birthDate": "1970"}
+    path = tmp_path / "conflicting-person.json"
+    path.write_text(json.dumps({"items": [item]}))
+    with monkeypatch.context() as patch:
+        patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
+        theapolis.import_all(path, dach_only=False)
+    with pytest.raises(ValueError, match="Conflicting fields for Theapolis person 'Alex'"):
+        theapolis.import_all(path, dach_only=False)
+    with Session(db) as session:
+        assert {person.born for person in session.exec(select(Person))} == {
+            dt.datetime(1970, 1, 1),
+            dt.datetime(1980, 1, 1),
+        }
+
+
+def test_import_reports_cross_role_matching_before_productions(db, tmp_path, item, caplog, capsys):
+    path = tmp_path / "progress.json"
+    path.write_text(json.dumps({"items": [item]}))
+    with caplog.at_level("INFO", logger=theapolis.__name__):
+        theapolis.import_all(path, dach_only=False)
+    assert "Loading Theapolis people for cross-role matching" in caplog.text
+    progress = capsys.readouterr().err
+    assert progress.index("Matching people") < progress.index("Productions")
+
+
 def test_same_role_person_id_name_conflicts_fail_before_writes(db, tmp_path, item):
     other = copy.deepcopy(item)
     other["id"] = 124
@@ -881,7 +973,7 @@ def test_same_role_person_id_name_conflicts_fail_before_writes(db, tmp_path, ite
         theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         assert not session.exec(select(Source)).all()
-        assert not session.exec(select(ReconciliationCase)).all()
+        assert not session.exec(select(ReconciliationCase).where(ReconciliationCase.status == "pending")).all()
 
 
 def test_enrichment_looks_up_names_with_colliding_role_ids(monkeypatch, item, caplog):
@@ -1022,13 +1114,15 @@ def test_direct_import_preserves_conflicts_fills_blanks_and_keeps_source_observa
     assert theapolis.import_all(path, dach_only=False) == result
     with Session(db) as session:
         assert len(session.exec(select(SCD2History)).all()) == before
-        assert not session.exec(select(ReconciliationCase)).all()
+        assert not session.exec(select(ReconciliationCase).where(ReconciliationCase.status == "pending")).all()
 
 
-def test_reimport_after_people_and_text_merge_reuses_survivors(db, tmp_path, item):
+def test_reimport_after_people_and_text_merge_reuses_survivors(db, monkeypatch, tmp_path, item):
     path = tmp_path / "import.json"
     path.write_text(json.dumps({"items": [item, {**item, "id": 124}]}))
-    result = theapolis.import_all(path, dach_only=False)
+    with monkeypatch.context() as patch:
+        patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
+        result = theapolis.import_all(path, dach_only=False)
     targets = {}
     for kind, ids in (("person", result["person"][:2]), ("text", result["text"])):
         preview = preview_entity_merge(kind, ids)
@@ -1104,7 +1198,6 @@ def test_import_removes_nuls_before_domain_and_json_writes(db, tmp_path, item, c
         organization = session.exec(select(Organization)).one()
         assert organization.name == "Theater" and organization.city == "Berlin"
         assert {person.name for person in session.exec(select(Person))} == {"Alex", "Other Alex"}
-        assert all(row.version == 1 for row in session.exec(select(SCD2History)))
 
 
 @pytest.mark.parametrize("field", ["name", "id"])
@@ -1226,7 +1319,6 @@ def test_newer_unchanged_observations_advance_freshness_without_domain_writes(db
         assert all(
             row.captured_at is not None and row.captured_at.month == 3 for row in session.exec(select(SourceRecord))
         )
-        assert all(row.version == 1 for row in session.exec(select(SCD2History)))
 
 
 def test_newer_export_adds_only_delta_preserving_missing_records_and_conflicts(db, tmp_path, item):
@@ -1253,7 +1345,7 @@ def test_newer_export_adds_only_delta_preserving_missing_records_and_conflicts(d
         )
     )
     again = theapolis.import_all(path, dach_only=False)
-    assert len(again["person"]) == 4
+    assert len(again["person"]) == 3
     assert set(again["production"]) & set(result["production"]) == {result["production"][0]}
     with Session(db) as session:
         assert len(session.exec(select(Production)).all()) == 3
@@ -1268,9 +1360,8 @@ def test_newer_export_adds_only_delta_preserving_missing_records_and_conflicts(d
             .where(SCD2History.entity_name == "person", SCD2History.entity_id == str(director.entity_id))
             .order_by(col(SCD2History.version))
         ).all()
-        assert [row.version for row in history] == [1, 2]
-        assert not history[0].is_current and history[0].valid_to is not None
-        assert history[1].is_current and history[1].snapshot["born_precision"] == "year"
+        assert not history[-2].is_current and history[-2].valid_to is not None
+        assert history[-1].is_current and history[-1].snapshot["born_precision"] == "year"
         count = len(session.exec(select(SCD2History)).all())
     assert theapolis.import_all(path, dach_only=False) == again
     with Session(db) as session:
@@ -1310,12 +1401,14 @@ def test_import_queries_scale_with_batches_not_records(db, tmp_path, item, size)
         event.remove(db, "before_cursor_execute", record_statement)
 
 
-def test_shared_profile_urls_do_not_override_scoped_identity_during_merge(db, tmp_path, item):
+def test_shared_profile_urls_do_not_override_scoped_identity_during_merge(db, monkeypatch, tmp_path, item):
     for person in [*item["directors"], *item["creators"]]:
         person["profile"] = {"url": f"{theapolis.SITE}/de/profil/shared"}
     path = tmp_path / "profiles.json"
     path.write_text(json.dumps({"items": [item]}))
-    result = theapolis.import_all(path, dach_only=False)
+    with monkeypatch.context() as patch:
+        patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
+        result = theapolis.import_all(path, dach_only=False)
     preview = preview_entity_merge("person", result["person"][:2])
     merge_entities(
         "person", result["person"][:2], target_id=preview["target_id"], revision=preview["revision"], actor_id="test"
@@ -1386,7 +1479,10 @@ def test_explicit_migration_preserves_cases_and_reimports_idempotently(db, tmp_p
     path = tmp_path / "import.json"
     path.write_text(json.dumps({"items": [item]}))
     reimport = theapolis.import_all(path, dach_only=False)
-    assert {kind: set(ids) for kind, ids in reimport.items()} == {kind: set(ids) for kind, ids in result.items()}
+    assert {kind: set(ids) for kind, ids in reimport.items() if kind != "person"} == {
+        kind: set(ids) for kind, ids in result.items() if kind != "person"
+    }
+    assert len(reimport["person"]) == 2
 
 
 def test_migration_uses_newest_payload_and_rejects_ambiguous_legacy_namespace(db):
@@ -1460,7 +1556,12 @@ def test_migration_maps_approved_legacy_people_dependencies_for_reimport(db, tmp
     path = tmp_path / "legacy-approved.json"
     path.write_text(json.dumps({"items": [item]}))
     result = theapolis.import_all(path, dach_only=False)
-    assert str(approved_id) in result["person"] and len(result["person"]) == 3
+    assert len(result["person"]) == 2
+    with Session(db) as session:
+        qualified = session.exec(
+            select(SourceRecord).where(SourceRecord.source_id == source_id, SourceRecord.record_key == "id:directors:9")
+        ).one()
+        assert str(qualified.entity_id) in result["person"]
 
 
 def test_year_matching_and_display_do_not_invent_date(db):

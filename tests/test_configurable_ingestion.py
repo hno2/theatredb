@@ -88,7 +88,7 @@ def test_published_schema_matches_models_and_current_domain_fields(record: dict)
     assert json.loads(schema_file.read_text()) == schema
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema, format_checker=FormatChecker()).validate([record])
-    assert set(StagedProduction.model_fields) - {"title", "author", "memberships", "premiere_year"} <= set(
+    assert set(StagedProduction.model_fields) - {"title", "author", "text", "memberships", "premiere_year"} <= set(
         Production.model_fields
     )
     assert set(StagedMembership.model_fields) - {"url", "role", "character", "external_id"} <= set(Person.model_fields)

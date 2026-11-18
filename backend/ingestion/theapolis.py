@@ -28,9 +28,9 @@ from backend.date_precision import parse_date
 from backend.ingestion.snapshots import digest, snapshot_path, without_null_fields
 from backend.ingestion.staging import validate_records
 from backend.ingestion.theapolis_import import ImportRecord, accept_records, add_credits_batch, migrate_pending_cases
-from backend.models import EntityType, Source, TheapolisProfileCache
+from backend.models import EntityType, Source, SourceRecord, TheapolisProfileCache
 from backend.production_import import author_name
-from backend.reconciliation import canonical_url, validate_payload
+from backend.reconciliation import canonical_url, merge_entities, preview_entity_merge, validate_payload
 from backend.user_management import get_session, init_db
 
 SITE = "https://www.theapolis.de"
@@ -264,6 +264,7 @@ async def _profile_for_name(session: aiohttp.ClientSession, name: str) -> dict |
 class _ProfileCache:
     def __init__(self, entries: dict[str, TheapolisProfileCache]) -> None:
         self.entries = entries
+        self._write_lock = asyncio.Lock()
 
     @staticmethod
     def _load() -> dict[str, TheapolisProfileCache]:
@@ -299,13 +300,14 @@ class _ProfileCache:
 
     async def put(self, name: str, profile: dict | None) -> None:
         entry = TheapolisProfileCache(name=name, profile=profile, captured_at=time())
-        task = asyncio.create_task(asyncio.to_thread(self._put, entry))
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
-        self.entries[name] = entry
+        async with self._write_lock:
+            task = asyncio.create_task(asyncio.to_thread(self._put, entry))
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+            self.entries[name] = entry
 
 
 async def _enrich_people(
@@ -790,6 +792,41 @@ def _import_productions(
         add_credits_batch(session, kind, links, actor_id=ACTOR)
 
 
+def _merge_people_by_name(session: Session, source_id: uuid.UUID, names: set[str]) -> dict[uuid.UUID, uuid.UUID]:
+    groups: dict[str, dict[str, set[uuid.UUID]]] = {}
+    LOG.info("Loading Theapolis people for cross-role matching")
+    records = session.exec(
+        select(SourceRecord).where(SourceRecord.source_id == source_id, SourceRecord.entity_type == EntityType.PERSON)
+    ).all()
+    for record in records:
+        group, _, source_id_part = (record.external_id or "").partition(":")
+        name = record.payload.get("incoming", {}).get("name")
+        if group in {"directors", "creators"} and source_id_part and name in names:
+            groups.setdefault(name, {}).setdefault(group, set()).add(record.entity_id)
+    session.commit()
+    redirects = {}
+    for name, roles in tqdm(groups.items(), total=len(groups), desc="Matching people", unit="name"):
+        if not {"directors", "creators"} <= roles.keys():
+            continue
+        identities = {redirects.get(identity, identity) for role in roles.values() for identity in role}
+        if len(identities) < 2:
+            continue
+        preview = preview_entity_merge(EntityType.PERSON, identities)
+        if any(field["conflict"] for field in preview["fields"]):
+            raise ValueError(f"Conflicting fields for Theapolis person {name!r}; merge manually before reimporting")
+        target = merge_entities(
+            EntityType.PERSON,
+            identities,
+            target_id=preview["target_id"],
+            revision=preview["revision"],
+            actor_id=ACTOR,
+        )
+        redirects.update(dict.fromkeys(identities, target))
+        redirects.update({identity: target if value in identities else value for identity, value in redirects.items()})
+    session.expire_all()
+    return redirects
+
+
 def _dach_import(
     organizations: dict[str, tuple[dict, str | None]], people: dict[str, dict], productions: list[PreparedProduction]
 ) -> tuple[dict[str, tuple[dict, str | None]], dict[str, dict], list[PreparedProduction]]:
@@ -871,6 +908,9 @@ def import_all(json_path: Path | None = None, *, dach_only: bool = True) -> dict
                         identities, _ = accept(kind, [value for _, value in batch])
                         mapping.update(zip((key for key, _ in batch), identities, strict=True))
                     progress.update(len(batch))
+        redirects = _merge_people_by_name(session, source_id, {payload["name"] for payload in people.values()})
+        person_ids = {key: redirects.get(identity, identity) for key, identity in person_ids.items()}
+        result["person"] = list(dict.fromkeys(str(person_ids[key]) for key in people))
         with tqdm(total=len(productions), desc="Productions", unit="production") as progress:
             for batch_number, batch in enumerate(batched(productions, BATCH_SIZE, strict=False), 1):
                 with _import_batch(session, "productions", batch_number):

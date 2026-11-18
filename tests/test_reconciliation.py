@@ -309,13 +309,15 @@ def test_merge_survivor_can_be_swapped(db) -> None:
 
 
 def test_text_merge_rewires_productions_and_both_lineage_directions(db) -> None:
-    left, right, third = save(db, Text(title="Work"), Text(title="Work"), Text(title="Derived"))
+    left, right, third, parent = save(
+        db, Text(title="Work"), Text(title="Work"), Text(title="Derived"), Text(title="Source")
+    )
     prod = save(db, Production(name="Staging", text_id=right.id))[0]
     save(
         db,
         TextLineage(source_text_id=right.id, derived_text_id=third.id, relation="adaptation"),
-        TextLineage(source_text_id=third.id, derived_text_id=right.id, relation="translation"),
-        TextLineage(source_text_id=left.id, derived_text_id=right.id, relation="same"),
+        TextLineage(source_text_id=parent.id, derived_text_id=right.id, relation="translation"),
+        TextLineage(source_text_id=left.id, derived_text_id=right.id, relation="adaptation"),
     )
     approve(queue_duplicate("text", left.id, right.id, reason="Manual"))
     with Session(db) as session:
@@ -387,7 +389,9 @@ def test_canonical_roles(raw, expected) -> None:
 
 def test_review_ui_empty_and_manual_submission(db) -> None:
     left, right = save(db, Organization(name="Same"), Organization(name="Same"))
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Duplikate suchen / melden"
+    app.run()
     assert not app.exception
     assert app.title[0].value == "Datenabgleich & Duplikate"
     app.selectbox(key="duplicate_kind").set_value("organization").run()
@@ -400,6 +404,8 @@ def test_review_ui_empty_and_manual_submission(db) -> None:
     assert count(db, Organization) == 2
     app.run()
     assert not app.exception
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
     assert any("Genehmigen" in button.label and button.disabled for button in app.button)
 
 
@@ -568,7 +574,9 @@ def test_capture_time_is_normalized_to_utc(db, source) -> None:
 def test_review_ui_merges_only_after_explicit_confirmation(db) -> None:
     left, right = save(db, Person(name="Same"), Person(name="Same"))
     case = queue_duplicate("person", left.id, right.id, reason="Same person")
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
     assert not app.exception
     assert count(db, Person) == 2
     next(box for box in app.checkbox if box.label.startswith("Identität")).check().run()
@@ -583,7 +591,9 @@ def test_review_ui_preserves_stale_preview_until_refreshed(db, source) -> None:
     case = propose_record(
         "person", {"name": "Person", "description": "Source bio"}, source_id=source.id, external_id="1"
     )
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
     app.selectbox(key=f"target_{case.id}").set_value(str(person.id)).run()
     next(box for box in app.checkbox if box.label.startswith("Identität")).check().run()
     with Session(db) as session:
@@ -955,7 +965,7 @@ def _edit_cell(app: AppTest, row: int, field: str, value: str | None) -> AppTest
         ("person", Person, {"name": "Person"}, "died", "2020", dt.datetime(2020, 1, 1)),
         ("person", Person, {"name": "Person"}, "nationality", "DE", "DE"),
         ("text", Text, {"title": "Text"}, "published", "2001-02-03", dt.datetime(2001, 2, 3)),
-        ("text", Text, {"title": "Text"}, "language", "de", "de"),
+        ("text", Text, {"title": "Text"}, "languages", "de, en", ["de", "en"]),
     ],
 )
 def test_inline_table_autosaves_simple_fields(db, kind, model, payload, field, value, expected) -> None:
@@ -982,7 +992,7 @@ def test_inline_table_autosaves_simple_fields(db, kind, model, payload, field, v
     assert not app.exception and not app.error
     with Session(db) as session:
         saved = session.get(model, entity.id)
-        assert saved is not None and getattr(saved, field) is None
+        assert saved is not None and getattr(saved, field) == ([] if field == "languages" else None)
         if field in model.date_fields:
             assert getattr(saved, f"{field}_precision") is None
 
@@ -1087,16 +1097,20 @@ def test_entity_dialog_rejects_stale_sources_and_clears_selection(db, source) ->
 
 
 def test_text_merge_rewires_productions_contributions_lineages_and_sources(db, source) -> None:
-    texts = save(db, Text(title="Same"), Text(title="Same", language="de"), Text(title="Same"))
-    author, other, production = save(
-        db, Person(name="Author"), Text(title="Other"), Production(name="Show", text_id=texts[1].id)
+    texts = save(db, Text(title="Same"), Text(title="Same", languages=["de"]), Text(title="Same"))
+    author, other, parent, production = save(
+        db,
+        Person(name="Author"),
+        Text(title="Other"),
+        Text(title="Source"),
+        Production(name="Show", text_id=texts[1].id),
     )
     for text in texts[1:]:
         save(
             db,
             TextContribution(text_id=text.id, person_id=author.id, role="author"),
             TextLineage(source_text_id=text.id, derived_text_id=other.id, relation="adaptation", notes="Keep"),
-            TextLineage(source_text_id=other.id, derived_text_id=text.id, relation="translation"),
+            TextLineage(source_text_id=parent.id, derived_text_id=text.id, relation="translation"),
             EntitySource(source_id=source.id, entity_type=EntityType.TEXT, entity_id=text.id, external_id=str(text.id)),
         )
     save(db, TextLineage(source_text_id=texts[1].id, derived_text_id=texts[2].id, relation="adaptation"))
@@ -1117,8 +1131,8 @@ def test_text_merge_rewires_productions_contributions_lineages_and_sources(db, s
         assert all(record.entity_id == texts[0].id for record in session.exec(select(SourceRecord)).all())
         assert resolve_id(session, "text", alias) == texts[0].id
         survivor = session.get(Text, texts[0].id)
-        assert survivor is not None and survivor.language == "de"
-    assert count(db, Text) == 2
+        assert survivor is not None and survivor.languages == ["de"]
+    assert count(db, Text) == 3
     assert count(db, SCD2History) > 0
 
 
@@ -1137,7 +1151,9 @@ def test_other_source_review_remains_and_theapolis_is_hidden(db) -> None:
     sources = save(db, Source(name="theapolis.de"), Source(name="Other"))
     for source in sources:
         propose_record("person", {"name": source.name}, source_id=source.id, external_id="1")
-    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
+    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10)
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
     assert not app.exception
     assert "Weitere Prüffälle" not in [tab.label for tab in app.tabs]
     assert "Andere Quellen & gemeldete Duplikate" in [tab.label for tab in app.tabs]
@@ -1153,7 +1169,9 @@ def test_review_source_links_prefer_record_url_then_source_website(db, record_ur
         "person", {"name": "Example Person"}, source_id=source.id, external_id="123", external_url=record_url
     )
 
-    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10).run()
+    app = AppTest.from_file(str(REVIEW_APP), default_timeout=10)
+    app.session_state["reconciliation_tab"] = "Andere Quellen & gemeldete Duplikate"
+    app.run()
 
     assert not app.exception
     assert [button.proto.url for button in app.get("link_button")] == [record_url or source.base_url]

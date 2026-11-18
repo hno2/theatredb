@@ -3,7 +3,7 @@
 import datetime as dt
 import json
 from pathlib import Path
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, Literal
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -104,6 +104,26 @@ class StagedMembership(StagedDomainModel):
     character: str | None = None
 
 
+class StagedText(StagedDomainModel):
+    """Normalized text metadata shared by theatre snapshots and publisher imports."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    date_fields: ClassVar[tuple[str, ...]] = ("published",)
+
+    title: NonEmptyText
+    original_title: NonEmptyText | None = None
+    original_language: Annotated[str, Field(pattern=r"^(?:[a-z]{2}|mul)$")] | None = None
+    authors: list[NonEmptyText] = Field(default_factory=list)
+    translators: list[NonEmptyText] = Field(default_factory=list)
+    composers: list[NonEmptyText] = Field(default_factory=list)
+    lyricists: list[NonEmptyText] = Field(default_factory=list)
+    based_on: StagedText | NonEmptyText | None = None
+    language: Annotated[str, Field(pattern=r"^(?:[a-z]{2}|mul)$")] | None = None
+    genre: Literal["play", "musical", "opera", "novel", "film", "other"] | None = None
+    published: DomainDate = None
+    published_precision: DatePrecision | None = None
+
+
 class StagedProduction(StagedDomainModel):
     """Source-facing Production fields; title maps to Production.name and Text.title."""
 
@@ -121,6 +141,7 @@ class StagedProduction(StagedDomainModel):
     tags: list[NonEmptyText] = Field(default_factory=list)
     critics: list[NonEmptyText] = Field(default_factory=list)
     author: str | None = None
+    text: StagedText | None = None
     memberships: list[StagedMembership] = Field(default_factory=list)
 
     @model_validator(mode="before")
@@ -158,7 +179,11 @@ def staging_schema() -> dict:
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         **StagedProductions.model_json_schema(),
     }
-    for model, fields in (("StagedProduction", ("premiere",)), ("StagedMembership", ("born", "died"))):
+    for model, fields in (
+        ("StagedProduction", ("premiere",)),
+        ("StagedMembership", ("born", "died")),
+        ("StagedText", ("published",)),
+    ):
         definitions = schema["$defs"][model]
         definitions["allOf"] = []
         for field in fields:

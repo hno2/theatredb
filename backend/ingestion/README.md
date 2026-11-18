@@ -63,6 +63,67 @@ Matching is limited to that theatre. Re-uploading is idempotent; unresolved
 conflicts go to **Produktionskonflikte**. Missing credits are not treated as
 deletions.
 
+Snapshots may include an optional `text` object, independently of the production
+title:
+
+```json
+{
+  "title": "Production title",
+  "url": "https://theatre.example/production",
+  "text": {
+    "title": "German play title",
+    "original_title": "Original play title",
+    "original_language": "en",
+    "language": "de",
+    "authors": ["Original Author"],
+    "translators": ["German Translator"],
+    "based_on": {"title": "Source novel", "authors": ["Novel Author"]}
+  }
+}
+```
+
+`based_on` accepts a title or recursively nested text metadata. Optional `genre`,
+`published`/`published_precision`, `composers`, and `lyricists` are also accepted.
+Languages use two-letter codes or `mul`. Without `text`, the existing production
+author credits and title are used; canonical translator credits also inform text
+matching. Adapters remain production memberships, not text authors. Ambiguous
+texts create persistent `link_text` cases retaining the production IDs; no
+arbitrary text is attached.
+An author-only upload preserves an already linked specific text, even when the
+production's display title differs. Translator refinement without explicit text
+metadata starts from the linked text's title, not the production display title.
+
+## Publisher metadata
+
+`backend.ingestion.publishers.ingest_text_metadata(session, source_name, records)`
+imports a list of normalized text metadata dictionaries with a required `url`
+and optional publisher `external_id`. The caller commits the transaction.
+The source registry covers **theatertexte.de**, **Rowohlt**, **S. Fischer**,
+**Felix Bloch Erben**, **Henschel**, and **Verlag der Autoren** (`VdA`).
+Source URLs are retained in `EntitySource`; full observations, including `UA`,
+are retained in `SourceRecord`. Ambiguous observations are retained on the
+text-link review case instead.
+Approved text-link cases can persist these observations with
+`resolve_publisher_observations(session, text, observations)`; each observation
+contains `source_id`. The single-observation helper is
+`save_publisher_observation(session, text, observation)`.
+Reimports resolve publisher identity before matching titles. Changed nonempty text
+metadata queues review without creating a duplicate or overwriting canonical text
+fields; known identities only fill missing fields and credits automatically.
+
+The same text resolver handles publisher and theatre metadata. German labels
+`Titel`, `Originaltitel`, `Originalsprache`, `Autor`/`Autoren`, `Übersetzung`,
+`Sprache`, and `UA`/`Uraufführung` are accepted. `UA` is retained verbatim as
+`world_premiere`, not mistaken for a text publication date. Names may be lists
+or a single unsplit string; dates and language codes must use the staging format.
+
+This entry point makes **no network requests**. For supplied HTML,
+`extract_metadata(html, url=..., rules=...)` reuses the configurable crawler's
+validated CSS `FieldRule` and extraction helpers. No publisher-specific selectors
+or live-page parsing are bundled: verified page fixtures and source permissions
+are still needed before configuring actual publisher crawls. The existing managed
+crawler's production/person pipeline is not silently repurposed as a text crawler.
+
 ## Theapolis
 
 Theapolis uses a separate API export and imports accepted domain records directly,
@@ -75,6 +136,9 @@ uv run python -m backend.ingestion.theapolis download --concurrency 10
 uv run python -m backend.ingestion.theapolis images --concurrency 10
 uv run python -m backend.ingestion.theapolis import
 ```
+
+Profile HTTP requests stay concurrent; cache commits serialize per export.
+Avoid SQLite writer starvation; cancellation waits for an in-flight commit.
 
 By default, import includes only organizations in Germany, Austria or Switzerland
 with at least two distinct productions in the snapshot, plus those productions
@@ -92,8 +156,10 @@ Source IDs containing NUL bytes are rejected rather than changed; the original
 export files remain untouched.
 It then saves batches of up to 500 organizations, people, and productions, in
 that order. Organizations and people are visible before production import
-finishes; refresh the UI to see committed progress. Each production batch saves
-its texts, credits, source observations and audit history atomically.
+finishes; refresh the UI to see committed progress. After people are imported,
+the importer loads source records and shows **Matching people** progress while
+merging cross-role matches; production import starts afterward. Each production
+batch saves its texts, credits, source observations and audit history atomically.
 
 Re-run the same command after an interruption: completed batches remain saved,
 and stable source identities prevent duplicates. Only the current failed batch
@@ -110,10 +176,15 @@ and credits absent from a newer export are not deleted.
 For a bounded export check, add `--max-pages 1`; partial exports are not selected
 by the default import.
 
-Reimports use stable Theapolis source IDs, never names alone. Director and creator
-IDs use separate namespaces (`directors:<id>` / `creators:<id>`), even when names
-or profile URLs match. This can create duplicates against records without a
-source mapping. Merge people/texts in **Verwaltung → Personen / Texte**: select
+Director and creator IDs use separate namespaces (`directors:<id>` /
+`creators:<id>`). On import, Theapolis people with exactly matching names across
+these roles are merged, including earlier imports. Different people with the same
+name can therefore be merged. Conflicting non-empty fields stop the import and
+must be resolved manually; completed batches remain saved. Source identities,
+credits and old-ID redirects are preserved. People without a Theapolis source
+mapping are not matched automatically.
+
+Merge people/texts in **Verwaltung → Personen / Texte**: select
 multiple rows and click **Zusammenführen**. Without field conflicts, merging is
 immediate; otherwise a native comparison dialog lets you choose the surviving
 record and field values. Production credits, text contributions, memberships,

@@ -34,6 +34,8 @@ from backend.production_import import (
     scrape_scope,
     title_similarity,
 )
+from backend.texts import add_title, resolve_staged_text
+from frontend.management import reconciliation as review_ui
 
 CAPTURE = dt.datetime(2026, 6, 7, tzinfo=dt.UTC)
 REVIEW_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "reconciliation.py"
@@ -173,6 +175,170 @@ def test_unknown_title_is_created_and_reupload_is_idempotent(db, theatre) -> Non
     assert len(rows(db, TextContribution)) == 2
     assert upload(theatre, HAMLET)["unchanged"] == ["Hamlet"]
     assert len(rows(db, Production)) == 3
+
+
+def test_staged_text_metadata_imports_text_credits_and_keeps_production_adapters(db, theatre) -> None:
+    record = {
+        **HAMLET,
+        "text": {
+            "title": "Hamlet (German translation)",
+            "original_title": "Hamlet",
+            "original_language": "en",
+            "language": "de",
+            "authors": ["William Shakespeare"],
+            "translators": ["Anna Translator"],
+        },
+        "memberships": [
+            *HAMLET["memberships"],
+            {"name": "Anna Translator", "type": "translator", "role": "translator"},
+            {"name": "Adam Adapter", "type": "adapter", "role": "adapter"},
+        ],
+    }
+
+    assert upload(theatre, record)["created"] == ["Hamlet"]
+    text = rows(db, Text, Text.title == "Hamlet (German translation)")[0]
+    assert text.title == "Hamlet (German translation)"
+    assert text.languages == ["de"]
+    people = {row.id: row.name for row in rows(db, Person)}
+    contributions = {(people[row.person_id], row.role) for row in rows(db, TextContribution)}
+    assert contributions == {("William Shakespeare", "author"), ("Anna Translator", "translator")}
+    assert ("translator", None) in {(row.role, row.character) for row in rows(db, ProductionMembership)}
+    assert ("adapter", None) in {(row.role, row.character) for row in rows(db, ProductionMembership)}
+    assert upload(theatre, record)["unchanged"] == ["Hamlet"]
+    assert len(rows(db, Text)) == 2
+
+
+def test_ambiguous_staged_text_waits_for_link_review_with_production_context(db, theatre) -> None:
+    author = save(db, Person(name="William Shakespeare"))[0]
+    with Session(db) as session:
+        for _ in range(2):
+            text = Text(title="Hamlet")
+            session.add(text)
+            session.flush()
+            add_title(session, text, "Hamlet")
+            session.add(TextContribution(text_id=text.id, person_id=author.id, role="author"))
+        session.commit()
+
+    assert upload(theatre, HAMLET)["created"] == ["Hamlet"]
+    production = rows(db, Production)[0]
+    assert production.text_id is None
+    case = next(row for row in rows(db, ReconciliationCase) if row.operation == "link_text")
+    assert case.context["production_id"] == str(production.id)
+    assert case.incoming["title"] == "Hamlet"
+    assert upload(theatre, {**HAMLET, "premiere": "2027-02-14"})["created"] == ["Hamlet"]
+    case = next(row for row in rows(db, ReconciliationCase) if row.operation == "link_text")
+    assert set(case.context["production_ids"]) == {str(row.id) for row in rows(db, Production)}
+
+
+@pytest.mark.parametrize("explicit_title", [False, True])
+def test_author_only_upload_keeps_specific_translation_with_different_production_title(
+    db, theatre, explicit_title
+) -> None:
+    with Session(db) as session:
+        translated = resolve_staged_text(
+            session,
+            {
+                "title": "German play title",
+                "original_title": "Original play title",
+                "original_language": "en",
+                "language": "de",
+                "authors": ["Original Author"],
+                "translators": ["Known Translator"],
+            },
+        )
+        assert isinstance(translated, Text)
+        translated_id = translated.id
+        production = Production(name="Theatre display title", organization_id=theatre.id, text_id=translated_id)
+        session.add(production)
+        session.commit()
+        production_id = production.id
+    metadata: dict = {
+        "title": "Theatre display title",
+        "url": "https://theatre.example/specific",
+        "author": "Original Author",
+    }
+    if explicit_title:
+        metadata["text"] = {"title": "German play title", "authors": ["Original Author"]}
+
+    assert upload(theatre, metadata)["merged"] == ["Theatre display title"]
+    assert upload(theatre, metadata)["unchanged"] == ["Theatre display title"]
+    assert rows(db, Production, Production.id == production_id)[0].text_id == translated_id
+    assert len(rows(db, Text)) == 2
+    assert not rows(db, ReconciliationCase)
+
+
+def test_translator_refinement_without_text_metadata_uses_current_text_title(db, theatre) -> None:
+    with Session(db) as session:
+        text = resolve_staged_text(session, {"title": "Play text title", "authors": ["Original Author"]})
+        assert isinstance(text, Text)
+        production = Production(name="Theatre display title", organization_id=theatre.id, text_id=text.id)
+        session.add(production)
+        session.commit()
+        production_id = production.id
+    metadata = {
+        "title": "Theatre display title",
+        "url": "https://theatre.example/refine",
+        "author": "Original Author",
+        "memberships": [{"name": "New Translator", "role": "translator", "type": "translator"}],
+    }
+
+    assert upload(theatre, metadata)["merged"] == ["Theatre display title"]
+    translated_id = rows(db, Production, Production.id == production_id)[0].text_id
+    assert rows(db, Text, Text.id == translated_id)[0].title == "Play text title"
+    assert len(rows(db, Text)) == 2
+    assert upload(theatre, metadata)["unchanged"] == ["Theatre display title"]
+    assert rows(db, Production, Production.id == production_id)[0].text_id == translated_id
+    assert not rows(db, ReconciliationCase)
+
+
+@pytest.mark.parametrize("title", ["Hamlet", "Hamlet: Prinz von Dänemark"])
+@pytest.mark.parametrize("precision", ["year", "day"])
+def test_different_premiere_year_is_created_without_review(db, theatre, title, precision) -> None:
+    original = save(
+        db,
+        Production(
+            name=title,
+            organization_id=theatre.id,
+            premiere=dt.datetime(2025, 1, 1),
+            premiere_precision=precision,
+        ),
+    )[0]
+    record = {**HAMLET, "premiere": "2026", "premiere_precision": "year"}
+    assert upload(theatre, record)["created"] == ["Hamlet"]
+    assert len(rows(db, Production)) == 2
+    assert rows(db, Production, Production.id == original.id)[0].premiere.year == 2025
+    assert not rows(db, ReconciliationCase)
+    assert upload(theatre, record)["unchanged"] == ["Hamlet"]
+    assert len(rows(db, Production)) == 2
+
+
+def test_reused_source_page_keeps_different_year_productions_separate(db, theatre) -> None:
+    for year, outcome in [(2025, "created"), (2026, "created"), (2025, "unchanged")]:
+        record = {**HAMLET, "premiere": f"{year}-02-14"}
+        assert upload(theatre, record)[outcome] == ["Hamlet"]
+    assert {row.premiere.year for row in rows(db, Production)} == {2025, 2026}
+    assert len(rows(db, ProductionMembership)) == 6
+    assert not rows(db, ReconciliationCase)
+
+
+@pytest.mark.parametrize(
+    ("existing_date", "incoming_date"),
+    [(dt.datetime(2026, 1, 1), "2026-02-14"), (None, "2026-02-14"), (dt.datetime(2025, 1, 1), None)],
+)
+def test_same_or_unknown_year_still_checks_conflicts(db, theatre, existing_date, incoming_date) -> None:
+    save(db, Production(name="Hamlet", organization_id=theatre.id, premiere=existing_date, description="Old"))
+    assert upload(theatre, {**HAMLET, "premiere": incoming_date})["review"] == ["Hamlet"]
+    assert len(rows(db, Production)) == 1
+    assert len(list_production_cases()) == 1
+
+
+def test_same_title_matches_current_year_instead_of_older_production(db, theatre) -> None:
+    save(db, Production(name="Hamlet", organization_id=theatre.id, premiere=dt.datetime(2025, 2, 14)))
+    current = save(db, Production(name="Hamlet", organization_id=theatre.id, premiere=dt.datetime(2026, 2, 14)))[0]
+    assert upload(theatre, HAMLET)["merged"] == ["Hamlet"]
+    assert rows(db, Production, Production.id == current.id)[0].description == HAMLET["description"]
+    assert len(rows(db, Production)) == 2
+    assert not rows(db, ReconciliationCase)
 
 
 def test_conflict_is_reviewed_side_by_side_and_resolved_in_backend(db, theatre) -> None:
@@ -364,9 +530,45 @@ def test_conflict_ui_shows_both_sides_and_merges(db, theatre) -> None:
     assert app.tabs[0].label == "Produktionskonflikte (0)"
 
 
+def test_review_tabs_render_only_active_panel(db, monkeypatch) -> None:
+    calls = []
+    for name in ("_conflict_tab", "_import_tab", "_review_tab", "_duplicates_tab"):
+        monkeypatch.setattr(review_ui, name, lambda name=name: calls.append(name))
+    monkeypatch.setattr(review_ui, "list_production_cases", lambda: pytest.fail("Badge must not load case payloads"))
+    app = AppTest.from_string("from frontend.management.reconciliation import render\nrender()").run()
+    assert not app.exception
+    assert calls == ["_conflict_tab"]
+    app.session_state["show_import_tab"] = True
+    app.run()
+    assert not app.exception
+    assert calls == ["_conflict_tab", "_import_tab"]
+    assert app.session_state["reconciliation_tab"] == "Theater-JSON hochladen"
+
+
+def test_conflict_ui_adds_false_positive_upload_anyway(db, theatre) -> None:
+    original = save(db, Production(name="Fallen", organization_id=theatre.id))[0]
+    record = {**HAMLET, "title": "Mann kann auch in Höhe Fallen", "url": "https://theatre.example/p/hoehe-fallen"}
+    assert upload(theatre, record)["review"] == [record["title"]]
+    app = AppTest.from_file(str(REVIEW_APP)).run()
+    assert not app.exception
+    next(button for button in app.button if button.label == "Upload trotzdem hinzufügen").click().run()
+    assert not app.exception
+    assert {row.name for row in rows(db, Production)} == {"Fallen", record["title"]}
+    assert rows(db, Production, Production.id == original.id)[0].description is None
+    created = rows(db, Production, Production.name == record["title"])[0]
+    assert created.description == HAMLET["description"]
+    assert len(rows(db, ProductionMembership, ProductionMembership.production_id == created.id)) == 3
+    assert rows(db, EntitySource, EntitySource.entity_id == created.id)
+    assert app.tabs[0].label == "Produktionskonflikte (0)"
+    assert upload(theatre, record)["unchanged"] == [record["title"]]
+    assert len(rows(db, Production)) == 2
+
+
 def test_upload_ui_updates_conflict_count_without_reload(db, theatre) -> None:
     save(db, Production(name="Hamlet", organization_id=theatre.id, description="Old text"))
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Theater-JSON hochladen"
+    app.run()
     assert app.tabs[0].label == "Produktionskonflikte (0)"
     app.selectbox(key="upload_theatre").set_value(str(theatre.id))
     app.file_uploader[0].upload("20260607_productions.json", json.dumps([HAMLET]).encode(), "application/json")
@@ -436,7 +638,9 @@ def test_overview_counts_theatres_with_recent_uploads(db, theatre) -> None:
 
 def test_upload_tab_shows_theatre_status_and_overview(db, theatre) -> None:
     upload(theatre, HAMLET, captured_at=dt.datetime.now(dt.UTC))
-    app = AppTest.from_file(str(REVIEW_APP)).run()
+    app = AppTest.from_file(str(REVIEW_APP))
+    app.session_state["reconciliation_tab"] = "Theater-JSON hochladen"
+    app.run()
     app.selectbox(key="upload_theatre").set_value(str(theatre.id)).run()
     assert not app.exception
     markdown = " ".join(element.value for element in app.markdown)

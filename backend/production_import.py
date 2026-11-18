@@ -2,6 +2,7 @@
 
 Matching is always restricted to the selected theatre. For every uploaded production:
 
+* productions with different known premiere years are kept separate without review,
 * same title (or same source page) without conflicting values: missing fields, people,
   text and the source are added automatically,
 * no similar title in the theatre: the production is created with its people, text and source,
@@ -57,6 +58,7 @@ from backend.reconciliation import (
     union_values,
     validate_payload,
 )
+from backend.texts import family_roots, resolve_staged_text
 from backend.user_management import get_session
 
 OPERATION = "production_upload"
@@ -148,6 +150,8 @@ def prepare_record(record: dict) -> dict:
         "incoming": incoming,
         "credits": credits,
         "authors": list(dict.fromkeys(c["name"] for c in credits if c["role"] == "author")),
+        "text": record.get("text"),
+        "translators": list(dict.fromkeys(c["name"] for c in credits if c["role"] == "translator")),
         "record_key": canonical_url(record["url"]),
     }
 
@@ -322,10 +326,11 @@ def _people_rows(
 
 
 def _text_authors(session: Session, text_id: uuid.UUID) -> list[Person]:
+    roots = family_roots(session, text_id)
     rows = session.exec(
         select(Person, TextContribution.role)
         .join(TextContribution, col(TextContribution.person_id) == col(Person.id))
-        .where(TextContribution.text_id == text_id)
+        .where(col(TextContribution.text_id).in_([text.id for text in roots]))
         .order_by(col(Person.name))
     ).all()
     return list({person.id: person for person, role in rows if canonical_role(role) == "author"}.values())
@@ -336,8 +341,10 @@ def _text_label(title: str, authors: list[str]) -> str:
 
 
 def _text_row(session: Session, production: Production | None, item: dict) -> dict:
-    incoming_authors = item["authors"]
-    incoming = _text_label(item["incoming"]["name"], incoming_authors)
+    text_data = item.get("text") or {}
+    incoming_title = text_data.get("title") or item["incoming"]["name"]
+    incoming_authors = text_data.get("authors") or item["authors"]
+    incoming = _text_label(incoming_title, incoming_authors)
     text = session.get(Text, production.text_id) if production and production.text_id else None
     if text is None:
         return {
@@ -526,47 +533,45 @@ def _resolve_person(
     return person
 
 
-def _find_text(session: Session, title: str, author_ids: set[uuid.UUID]) -> Text | None:
-    name = normalize(title)
-    token = max(name.split(), key=len, default="")
-    rows = [
-        row
-        for row in session.exec(
-            select(Text).where(col(Text.title).icontains(token, autoescape=True)).order_by(col(Text.id)).limit(500)
-        ).all()
-        if normalize(row.title) == name
-    ]
-    authored = {row.id: {person.id for person in _text_authors(session, row.id)} for row in rows}
-    if author_ids:
-        match = next((row for row in rows if authored[row.id] & author_ids), None)
-        unattributed = [row for row in rows if not authored[row.id]]
-        return match or (unattributed[0] if len(unattributed) == 1 else None)
-    unattributed = [row for row in rows if not authored[row.id]]
-    return unattributed[0] if unattributed else (rows[0] if len(rows) == 1 else None)
-
-
-def _apply_text(
-    session: Session, production: Production, item: dict, authors: list[Person], *, replace: bool, actor_id: str | None
-) -> bool:
-    author_ids = {person.id for person in authors}
-    text = None if replace or not production.text_id else session.get(Text, production.text_id)
-    changed = False
-    if text is None:
-        text = _find_text(session, item["incoming"]["name"], author_ids)
-        if text is None:
-            text = Text(title=item["incoming"]["name"])
-            session.add(text)
-            session.flush()
-            audit_event(session, text, "insert", actor_id)
-        production.text_id = text.id
-        session.add(production)
-        changed = True
-    existing = {person.id for person in _text_authors(session, text.id)}
-    # Never attach an author to a text that is attributed to someone else.
-    if not existing or existing & author_ids:
-        for person in authors:
-            changed |= ensure_credit(session, text, person.id, "author", None, actor_id)
-    return changed
+def _apply_text(session: Session, production: Production, item: dict, *, replace: bool = False) -> bool:
+    current = session.get(Text, production.text_id) if production.text_id else None
+    text_data = dict(item.get("text") or {})
+    text_data["authors"] = text_data.get("authors") or item["authors"]
+    text_data["translators"] = list(dict.fromkeys([*text_data.get("translators", []), *item.get("translators", [])]))
+    if current and not replace and not item.get("text") and not text_data["translators"]:
+        return False
+    text_data.setdefault("title", current.title if current and not replace else item["incoming"]["name"])
+    if current and not replace and current.languages:
+        text_data.setdefault("language", current.languages[0])
+    resolved = resolve_staged_text(session, text_data)
+    if isinstance(resolved, ReconciliationCase):
+        context = resolved.context or {}
+        production_ids = list(context.get("production_ids", []))
+        if context.get("production_id"):
+            production_ids.append(context["production_id"])
+        production_ids.append(str(production.id))
+        resolved.context = {
+            **context,
+            "production_id": str(production.id),
+            "production_ids": list(dict.fromkeys(production_ids)),
+        }
+        session.add(resolved)
+        return False
+    if not isinstance(resolved, Text):
+        raise TypeError("resolve_staged_text must return Text or ReconciliationCase")
+    if (
+        current
+        and not replace
+        and not text_data["translators"]
+        and resolved.id != current.id
+        and resolved.id in {root.id for root in family_roots(session, current.id)}
+    ):
+        return False
+    if production.text_id == resolved.id:
+        return False
+    production.text_id = resolved.id
+    session.add(production)
+    return True
 
 
 def _apply(
@@ -624,9 +629,8 @@ def _apply(
         persons[normalize(credit["name"])] = person
         changed |= ensure_credit(session, production, person.id, credit["role"], credit["character"], actor_id)
         session.flush()
-    authors = [persons[normalize(name)] for name in item["authors"] if normalize(name) in persons]
     if not text_conflict or choices.get("text") == "incoming":
-        changed |= _apply_text(session, production, item, authors, replace=text_conflict, actor_id=actor_id)
+        changed |= _apply_text(session, production, item, replace=text_conflict)
     changed |= _link_source(
         session,
         source_id=source_id,
@@ -634,7 +638,7 @@ def _apply(
         entity_id=production.id,
         record_key=item["record_key"],
         external_url=item["record_key"],
-        payload={"incoming": item["incoming"], "credits": item["credits"]},
+        payload={"incoming": item["incoming"], "credits": item["credits"], "text": item.get("text")},
         captured_at=captured_at,
         reassign=True,
     )
@@ -701,6 +705,8 @@ def _queue(
             "organization_id": str(organization.id),
             "credits": item["credits"],
             "authors": item["authors"],
+            "text": item.get("text"),
+            "translators": item.get("translators", []),
             "external_url": item["record_key"],
             "record_key": item["record_key"],
             "suggested_target_id": str(suggested.id),
@@ -742,6 +748,11 @@ def _ingest_one(
         )
 
     linked, linked_at = _source_production(session, source_id, item["record_key"], organization.id)
+    premiere = item["incoming"].get("premiere")
+    year = parse_date(premiere)[0].year if premiere else None
+    candidates = [row for row in productions if year is None or row.premiere is None or row.premiere.year == year]
+    if linked and linked not in candidates:
+        linked = None
     if (
         linked
         and linked_at
@@ -750,7 +761,7 @@ def _ingest_one(
         # Older snapshot of an already imported page: only fill gaps, never override newer source data.
         return "merged" if apply(linked)[1] else "unchanged"
     name = normalize(item["incoming"]["name"])
-    exact = [linked] if linked else [row for row in productions if normalize(row.name) == name]
+    exact = [linked] if linked else [row for row in candidates if normalize(row.name) == name]
     compared = [(row, _compare(session, row, item, organization.id, source_id)["conflicts"]) for row in exact]
     clean = [row for row, conflicts in compared if not conflicts]
     if len(clean) == 1:
@@ -761,7 +772,7 @@ def _ingest_one(
             _conflict_reason(compared[0][1]) if compared[0][1] else "Mehrere gleichnamige Produktionen",
         )
     else:
-        scored = [(title_similarity(item["incoming"]["name"], row.name), row) for row in productions]
+        scored = [(title_similarity(item["incoming"]["name"], row.name), row) for row in candidates]
         best_score, best = max(scored, key=itemgetter(0), default=(0.0, None))
         if best is None or best_score < TITLE_THRESHOLD:
             productions.append(apply(None)[0])
@@ -894,6 +905,16 @@ def production_label(production: Production | dict, theatre: str | None) -> str:
     return " · ".join(parts)
 
 
+def count_production_cases(*, status: str = "pending") -> int:
+    """Count upload conflicts without loading case payloads or theatre records."""
+    with get_session() as session:
+        return session.exec(
+            select(func.count())
+            .select_from(ReconciliationCase)
+            .where(ReconciliationCase.operation == OPERATION, ReconciliationCase.status == status)
+        ).one()
+
+
 def list_production_cases(
     *, status: str = "pending", organization_id: str | None = None, query: str = ""
 ) -> list[dict]:
@@ -933,6 +954,8 @@ def _item(case: ReconciliationCase) -> dict:
         "incoming": case.incoming,
         "credits": case.context["credits"],
         "authors": case.context["authors"],
+        "text": case.context.get("text"),
+        "translators": case.context.get("translators", []),
         "record_key": case.record_key,
     }
 

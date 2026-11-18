@@ -1368,9 +1368,11 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "authlib" },
+    { name = "jsonschema" },
     { name = "procrastinate" },
     { name = "psycopg", extra = ["binary"] },
     { name = "python-dotenv" },
+    { name = "referencing" },
     { name = "sqlalchemy" },
     { name = "sqlmodel" },
     { name = "streamlit" },
@@ -1378,7 +1380,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "jsonschema" },
     { name = "prek" },
     { name = "pyrefly" },
     { name = "pytest" },
@@ -1401,9 +1402,11 @@ ingest = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.1" },
     { name = "authlib", specifier = ">=1.7.2" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "procrastinate", specifier = ">=3.10,<4" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
+    { name = "referencing", specifier = ">=0.37.0" },
     { name = "sqlalchemy", specifier = ">=2.0.51" },
     { name = "sqlmodel", specifier = ">=0.0.24" },
     { name = "streamlit", specifier = ">=1.66.1" },
@@ -1411,7 +1414,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "prek", specifier = ">=0.4.4" },
     { name = "pyrefly", specifier = ">=1.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },

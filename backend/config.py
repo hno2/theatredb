@@ -16,6 +16,7 @@ from backend.models import (
     Text,
     TextContribution,
     TextLineage,
+    TextTitle,
 )
 
 # Canonical role: display label, exact aliases, pattern for descriptive source credits.
@@ -24,6 +25,7 @@ ROLE_CONFIG: dict[str, tuple[str, tuple[str, ...], str | None]] = {
     "set_designer": ("Bühnenbild", ("bühne", "bühnenbild", "ausstattung"), r"Bühne|Ausstattung"),
     "costume_designer": ("Kostüme", ("kostüm", "kostüme"), r"Kostüm"),
     "composer": ("Musik", ("musik", "komposition"), r"Musik|Komposition"),
+    "lyricist": ("Liedtexte/Gesangstexte", ("liedtexte", "gesangstexte", "lyrics"), r"Liedtext|Gesangstext|Lyrics"),
     "choreographer": ("Choreografie", ("choreografie", "choreographie", "coreographer"), r"Choreograph|Tanz"),
     "dramaturg": ("Dramaturgie", ("dramaturgie",), r"Dramaturgi"),
     "light_designer": ("Licht", ("licht", "lighting_designer"), r"Licht"),
@@ -40,6 +42,15 @@ ROLE_CONFIG: dict[str, tuple[str, tuple[str, ...], str | None]] = {
     "other": ("Weitere Mitwirkung", (), None),
 }
 ROLE_LABELS = {role: label for role, (label, _, _) in ROLE_CONFIG.items()}
+LINEAGE_LABELS = {"translation": "Übersetzung", "adaptation": "Bearbeitung", "based_on": "Vorlage / nach"}
+TEXT_GENRES = {
+    "play": "Schauspiel",
+    "musical": "Musical",
+    "opera": "Oper",
+    "novel": "Roman",
+    "film": "Film",
+    "other": "Andere",
+}
 ROLE_ALIASES = {alias.casefold(): role for role, (_, aliases, _) in ROLE_CONFIG.items() for alias in (role, *aliases)}
 ROLE_TYPE_PATTERNS = [
     (re.compile(pattern, re.IGNORECASE), role) for role, (_, _, pattern) in ROLE_CONFIG.items() if pattern
@@ -83,7 +94,8 @@ LINK_IDENTITY_FIELDS = {
         "end_date",
         "end_date_precision",
     ),
-    TextLineage: ("source_text_id", "derived_text_id", "relation", "notes"),
+    TextLineage: ("source_text_id", "derived_text_id", "relation"),
+    TextTitle: ("text_id", "normalized"),
     AwardNomination: ("award_id", "production_id", "person_id", "category", "date", "date_precision", "result"),
 }
 

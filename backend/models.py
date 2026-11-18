@@ -1,15 +1,18 @@
 import datetime as dt
+import re
 import uuid
 from enum import StrEnum
 from typing import Any, ClassVar, Protocol, cast
 
 from pydantic import model_validator
-from sqlalchemy import JSON, Column, DateTime, Index, event, select, text
+from sqlalchemy import JSON, CheckConstraint, Column, DateTime, Index, event, select, text
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy import Text as SQLText
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstanceState, relationship
+from sqlalchemy.orm import Session as SASession
 from sqlalchemy.sql.elements import ColumnElement
-from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
+from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint, col
 
 from backend.date_precision import DatePrecision, normalize_dates
 
@@ -384,11 +387,13 @@ class Text(SourceMixin, DomainModel, table=True):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     title: str
-    language: str | None = None  # ISO 639-1
+    languages: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    genre: str | None = None
     published: dt.datetime | None = Field(default=None, sa_type=DateTime)
     published_precision: DatePrecision | None = None
     contributions: list[TextContribution] = Relationship(back_populates="text")
     productions: list[Production] = Relationship(back_populates="text")
+    titles: list[TextTitle] = Relationship(back_populates="text")
     # lineage edges where this text is the source / the derivative
     lineages_as_source: list[TextLineage] = Relationship(
         back_populates="source_text",
@@ -399,14 +404,59 @@ class Text(SourceMixin, DomainModel, table=True):
         sa_relationship_kwargs={"foreign_keys": "[TextLineage.derived_text_id]"},
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_languages(cls, value: object) -> object:
+        """Normalize language codes while preserving the main language."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        data["languages"] = normalize_text_languages(data.get("languages", []))
+        if data.get("genre") not in {None, "play", "musical", "opera", "novel", "film", "other"}:
+            raise ValueError("Invalid text genre")
+        if "title" in data and not data["title"].strip():
+            raise ValueError("Text title must not be empty")
+        return data
+
+
+def normalize_text_languages(values: list[str]) -> list[str]:
+    """Validate ISO 639-1 shaped codes and the explicit multilingual code."""
+    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        raise ValueError("Text languages must be a list of language codes")
+    result = list(dict.fromkeys(value.strip().lower() for value in values))
+    if any(not re.fullmatch(r"[a-z]{2}|mul", value) for value in result):
+        raise ValueError("Expected two-letter language codes or 'mul'")
+    return result
+
+
+class TextTitle(SQLModel, table=True):
+    """A searchable title variant belonging to one licensable text."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    text_id: uuid.UUID = Field(foreign_key="text.id", index=True)
+    title: str
+    language: str | None = None
+    normalized: str = Field(default="", index=True)
+    text: Text = Relationship(back_populates="titles")
+
+    __table_args__ = (UniqueConstraint("text_id", "normalized"),)
+
+
+class LineageRelation(StrEnum):
+    """Directed derivation; only translations and adaptations share a work."""
+
+    TRANSLATION = "translation"
+    ADAPTATION = "adaptation"
+    BASED_ON = "based_on"
+
 
 class TextContribution(SQLModel, table=True):
-    """Represents the contribution of a person to a text, e.g. that a person is an author, translator, adapter, source author (for lineages), etc. of a text."""
+    """A person's contribution to a text; source authors belong to source texts."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     text_id: uuid.UUID = Field(foreign_key="text.id", index=True)
     person_id: uuid.UUID = Field(foreign_key="person.id")
-    role: str | None = None  # e.g. "author", "translator", "adapter", "source author" (for lineages), etc.
+    role: str | None = None
 
     text: Text = Relationship(back_populates="contributions")
     person: Person = Relationship(back_populates="text_contributions")
@@ -418,7 +468,17 @@ class TextLineage(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     source_text_id: uuid.UUID = Field(foreign_key="text.id")  # the Vorlage
     derived_text_id: uuid.UUID = Field(foreign_key="text.id")  # the new text
-    relation: str  # e.g. "adaptation", "translation", etc.
+    relation: LineageRelation = Field(
+        sa_column=Column(
+            SAEnum(
+                LineageRelation,
+                values_callable=lambda enum: [value.value for value in enum],
+                native_enum=False,
+                length=None,
+            ),
+            nullable=False,
+        )
+    )
     notes: str | None = None
 
     source_text: Text = Relationship(
@@ -428,6 +488,12 @@ class TextLineage(SQLModel, table=True):
     derived_text: Text = Relationship(
         back_populates="lineages_as_derived",
         sa_relationship_kwargs={"foreign_keys": "[TextLineage.derived_text_id]"},
+    )
+
+    __table_args__ = (
+        UniqueConstraint("source_text_id", "derived_text_id", "relation"),
+        CheckConstraint("source_text_id != derived_text_id", name="ck_textlineage_not_self"),
+        CheckConstraint("relation IN ('translation', 'adaptation', 'based_on')", name="ck_textlineage_relation"),
     )
 
 
@@ -523,3 +589,113 @@ def _normalize_domain_row(_mapper: object, _connection: object, target: DomainMo
 for _model in (Organization, Person, OrganizationMembership, Text, Production, AwardNomination):
     event.listen(_model, "before_insert", _normalize_domain_row)
     event.listen(_model, "before_update", _normalize_domain_row)
+
+
+@event.listens_for(SASession, "before_flush")
+def _validate_text_changes(session: SASession, _context: object, _instances: object) -> None:
+    changed = list(session.new) + list(session.dirty)
+    for row in changed:
+        if isinstance(row, Text) and row not in session.deleted:
+            _sync_display_title(session, row)
+        elif isinstance(row, TextTitle):
+            _normalize_title_row(row)
+        elif isinstance(row, TextContribution) and row.role == "source author":
+            raise ValueError("Source authors must be credited on a based_on source text")
+    if any(isinstance(row, TextLineage) for row in changed):
+        _validate_lineage_graph(session, changed)
+
+
+def _normalize_title_row(row: TextTitle) -> None:
+    from backend.reconciliation import normalize  # ruff: ignore[import-outside-top-level]
+
+    row.title = row.title.strip()
+    row.normalized = normalize(row.title)
+    if not row.normalized:
+        raise ValueError("Text title must not be empty")
+    if row.language is not None:
+        row.language = normalize_text_languages([row.language])[0]
+        if row.language == "mul":
+            raise ValueError("Title language must be a two-letter code")
+
+
+def _sync_display_title(session: SASession, row: Text) -> None:
+    from backend.reconciliation import normalize  # ruff: ignore[import-outside-top-level]
+
+    validated = Text.model_validate(row.model_dump())
+    row.languages = validated.languages
+    normalized = normalize(row.title)
+    titles = list(session.scalars(select(TextTitle).where(col(TextTitle.text_id) == row.id)))
+    titles += [title for title in session.new if isinstance(title, TextTitle) and title.text_id == row.id]
+    if not any(title.normalized == normalized or normalize(title.title) == normalized for title in titles):
+        language = next(iter(row.languages), None)
+        session.add(
+            TextTitle(
+                text=row,
+                text_id=row.id,
+                title=row.title,
+                language=language if language != "mul" else None,
+                normalized=normalized,
+            )
+        )
+
+
+def _lineage_endpoints(row: TextLineage) -> tuple[uuid.UUID, uuid.UUID]:
+    state = sa_inspect(row)
+    source = next(iter(state.attrs.source_text.history.added), None)
+    derived = next(iter(state.attrs.derived_text.history.added), None)
+    source_id = source.id if source is not None else row.source_text_id
+    derived_id = derived.id if derived is not None else row.derived_text_id
+    if source_id is None or derived_id is None:
+        raise ValueError("Both lineage texts are required")
+    return source_id, derived_id
+
+
+def _validate_lineage_graph(session: SASession, changed: list[object]) -> None:
+    if session.get_bind().dialect.name == "postgresql":
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(current_database()), hashtext('theaterdb.textlineage'))")
+        )
+    edges = {
+        row.id: (row.source_text_id, row.derived_text_id, row.relation)
+        for row in session.execute(
+            select(
+                col(TextLineage.id),
+                col(TextLineage.source_text_id),
+                col(TextLineage.derived_text_id),
+                col(TextLineage.relation),
+            )
+        )
+    }
+    for row in changed:
+        if isinstance(row, TextLineage):
+            row.relation = LineageRelation(row.relation)
+            source_id, derived_id = _lineage_endpoints(row)
+            edges[row.id] = (source_id, derived_id, row.relation)
+    deleted = {row.id for row in session.deleted if isinstance(row, TextLineage)}
+    children: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for edge_id, (source_id, derived_id, _relation) in edges.items():
+        if edge_id in deleted:
+            continue
+        if source_id == derived_id:
+            raise ValueError("A text cannot derive from itself")
+        children.setdefault(source_id, set()).add(derived_id)
+    _check_acyclic_texts(children)
+
+
+def _check_acyclic_texts(children: dict[uuid.UUID, set[uuid.UUID]]) -> None:
+    visited: set[uuid.UUID] = set()
+    visiting: set[uuid.UUID] = set()
+
+    def visit(text_id: uuid.UUID) -> None:
+        if text_id in visiting:
+            raise ValueError("Text lineage cycle")
+        if text_id in visited:
+            return
+        visiting.add(text_id)
+        for child in children.get(text_id, ()):
+            visit(child)
+        visiting.remove(text_id)
+        visited.add(text_id)
+
+    for text_id in children:
+        visit(text_id)

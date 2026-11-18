@@ -26,6 +26,7 @@ from backend.import_status import FIELDS, scrape_overview, theatre_status
 from backend.models import Organization, Source
 from backend.production_import import (
     OPERATION,
+    count_production_cases,
     ingest_records,
     list_production_cases,
     production_review,
@@ -89,7 +90,8 @@ def _theatre_label(org: Organization) -> str:
 def _import_tab() -> None:
     st.write(
         "Theater wählen und JSON hochladen. Gleiche Produktionen dieses Theaters werden automatisch ergänzt, "
-        "neue Produktionen angelegt. Nur echte Widersprüche landen unter **Produktionskonflikte**."
+        "neue Produktionen angelegt. Unterschiedliche bekannte Premierenjahre bleiben getrennt. "
+        "Nur echte Widersprüche landen unter **Produktionskonflikte**."
     )
     theatres = sorted(list_entities(Organization), key=lambda org: org.name.casefold())
     if not theatres:
@@ -433,10 +435,21 @@ def _conflict_tab() -> None:
     revision_key = f"conflict_revision_{case_id}_{choice}"
     shown_revision = st.session_state.get(revision_key, review["revision"])
     st.session_state[revision_key] = review["revision"]
-    save_col, reject_col = st.columns([3, 1])
+    save_col, add_col, reject_col = st.columns([2, 2, 1])
     action = "Als neue Produktion anlegen" if create else "Zusammenführen"
-    if save_col.button(action, type="primary", width="stretch", key=f"resolve_{case_id}"):
+    save = save_col.button(action, type="primary", width="stretch", key=f"resolve_{case_id}")
+    add_anyway = add_col.button(
+        "Upload trotzdem hinzufügen",
+        width="stretch",
+        key=f"add_anyway_{case_id}",
+        disabled=create,
+        help="Upload als eigene Produktion anlegen und den bestehenden Datensatz unverändert behalten.",
+    )
+    if save or add_anyway:
         try:
+            if add_anyway:
+                review = production_review(case_id, create=True)
+                shown_revision, create, choices = review["revision"], True, {}
             resolve_production_case(
                 case_id,
                 revision=shown_revision,
@@ -692,7 +705,7 @@ def _review_tab() -> None:
         kind=None if kind == "all" else kind,
         query=query,
         offset=(page - 1) * 200,
-        exclude_operations=[OPERATION],
+        exclude_operations=[OPERATION, "link_text", "text_lineage"],
         exclude_source_ids=[source.id for source in list_entities(Source) if source.name == "theapolis.de"],
     )
     if not cases:
@@ -746,24 +759,28 @@ IMPORT_TAB = "Theater-JSON hochladen"
 
 def _render_tabs() -> None:
     init_db()
-    open_conflicts = len(list_production_cases())
-    conflicts, imports, review, duplicates = st.tabs(
-        [
-            f"Produktionskonflikte ({open_conflicts})",
-            IMPORT_TAB,
-            "Andere Quellen & gemeldete Duplikate",
-            "Duplikate suchen / melden",
-        ],
-        default=IMPORT_TAB if st.session_state.pop("show_import_tab", False) else None,
-    )
-    with conflicts:
-        _conflict_tab()
-    with imports:
-        _import_tab()
-    with review:
-        _review_tab()
-    with duplicates:
-        _duplicates_tab()
+    labels = [
+        f"Produktionskonflikte ({count_production_cases()})",
+        IMPORT_TAB,
+        "Andere Quellen & gemeldete Duplikate",
+        "Duplikate suchen / melden",
+    ]
+    key = "reconciliation_tab"
+    selected = st.session_state.get(key, labels[0])
+    if st.session_state.pop("show_import_tab", False):
+        selected = IMPORT_TAB
+    elif selected.startswith("Produktionskonflikte (") or selected not in labels:
+        selected = labels[0]
+    if st.session_state.get(key) != selected:
+        st.session_state[key] = selected
+    for tab, render_tab in zip(
+        st.tabs(labels, key=key, on_change="rerun"),
+        (_conflict_tab, _import_tab, _review_tab, _duplicates_tab),
+        strict=True,
+    ):
+        if tab.open:
+            with tab:
+                render_tab()
 
 
 def render() -> None:

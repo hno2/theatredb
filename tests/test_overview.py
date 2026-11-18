@@ -66,7 +66,11 @@ def homepage(monkeypatch: pytest.MonkeyPatch) -> HomepageFixture:
         Organization(name="Ohne Position", city="Berlin", country="Deutschland"),
     ]
     monkeypatch.setattr(overview, "list_entities", lambda *args, **kwargs: organizations)
-    monkeypatch.setattr(overview, "count_entities", lambda model: {Production: 1234, Person: 27}.get(model, 0))
+    monkeypatch.setattr(
+        overview,
+        "count_entities_many",
+        lambda *models: {model: {Production: 1234, Person: 27}.get(model, 0) for model in models},
+    )
     return AppTest.from_string(OVERVIEW_SCRIPT), organizations
 
 
@@ -123,7 +127,7 @@ def test_selected_marker_has_internal_detail_link(homepage: HomepageFixture, mon
 
 def test_empty_homepage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(overview, "list_entities", lambda *args, **kwargs: [])
-    monkeypatch.setattr(overview, "count_entities", lambda model: 0)
+    monkeypatch.setattr(overview, "count_entities_many", lambda *models: dict.fromkeys(models, 0))
     app = AppTest.from_string(OVERVIEW_SCRIPT).run()
     assert not app.exception
     assert all(metric.value == "0" for metric in app.metric)
