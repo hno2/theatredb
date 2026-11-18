@@ -34,6 +34,7 @@ Open <http://localhost:8501>. Stop Docker services with `docker compose down`.
 
 ## Docs
 
+- [Production deployments](specs/development.md#production-deployments)
 - [Product specification](specs/specification.md)
 - [Design decisions](specs/design-decisions.md)
 - [Development commands](specs/development.md)

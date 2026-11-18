@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+
+[[ $# == 2 || $# == 3 ]] || fail "Usage: $0 COMPOSE_DIRECTORY PROJECT [IMAGE_DIGEST]"
+compose_dir=$1
+project=$2
+image=${3:-${SSH_ORIGINAL_COMMAND:-}}
+[[ $project =~ ^[a-z0-9][a-z0-9_-]*$ ]] || fail "Invalid Compose project name"
+[[ $image =~ ^ghcr\.io/hno2/theatredb@sha256:[a-f0-9]{64}$ ]] || fail "Expected an exact TheatreDB GHCR image digest"
+export THEATREDB_IMAGE="$image"
+umask 077
+
+override=$(cd -- "$(dirname -- "$0")" && pwd)/compose.production.yml
+cd "$compose_dir"
+compose=(docker compose --project-name "$project" -f docker-compose.yml -f "$override")
+state_dir="$HOME/.local/state/theatredb/$project"
+mkdir -p "$state_dir"
+exec 9>"$state_dir/deploy.lock"
+flock -n 9 || fail "Another deployment is already running for $project"
+
+db=$("${compose[@]}" ps --status running -q db)
+[[ -n $db ]] || fail "No running database for Compose project $project; check the project name and directory"
+"${compose[@]}" pull --policy always app crawl-worker
+backup=$(mktemp "$state_dir/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+trap 'rm -f -- "$backup"' EXIT
+"${compose[@]}" exec -T db sh -ec '
+  export PGPASSWORD="${POSTGRES_PASSWORD:-}"
+  exec pg_dump -h 127.0.0.1 -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-${POSTGRES_USER:-postgres}}" -Fc
+' > "$backup"
+[[ -s $backup ]] || fail "PostgreSQL backup is empty"
+mv -- "$backup" "$backup.dump"
+trap - EXIT
+printf 'Database backup: %s\nDeploying: %s\n' "$backup.dump" "$image"
+
+"${compose[@]}" up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 app crawl-worker
+curl -fsS --max-time 10 --retry 5 --retry-connrefused \
+  https://theater.simonklug.de/_stcore/health
+worker=$("${compose[@]}" ps -q crawl-worker)
+[[ -n $worker && $(docker inspect --format '{{.State.Running}} {{.RestartCount}}' "$worker") == 'true 0' ]] ||
+  fail "Crawler worker is not running cleanly; inspect its Compose logs"
+printf '\nDeployed: %s\n' "$image"
