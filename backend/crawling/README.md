@@ -2,7 +2,8 @@
 
 Manage crawls in **Verwaltung → Quellen → Crawler**. A separate worker fetches
 pages, validates extracted data and submits changed records through the existing
-theatre-import or review workflow.
+theatre-import or review workflow. For behavior and data guarantees, see the
+[product specification](../../specs/specification.md).
 
 ## Run
 
@@ -13,14 +14,18 @@ For local development, start PostgreSQL and the app as described in the
 uv run python -m backend.crawling.worker
 ```
 
-Docker Compose starts the app and worker together:
+For Docker, create the external `web` network once if it does not exist, then
+start the app and worker:
 
 ```bash
+# Run once, only if the network is missing:
+docker network create web
 docker compose up -d --build
 ```
 
-App and worker initialize the durable PostgreSQL queue schema automatically.
-SQLite is supported for tests only.
+View worker logs with `docker compose logs -f crawl-worker`. App and worker
+initialize the PostgreSQL queue schema automatically. SQLite is supported for
+tests only.
 
 ## Configure
 
@@ -29,20 +34,34 @@ SQLite is supported for tests only.
   review proposals under **Datenabgleich & Duplikate → Andere Quellen & gemeldete
   Duplikate**. Config is data; it cannot run Python or shell commands.
 
-`Source` owns each crawler and its run history. Changed extracted records are
-submitted; unchanged records are skipped. Failed or cancelled runs never delete
-domain data. HTTP cache entries may survive a failed run, but import checkpoints
-advance only with a successful import. Respect source permissions and robots
-policies; requests are bounded and rate-limited per source.
+Minimal generic-source config:
 
-Artifacts are stored under `data/crawls/` locally and in the `crawl-data` Docker
-volume. SQLite and the PostgreSQL queue are not interchangeable.
+```json
+{
+  "kind": "records",
+  "base_url": "https://example.org",
+  "listing": {
+    "urls": ["https://example.org/people"],
+    "selector": "a.person",
+    "include": "/people/"
+  },
+  "entity_type": "person",
+  "fields": {
+    "name": {"selector": "h1", "required": true}
+  }
+}
+```
+
+Listing URLs must stay on the configured origin. Selectors and fields are
+validated before a run; relationship fields need a dedicated adapter. Respect
+source permissions and robots policies. Artifacts are stored under
+`data/crawls/` locally and in the `crawl-data` Docker volume.
 
 ## Test
 
 ```bash
-uv run pytest -q tests/test_crawling.py
-THEATERDB_TEST_POSTGRES=1 uv run pytest -q tests/test_crawling.py
+uv run --all-groups pytest -q tests/test_crawling.py
+THEATERDB_TEST_POSTGRES=1 uv run --all-groups pytest -q tests/test_crawling.py
 ```
 
 The second command requires PostgreSQL credentials with `CREATEDB`; it creates
