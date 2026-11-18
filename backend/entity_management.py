@@ -149,8 +149,6 @@ def entity_page[ModelT: SQLModel](
             stmt = stmt.where(or_(*filters))
     with get_session() as session:
         if entity_id is not None:
-            if model_cls is Person:
-                entity_id = resolve_id(session, EntityType.PERSON, entity_id)
             stmt = stmt.where(identifier == entity_id)
         total = session.exec(select(func.count()).select_from(stmt.subquery())).one()
         return list(session.exec(stmt.order_by(label, identifier).limit(limit).offset(offset)).all()), total

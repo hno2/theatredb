@@ -931,8 +931,8 @@ def test_people_management_loads_once_and_shows_total(db, people_count) -> None:
         event.remove(db, "before_cursor_execute", record_statement)
     assert not app.exception
     assert app.caption[0].value == f"{people_count} Personen insgesamt"
-    # One types query, one people query, and (for nonempty pages) one credits query.
-    assert len(statements) == (3 if people else 2)
+    # One types query, one count, one people page and (for nonempty pages) one credits query.
+    assert len(statements) == (4 if people else 3)
     if people:
         assert app.dataframe[0].value["Produktionen · Theater"].tolist() == [
             "Hamlet · Theater nicht hinterlegt",

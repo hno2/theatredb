@@ -134,6 +134,13 @@ def search_entities(kind: EntityType | str, query: str = "", *, limit: int = 50,
         return [entity_snapshot(row) for row in session.exec(stmt).all()]
 
 
+def count_people_for_merge(query: str) -> int:
+    """Count all matching people using the same filter as the paged table."""
+    with get_session() as session:
+        stmt = _entity_search_statement(session, EntityType.PERSON, query, limit=None, offset=0)
+        return session.exec(select(func.count()).select_from(stmt.order_by(None).offset(None).subquery())).one()
+
+
 def search_people_for_merge(query: str = "", *, limit: int | None = 100, offset: int = 0) -> list[dict]:
     """Fetch people and production/theatre context in two queries; None loads all people."""
     with get_session() as session:

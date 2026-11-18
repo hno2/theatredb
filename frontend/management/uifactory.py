@@ -28,7 +28,7 @@ from backend.entity_management import (
     update_entity,
 )
 from backend.models import Person, Source, TextContribution
-from backend.reconciliation import search_people_for_merge, stable_digest
+from backend.reconciliation import count_people_for_merge, search_people_for_merge, stable_digest
 from backend.user_management import get_session
 from frontend.management.merge import render_merge_action
 from frontend.views.organization import web_url
@@ -709,12 +709,13 @@ PAGE_SIZE = 50
 
 def _load_df(model_cls: type[SQLModel], search: str, page: int) -> tuple[pd.DataFrame, int]:
     offset = (page - 1) * PAGE_SIZE
-    entities, matches = entity_page(model_cls, search, limit=PAGE_SIZE, offset=offset)
-    if model_cls is Person and entities:
+    if model_cls is Person:
+        matches = count_people_for_merge(search)
         rows = search_people_for_merge(search, limit=PAGE_SIZE, offset=offset)
         for row in rows:
             row["Produktionen · Theater"] = "; ".join(row.pop("productions"))
     else:
+        entities, matches = entity_page(model_cls, search, limit=PAGE_SIZE, offset=offset)
         rows = [_entity_to_row(e) for e in entities]
     df = pd.DataFrame(rows)
     if not df.empty and "id" in df.columns:
