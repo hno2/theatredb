@@ -37,8 +37,8 @@
 - [x] **Upload overview:** aggregate coverage in SQL; scope conflict counts and source reads.
   Overview currently loads productions, memberships and upload history into Python.
   See [import status](backend/import_status.py).
-- [ ] **Duplicate discovery:** batch candidate reads instead of one session/search per record.
-  Keep limits and explicit identity confirmation. See [reconciliation](backend/reconciliation.py).
+- [x] **Duplicate discovery:** reuse one session and batch production candidates and credits.
+  Keep limits and explicit review. Retain individual queries for other types, where batching did not help.
 - [x] **Large public lists:** add SQL pagination/search for organization overview; fetch only
   linked sources on organization pages. See [public views](frontend/views/).
 - [x] **Crawler fetches:** measured on PostgreSQL 18.4. Combining checkpoint/cache reads

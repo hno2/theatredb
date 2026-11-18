@@ -370,6 +370,31 @@ def test_search_manual_pair_with_different_names_and_discovery(db) -> None:
     assert case.status == "pending"
 
 
+def test_duplicate_discovery_batches_candidates_and_keeps_review_confirmation(db) -> None:
+    organization, director = save(db, Organization(name="Shared theatre"), Person(name="Shared director"))
+    records = save(db, *(Production(name="Shared production", organization_id=organization.id) for _ in range(5)))
+    save(
+        db,
+        *(ProductionMembership(production_id=record.id, person_id=director.id, role="director") for record in records),
+    )
+
+    statements = []
+
+    def count_statement(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    event.listen(db, "before_cursor_execute", count_statement)
+    try:
+        pairs = discover_duplicates("production", limit=5)
+    finally:
+        event.remove(db, "before_cursor_execute", count_statement)
+
+    assert len(pairs) == 5
+    assert all(pair["right"]["recommendation"] == "strong" for pair in pairs)
+    assert len(statements) <= 10
+    assert count(db, ReconciliationCase) == 0
+
+
 def test_invalid_payloads_do_not_create_records(db, source) -> None:
     with pytest.raises(ValueError, match="protected"):
         propose_record("person", {"name": "Person", "id": str(uuid.uuid4())}, source_id=source.id, external_id="1")

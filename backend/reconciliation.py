@@ -15,10 +15,12 @@ from operator import itemgetter
 from typing import Any, get_origin
 from urllib.parse import urlsplit, urlunsplit
 
-from sqlalchemy import String, cast, or_
+from sqlalchemy import Boolean, Integer, String, Uuid, and_, cast, func, literal, or_, union_all, values
+from sqlalchemy import column as sql_column
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.sql.selectable import CTE
 from sqlmodel import Session, SQLModel, col, select
-from sqlmodel.sql.expression import SelectOfScalar
+from sqlmodel.sql.expression import Select, SelectOfScalar
 
 from backend.config import ENTITY_MODELS, LINK_IDENTITY_FIELDS, canonical_role
 from backend.date_precision import DatePrecision, date_interval, intervals_overlap, parse_date
@@ -230,7 +232,11 @@ def _authors(session: Session, text_id: uuid.UUID) -> set[str]:
 
 
 def _candidate_evidence(
-    session: Session, row: Entity, incoming: dict, context: dict
+    session: Session,
+    row: Entity,
+    incoming: dict,
+    context: dict,
+    related_names: dict[uuid.UUID, dict[str | None, set[str]]] | None = None,
 ) -> tuple[list[str], list[str], bool]:
     evidence, conflicts = [], []
     strong = False
@@ -239,7 +245,7 @@ def _candidate_evidence(
     if exact:
         evidence.append("Exakter normalisierter Titel/Name")
     if isinstance(row, Production):
-        extra, conflicts, strong = _production_evidence(session, row, incoming, context, exact)
+        extra, conflicts, strong = _production_evidence(session, row, incoming, context, exact, related_names)
         evidence.extend(extra)
     elif isinstance(row, Text):
         authors = {normalize(name) for name in context.get("authors", [])}
@@ -287,6 +293,7 @@ def _production_evidence(
     incoming: dict,
     context: dict,
     exact: bool,
+    related_names: dict[uuid.UUID, dict[str | None, set[str]]] | None = None,
 ) -> tuple[list[str], list[str], bool]:
     evidence, conflicts = [], []
     organization_id = incoming.get("organization_id")
@@ -296,14 +303,24 @@ def _production_evidence(
     elif organization_id and row.organization_id:
         conflicts.append("Andere Organisation")
     directors = {normalize(n) for n in context.get("directors", [])}
-    existing_directors = _person_names(session, row.id, "director")
+    existing_directors = (
+        _person_names(session, row.id, "director")
+        if related_names is None
+        else related_names.get(row.id, {}).get("director", set())
+    )
     same_directors = bool(directors and existing_directors and directors == existing_directors)
     if same_directors:
         evidence.append("Gleiche Regie")
     elif directors and existing_directors:
         conflicts.append("Abweichende Regie")
     for role, names in context.get("personnel", {}).items():
-        overlap = {normalize(n) for n in names} & _person_names(session, row.id, canonical_role(role))
+        canonical = canonical_role(role)
+        existing = (
+            _person_names(session, row.id, canonical)
+            if related_names is None
+            else related_names.get(row.id, {}).get(canonical, set())
+        )
+        overlap = {normalize(n) for n in names} & existing
         if overlap:
             evidence.append(f"{role}: {', '.join(sorted(overlap))}")
     _premiere_evidence(row, incoming, evidence, conflicts)
@@ -329,7 +346,14 @@ def _dates_overlap(left: object, left_precision: object, right: object, right_pr
 
 
 def _candidates(
-    session: Session, kind: EntityType, incoming: dict, context: dict, source_id: uuid.UUID | None
+    session: Session,
+    kind: EntityType,
+    incoming: dict,
+    context: dict,
+    source_id: uuid.UUID | None,
+    *,
+    candidate_rows: list[Entity] | None = None,
+    related_names: dict[uuid.UUID, dict[str | None, set[str]]] | None = None,
 ) -> list[dict]:
     model = ENTITY_MODELS[kind]
     label = getattr(model, "title" if kind == EntityType.TEXT else "name")
@@ -337,28 +361,31 @@ def _candidates(
     if not title:
         raise ValueError("A name/title is required for matching")
     linked = _source_matches(session, kind, source_id, context) if source_id else set()
-    stmt = select(model)
-    # Query a bounded candidate pool. Missing organization must never enable automatic production matching.
-    organization_id = incoming.get("organization_id")
-    if kind == EntityType.PRODUCTION and organization_id:
-        stmt = stmt.where(Production.organization_id == uuid.UUID(str(organization_id)))
-    tokens = sorted(normalize(title).split(), key=len, reverse=True)[:3]
-    filters = [label.icontains(token, autoescape=True) for token in tokens]
-    if linked:
-        filters.append(col(model.id).in_(linked))
-    if filters:
-        stmt = stmt.where(or_(*filters))
-    rows = list(session.exec(stmt.order_by(label, col(model.id)).limit(200)).all())
-    # Source identities must not disappear behind the name-search limit or organization filter.
-    known_ids = {row.id for row in rows}
-    rows.extend(_get(session, kind, identity) for identity in linked - known_ids)
+    if candidate_rows is None:
+        stmt = select(model)
+        # Query a bounded candidate pool. Missing organization must never enable automatic production matching.
+        organization_id = incoming.get("organization_id")
+        if kind == EntityType.PRODUCTION and organization_id:
+            stmt = stmt.where(Production.organization_id == uuid.UUID(str(organization_id)))
+        tokens = sorted(normalize(title).split(), key=len, reverse=True)[:3]
+        filters = [label.icontains(token, autoescape=True) for token in tokens]
+        if linked:
+            filters.append(col(model.id).in_(linked))
+        if filters:
+            stmt = stmt.where(or_(*filters))
+        rows = list(session.exec(stmt.order_by(label, col(model.id)).limit(200)).all())
+        # Source identities must not disappear behind the name-search limit or organization filter.
+        known_ids = {row.id for row in rows}
+        rows.extend(_get(session, kind, identity) for identity in linked - known_ids)
+    else:
+        rows = candidate_rows
     results = []
     for row in rows:
         name = getattr(row, "title" if kind == EntityType.TEXT else "name")
         similarity = SequenceMatcher(None, normalize(title), normalize(name)).ratio()
         if similarity < 0.55 and row.id not in linked:
             continue
-        evidence, conflicts, strong = _candidate_evidence(session, row, incoming, context)
+        evidence, conflicts, strong = _candidate_evidence(session, row, incoming, context, related_names)
         if row.id in linked:
             evidence.append("Bereits verknüpfte Quellidentität")
         results.append(
@@ -512,27 +539,178 @@ def queue_duplicate(
         return case
 
 
+def _discovery_inputs(kind: EntityType, records: list[dict]) -> CTE:
+    columns = [
+        sql_column("record_index", Integer),
+        sql_column("has_tokens", Boolean),
+        sql_column("token_1", String),
+        sql_column("token_2", String),
+        sql_column("token_3", String),
+        sql_column("organization_id", Uuid(as_uuid=True)),
+    ]
+    rows = []
+    for index, record in enumerate(records):
+        title = record.get("title" if kind == EntityType.TEXT else "name", "")
+        if not title:
+            raise ValueError("A name/title is required for matching")
+        tokens = sorted(normalize(title).split(), key=len, reverse=True)[:3]
+        tokens = [token.replace("/", "//").replace("%", "/%").replace("_", "/_") for token in tokens]
+        organization_id = record.get("organization_id") if kind == EntityType.PRODUCTION else None
+        row = (
+            index,
+            bool(tokens),
+            *(tokens + [None] * (3 - len(tokens))),
+            uuid.UUID(str(organization_id)) if organization_id else None,
+        )
+        rows.append(row)
+    return values(*columns, name="discovery_inputs").data(rows).cte("discovery_inputs")
+
+
+def _discovery_related_names(
+    session: Session, kind: EntityType, entity_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, dict[str | None, set[str]]] | None:
+    if not entity_ids or kind != EntityType.PRODUCTION:
+        return None
+    names: dict[uuid.UUID, dict[str | None, set[str]]] = {}
+    rows = session.exec(
+        select(ProductionMembership.production_id, Person.name, ProductionMembership.role)
+        .join(Person, col(Person.id) == col(ProductionMembership.person_id))
+        .where(col(ProductionMembership.production_id).in_(entity_ids))
+    ).all()
+    for production_id, name, role in rows:
+        names.setdefault(production_id, {}).setdefault(canonical_role(role), set()).add(normalize(name))
+    return names
+
+
+def _postgres_candidate_statement(kind: EntityType, records: list[dict]) -> Select[Entity, int]:
+    model = ENTITY_MODELS[kind]
+    label = getattr(model, "title" if kind == EntityType.TEXT else "name")
+    branches = []
+    for index, record in enumerate(records):
+        title = record.get("title" if kind == EntityType.TEXT else "name", "")
+        if not title:
+            raise ValueError("A name/title is required for matching")
+        stmt = select(literal(index).label("record_index"), col(model.id).label("candidate_id"))
+        organization_id = record.get("organization_id")
+        if kind == EntityType.PRODUCTION and organization_id:
+            stmt = stmt.where(col(Production.organization_id) == uuid.UUID(str(organization_id)))
+        tokens = sorted(normalize(title).split(), key=len, reverse=True)[:3]
+        filters = [label.icontains(token, autoescape=True) for token in tokens]
+        if filters:
+            stmt = stmt.where(or_(*filters))
+        branches.append(stmt.order_by(label, col(model.id)).limit(200))
+    candidates = union_all(*branches).subquery("candidate_pools")
+    return (
+        select(model, candidates.c.record_index)
+        .join(candidates, col(model.id) == candidates.c.candidate_id)
+        .order_by(candidates.c.record_index, label, col(model.id))
+    )
+
+
+def _sqlite_candidate_statement(kind: EntityType, records: list[dict]) -> Select[Entity, int]:
+    model = ENTITY_MODELS[kind]
+    label = getattr(model, "title" if kind == EntityType.TEXT else "name")
+    record_inputs = _discovery_inputs(kind, records)
+    matches = or_(
+        ~record_inputs.c.has_tokens,
+        *(label.icontains(record_inputs.c[f"token_{index}"], escape="/") for index in range(1, 4)),
+    )
+    if kind == EntityType.PRODUCTION:
+        matches = and_(
+            matches,
+            or_(
+                record_inputs.c.organization_id.is_(None),
+                col(Production.organization_id) == record_inputs.c.organization_id,
+            ),
+        )
+    ranked = (
+        select(
+            record_inputs.c.record_index,
+            col(model.id).label("candidate_id"),
+            func.row_number()
+            .over(partition_by=record_inputs.c.record_index, order_by=(label, col(model.id)))
+            .label("candidate_rank"),
+        )
+        .select_from(record_inputs.join(model, matches))
+        .subquery()
+    )
+    return (
+        select(model, ranked.c.record_index)
+        .join(ranked, col(model.id) == ranked.c.candidate_id)
+        .where(ranked.c.candidate_rank <= 200)
+        .order_by(ranked.c.record_index, ranked.c.candidate_rank)
+    )
+
+
+def _batch_duplicate_candidates(
+    session: Session, kind: EntityType, records: list[dict]
+) -> tuple[dict[int, list[Entity]], dict[uuid.UUID, dict[str | None, set[str]]] | None]:
+    stmt = (
+        _postgres_candidate_statement(kind, records)
+        if session.get_bind().dialect.name == "postgresql"
+        else _sqlite_candidate_statement(kind, records)
+    )
+    candidate_rows = {index: [] for index in range(len(records))}
+    candidate_entities = session.exec(stmt).all()
+    for candidate, index in candidate_entities:
+        candidate_rows[index].append(candidate)
+    name_field = "title" if kind == EntityType.TEXT else "name"
+    for index, record in enumerate(records):
+        title = record.get(name_field, "")
+        candidate_rows[index] = [
+            candidate
+            for candidate in candidate_rows[index]
+            if SequenceMatcher(None, normalize(title), normalize(getattr(candidate, name_field))).ratio() >= 0.55
+        ]
+    candidate_ids = {candidate.id for rows in candidate_rows.values() for candidate in rows}
+    related_names = _discovery_related_names(
+        session, kind, candidate_ids | {uuid.UUID(record["id"]) for record in records}
+    )
+    return candidate_rows, related_names
+
+
 def discover_duplicates(kind: EntityType | str, query: str = "", *, limit: int = 50) -> list[dict]:
     """Return bounded, explained duplicate candidates without submitting or merging them."""
     kind = _kind(kind)
     results, seen = [], set()
-    for record in search_entities(kind, query, limit=limit):
-        context = {}
-        with get_session() as session:
+    with get_session() as session:
+        records = [
+            entity_snapshot(row)
+            for row in session.exec(_entity_search_statement(session, kind, query, limit=limit, offset=0)).all()
+        ]
+        # Broad title/name pools did not benefit from batching on PostgreSQL.
+        batch_size = 5 if kind == EntityType.PRODUCTION else 1
+        for start in range(0, len(records), batch_size):
+            batch = records[start : start + batch_size]
             if kind == EntityType.PRODUCTION:
-                context["directors"] = sorted(_person_names(session, uuid.UUID(record["id"]), "director"))
-            elif kind == EntityType.TEXT:
-                context["authors"] = sorted(_authors(session, uuid.UUID(record["id"])))
-        for candidate in find_candidates(kind, record, context=context):
-            if candidate["id"] == record["id"]:
-                continue
-            pair = tuple(sorted([record["id"], candidate["id"]]))
-            if pair in seen:
-                continue
-            seen.add(pair)
-            results.append({"left": record, "right": candidate})
-            if len(results) >= limit:
-                return results
+                candidate_rows, related_names = _batch_duplicate_candidates(session, kind, batch)
+            else:
+                candidate_rows, related_names = {}, None
+            for index, record in enumerate(batch):
+                context = {}
+                record_id = uuid.UUID(record["id"])
+                if kind == EntityType.PRODUCTION:
+                    context["directors"] = sorted((related_names or {}).get(record_id, {}).get("director", set()))
+                elif kind == EntityType.TEXT:
+                    context["authors"] = sorted(_authors(session, record_id))
+                for candidate in _candidates(
+                    session,
+                    kind,
+                    record,
+                    context,
+                    None,
+                    candidate_rows=candidate_rows.get(index),
+                    related_names=related_names,
+                ):
+                    if candidate["id"] == record["id"]:
+                        continue
+                    pair = tuple(sorted([record["id"], candidate["id"]]))
+                    if pair in seen:
+                        continue
+                    seen.add(pair)
+                    results.append({"left": record, "right": candidate})
+                    if len(results) >= limit:
+                        return results
     return results
 
 
