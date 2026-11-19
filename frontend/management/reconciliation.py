@@ -20,6 +20,7 @@ from backend.config import ENTITY_LABELS as KINDS
 from backend.config import ROLE_LABELS as ROLES
 from backend.config import SCRAPE_FRESHNESS as FRESHNESS
 from backend.config import SCRAPE_SCOPES as SCOPES
+from backend.data_quality import public_summary, season_label
 from backend.date_precision import DatePrecision, format_date, parse_date
 from backend.entity_management import list_entities
 from backend.import_status import FIELDS, scrape_overview, theatre_status
@@ -45,7 +46,7 @@ from backend.reconciliation import (
 from frontend.management.merge import format_value as _format
 from frontend.management.merge import styled as _styled
 from frontend.management.uifactory import _actor_id
-from frontend.views.organization import render_web_link
+from frontend.views.organization import load_organization_profile, render_quality_summary, render_web_link
 
 NEW_PRODUCTION = "__new__"
 
@@ -645,7 +646,70 @@ def _comparison(case: dict, preview: dict, target_id: str | None) -> list[str]:
     return selected
 
 
-def _decision_buttons(case_id: str, preview: dict, target_choice: str | None, selected: list[str]) -> None:
+def _assessment_choices(preview: dict) -> dict[str, str]:
+    result = preview.get("assessment_result")
+    if result is None:
+        return {}
+    st.subheader("Datenqualität nach der Zusammenführung")
+    st.caption(
+        "Prüfungen werden als zusammengehörige Blöcke übernommen. "
+        "Unterschiedliche Historienzeiträume werden nicht automatisch vereinigt."
+    )
+    labels = {
+        preview["target_state"]["record"]["id"]: "Bevorzugter Datensatz",
+        preview["duplicate_state"]["record"]["id"]: "Duplikat",
+    }
+    blocks, checks = dict(result["blocks"]), dict(result["season_checks"])
+    choices = {}
+    for conflict in preview["assessment_conflicts"]:
+        key = conflict["key"]
+        title = (
+            f"Spielzeit {season_label(int(key.removeprefix('season:')))}"
+            if key.startswith("season:")
+            else {"general": "Allgemeine Angaben", "history": "Produktionshistorie", "update": "Aktualisierung"}[key]
+        )
+        st.markdown(f"**{title}: Welche Prüfung bleibt gültig?**")
+        for column, option in zip(st.columns(2), conflict["options"], strict=True):
+            with column.container(border=True):
+                st.caption(labels[option["entity_id"]])
+                value = option["value"]
+                summary = public_summary(value, [value] if key.startswith("season:") else [])
+                if key.startswith("season:"):
+                    st.text(summary["season_label"])
+                elif key == "update":
+                    st.text(summary["update_reason"])
+                else:
+                    st.text(summary["general_label"] if key == "general" else summary["history_label"])
+                for evidence in summary["evidence"]:
+                    st.text(evidence)
+                st.json(value, expanded=False)
+        choice = st.selectbox(
+            f"{title}: Prüfung übernehmen von",
+            conflict["sources"],
+            index=None,
+            placeholder="Prüfung auswählen",
+            format_func=labels.__getitem__,
+            key=f"assessment_{preview['revision']}_{key}",
+        )
+        if choice is not None:
+            choices[key] = choice
+            value = next(option["value"] for option in conflict["options"] if option["entity_id"] == choice)
+            (checks if key.startswith("season:") else blocks)[key] = value
+    if len(choices) == len(preview["assessment_conflicts"]):
+        merged = {field: value for block in blocks.values() if block for field, value in block.items()}
+        render_quality_summary({**merged, "season_checks": list(checks.values())})
+    else:
+        st.info("Bitte alle Prüfungskonflikte lösen. Danach wird der endgültige Prüfstand angezeigt.")
+    return choices
+
+
+def _decision_buttons(
+    case_id: str,
+    preview: dict,
+    target_choice: str | None,
+    selected: list[str],
+    assessment_choices: dict[str, str],
+) -> None:
     target_id = preview["target_id"]
     note = st.text_input("Entscheidungsnotiz", key=f"note_{case_id}")
     confirmed = st.checkbox(
@@ -654,7 +718,12 @@ def _decision_buttons(case_id: str, preview: dict, target_choice: str | None, se
     )
     if target_choice == "new":
         st.info("Neuanlage übernimmt alle Quelldaten. Feldhäkchen gelten nur für Updates / Zusammenführungen.")
-    allowed = confirmed and target_choice not in {None, "choose"} and not preview["blocked"]
+    allowed = (
+        confirmed
+        and target_choice not in {None, "choose"}
+        and not preview["blocked"]
+        and len(assessment_choices) == len(preview.get("assessment_conflicts", []))
+    )
     if st.button("Genehmigen und speichern", type="primary", disabled=not allowed):
         entity_id = approve_case(
             case_id,
@@ -664,7 +733,9 @@ def _decision_buttons(case_id: str, preview: dict, target_choice: str | None, se
             allow_create=target_choice == "new",
             actor_id=_actor(),
             note=note,
+            assessment_choices=assessment_choices,
         )
+        load_organization_profile.clear()
         st.session_state["_flash"] = f"Gespeichert: {entity_id}"
         st.rerun()
 
@@ -681,7 +752,8 @@ def _pending_case(case: dict) -> None:
         st.session_state[preview_key] = preview_case(case_id, target_id=target_id) if target_id else initial
     preview = st.session_state[preview_key]
     selected = _comparison(case, preview, target_id)
-    _decision_buttons(case_id, preview, target_choice, selected)
+    assessment_choices = _assessment_choices(preview)
+    _decision_buttons(case_id, preview, target_choice, selected, assessment_choices)
 
 
 def _review_tab() -> None:

@@ -1,18 +1,23 @@
 from itertools import starmap
 from typing import cast
 from urllib.parse import urlencode
+from uuid import UUID
 
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
+from backend.data_quality import QUALITY_LABELS, public_summary, season_checks_many
 from backend.entity_management import count_entities_many, list_matching_entities, organization_coverage
-from backend.models import Award, Organization, Person, Production, Source, Text
+from backend.models import Award, Organization, OrganizationSeasonCheck, Person, Production, Source, Text
 from backend.reconciliation import stable_digest
 from frontend.views.helpers import has_coordinates
 
 
-def organization_data(organizations: list[Organization]) -> pd.DataFrame:
+def organization_data(
+    organizations: list[Organization],
+    checks_by_org: dict[UUID, list[OrganizationSeasonCheck]] | None = None,
+) -> pd.DataFrame:
     """Prepare directory records, including organizations without coordinates."""
     return pd.DataFrame(
         [
@@ -24,10 +29,28 @@ def organization_data(organizations: list[Organization]) -> pd.DataFrame:
                 "lat": org.lat,
                 "lon": org.lon,
                 "detail": f"detail?{urlencode({'kind': 'organization', 'id': str(org.id)})}",
+                **public_summary(org, (checks_by_org or {}).get(org.id, [])),
             }
             for org in organizations
         ],
-        columns=["id", "name", "city", "country", "lat", "lon", "detail"],
+        columns=[
+            "id",
+            "name",
+            "city",
+            "country",
+            "lat",
+            "lon",
+            "detail",
+            "quality",
+            "quality_label",
+            "color",
+            "general_label",
+            "history_label",
+            "season_label",
+            "season_current",
+            "update_reason",
+            "evidence",
+        ],
     )
 
 
@@ -42,9 +65,9 @@ def theater_map(data: pd.DataFrame) -> pdk.Deck:
             pdk.Layer(
                 "ScatterplotLayer",
                 id="theaters",
-                data=data.to_dict("records"),
+                data=data.sort_values(["name", "id"], kind="stable").to_dict("records"),
                 get_position="[lon, lat]",
-                get_fill_color=[139, 58, 50, 200],
+                get_fill_color="color",
                 get_line_color=[255, 255, 255],
                 get_radius=650,
                 radius_min_pixels=5,
@@ -55,7 +78,10 @@ def theater_map(data: pd.DataFrame) -> pdk.Deck:
                 auto_highlight=True,
             ),
         ],
-        tooltip={"text": "{name}\n{city}\nAnklicken, um den Detail-Link anzuzeigen."},
+        tooltip={
+            "text": "{name}\n{city}\n{quality_label}\n{general_label}\n{history_label}\n{season_label}\n{update_reason}"
+            "\nAnklicken, um den Detail-Link anzuzeigen."
+        },
     )
 
 
@@ -71,6 +97,11 @@ def render_location_links(data: pd.DataFrame, entity_id: str) -> None:
             with st.container(border=True):
                 st.text(theater["name"])
                 st.caption(" · ".join(part for part in (theater["city"], theater["country"]) if part))
+                st.text(theater["quality_label"])
+                st.caption(theater["history_label"])
+                st.caption(theater["season_label"])
+                if theater["update_reason"]:
+                    st.warning(theater["update_reason"])
                 st.page_link(
                     "views/detail.py",
                     label="Theater ansehen",
@@ -113,17 +144,42 @@ def render_overview() -> None:
         "Theater, Ort oder Land suchen",
         placeholder="Zum Beispiel: Burgtheater, Berlin oder Österreich",
     ).strip()
-    data = organization_data(list_matching_entities(Organization, search))
+    quality = st.selectbox(
+        "Datenqualität",
+        ["all", *QUALITY_LABELS],
+        format_func=lambda value: "Alle Prüfstände" if value == "all" else QUALITY_LABELS[value],
+        key="overview_quality",
+    )
+    pending_season = st.toggle(
+        "Aktuelle Spielzeit noch nicht geprüft",
+        key="overview_pending_season",
+        help="Zeigt sowohl noch nie geprüfte als auch nur in früheren Spielzeiten geprüfte Häuser.",
+    )
+    organizations = list_matching_entities(Organization, search)
+    data = organization_data(organizations, season_checks_many([org.id for org in organizations]))
+    if quality != "all":
+        data = data.loc[data["quality"] == quality, :]
+    if pending_season:
+        data = data.loc[~data["season_current"].astype(bool), :]
     visible = data.loc[list(starmap(has_coordinates, data[["lat", "lon"]].itertuples(index=False, name=None))), :]
 
     st.caption(
         f"{len(data)} Treffer insgesamt · {len(visible)} davon auf der Karte. "
         "Punkt anklicken und über den Link das Theater öffnen."
     )
+    with st.container(horizontal=True):
+        st.badge("Grau · Allgemeine Angaben noch ungeprüft", color="gray")
+        st.badge("Blau · Allgemeine Angaben geprüft", color="blue")
+        st.badge("Grün · Angaben und Historie geprüft", color="green")
+        st.badge("Amber · Aktualisierung nötig", color="orange")
+    st.caption(
+        "Grün bestätigt die Historie nur für den angegebenen Zeitraum, nicht die aktuelle Spielzeit. "
+        "Die Spielzeitprüfung wird separat angezeigt. Überlagerte Punkte können unterschiedliche Prüfstände haben."
+    )
     if not visible.empty:
         event = st.pydeck_chart(
             theater_map(visible),
-            key=f"theater_map_{stable_digest(search)}",
+            key=f"theater_map_{stable_digest([search, quality, pending_season])}",
             on_select="rerun",
             selection_mode="single-object",
             height=480,
@@ -133,7 +189,7 @@ def render_overview() -> None:
         if selected:
             render_location_links(visible, selected[0]["id"])
     elif data.empty:
-        st.info("Keine Theater gefunden. Versuche einen anderen Suchbegriff.")
+        st.info("Keine Theater gefunden. Versuche einen anderen Suchbegriff oder ändere die Qualitätsfilter.")
     else:
         st.info("Für diese Treffer sind noch keine gültigen Koordinaten hinterlegt. Nutze das Verzeichnis unten.")
 
@@ -171,14 +227,18 @@ def render_overview() -> None:
     st.caption("Auch Treffer ohne Kartenposition werden angezeigt. Über „Ansehen“ öffnest du den jeweiligen Eintrag.")
     if not data.empty:
         st.dataframe(
-            data[["name", "city", "country", "detail"]],
+            data[["name", "city", "country", "quality_label", "history_label", "season_label", "detail"]],
             hide_index=True,
             column_config={
                 "name": st.column_config.TextColumn("Theater / Organisation", width="large"),
                 "city": "Ort",
                 "country": "Land",
+                "quality_label": "Datenqualität",
+                "history_label": "Produktionshistorie",
+                "season_label": "Spielzeitprüfung",
                 "detail": st.column_config.LinkColumn("Eintrag", display_text="Ansehen"),
             },
+            alt="Gefundene Theater mit Datenqualität, Historienabdeckung und Spielzeitprüfung",
         )
     elif not total:
         st.info("Noch keine Theater erfasst. Sobald Einträge vorliegen, erscheinen sie hier und auf der Karte.")

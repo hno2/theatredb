@@ -8,7 +8,7 @@ from itertools import batched
 from typing import Any, ClassVar, Protocol, cast
 
 from pydantic import model_validator
-from sqlalchemy import JSON, CheckConstraint, Column, DateTime, Index, event, select, text
+from sqlalchemy import JSON, CheckConstraint, Column, DateTime, ForeignKey, Index, Uuid, event, select, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import Text as SQLText
 from sqlalchemy import inspect as sa_inspect
@@ -299,6 +299,15 @@ class EntityRedirect(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("entity_type", "old_id"),)
 
 
+def _validate_assessment_block(values: tuple[object, ...], label: str, actor_index: int) -> None:
+    if any(value is not None for value in values) and any(value is None for value in values):
+        raise ValueError(f"{label} fields must be set or cleared together")
+    if values[-1] is not None and not str(values[-1]).strip():
+        raise ValueError(f"{label} evidence must not be blank")
+    if values[actor_index] is not None and not str(values[actor_index]).strip():
+        raise ValueError(f"{label} actor must not be blank")
+
+
 class Organization(SourceMixin, DomainModel, table=True):
     """Represents a theater organization."""
 
@@ -325,6 +334,128 @@ class Organization(SourceMixin, DomainModel, table=True):
     closed: dt.datetime | None = Field(default=None, sa_type=DateTime)
     closed_precision: DatePrecision | None = None
     venues: dict[str, int] | None = Field(default=None, sa_column=Column(JSON))  # format {"Name": "Seats"}
+    general_verified_at: dt.datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+    general_verified_by: str | None = None
+    general_verification_evidence: str | None = Field(default=None, sa_type=SQLText)
+    history_from_season: int | None = None
+    history_through_season: int | None = None
+    history_verified_at: dt.datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+    history_verified_by: str | None = None
+    history_verification_evidence: str | None = Field(default=None, sa_type=SQLText)
+    update_scope: str | None = None
+    update_reason: str | None = Field(default=None, sa_type=SQLText)
+    update_flagged_at: dt.datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+    update_flagged_by: str | None = None
+
+    __table_args__ = (
+        CheckConstraint(
+            "(general_verified_at IS NULL AND general_verified_by IS NULL "
+            "AND general_verification_evidence IS NULL) OR "
+            "(general_verified_at IS NOT NULL AND general_verified_by IS NOT NULL "
+            "AND general_verification_evidence IS NOT NULL "
+            "AND length(trim(general_verified_by)) > 0 "
+            "AND length(trim(general_verification_evidence)) > 0)",
+            name="ck_organization_general_assessment",
+        ),
+        CheckConstraint(
+            "(history_from_season IS NULL AND history_through_season IS NULL "
+            "AND history_verified_at IS NULL AND history_verified_by IS NULL "
+            "AND history_verification_evidence IS NULL) OR "
+            "(history_from_season IS NOT NULL AND history_through_season IS NOT NULL "
+            "AND history_from_season BETWEEN 1000 AND 9998 "
+            "AND history_through_season BETWEEN history_from_season AND 9998 "
+            "AND history_verified_at IS NOT NULL AND history_verified_by IS NOT NULL "
+            "AND history_verification_evidence IS NOT NULL "
+            "AND length(trim(history_verified_by)) > 0 "
+            "AND length(trim(history_verification_evidence)) > 0)",
+            name="ck_organization_history_assessment",
+        ),
+        CheckConstraint(
+            "(update_scope IS NULL AND update_reason IS NULL "
+            "AND update_flagged_at IS NULL AND update_flagged_by IS NULL) OR "
+            "(update_scope IS NOT NULL AND update_scope IN ('general', 'productions', 'both') "
+            "AND update_reason IS NOT NULL AND update_flagged_at IS NOT NULL "
+            "AND update_flagged_by IS NOT NULL AND length(trim(update_flagged_by)) > 0 "
+            "AND length(trim(update_reason)) > 0 "
+            ")",
+            name="ck_organization_update_flag",
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_quality_blocks(self) -> Organization:
+        """Require complete, internally consistent assessment blocks."""
+        _validate_assessment_block(
+            (self.general_verified_at, self.general_verified_by, self.general_verification_evidence),
+            "General verification",
+            1,
+        )
+        _validate_assessment_block(
+            (
+                self.history_from_season,
+                self.history_through_season,
+                self.history_verified_at,
+                self.history_verified_by,
+                self.history_verification_evidence,
+            ),
+            "History verification",
+            3,
+        )
+        history_start, history_end = self.history_from_season, self.history_through_season
+        if history_start is not None and history_end is not None:
+            if (
+                isinstance(history_start, bool)
+                or isinstance(history_end, bool)
+                or not 1000 <= history_start <= 9998
+                or not 1000 <= history_end <= 9998
+            ):
+                raise ValueError("History seasons must be four-digit start years")
+            if history_start > history_end:
+                raise ValueError("History start season must not follow its end season")
+        update_values = (self.update_scope, self.update_reason, self.update_flagged_at, self.update_flagged_by)
+        if any(value is not None for value in update_values) and any(value is None for value in update_values):
+            raise ValueError("Update flag fields must be set or cleared together")
+        if self.update_scope is not None and self.update_scope not in {"general", "productions", "both"}:
+            raise ValueError("Invalid update scope")
+        if self.update_reason is not None and not self.update_reason.strip():
+            raise ValueError("Update reason must not be blank")
+        if self.update_flagged_by is not None and not self.update_flagged_by.strip():
+            raise ValueError("Update flag actor must not be blank")
+        return self
+
+
+class OrganizationSeasonCheck(SQLModel, table=True):
+    """Audited confirmation that one organization's programme was checked for a season."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    organization_id: uuid.UUID = Field(
+        sa_column=Column(
+            Uuid(as_uuid=True),
+            ForeignKey("organization.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    season_start_year: int
+    checked_at: dt.datetime = Field(sa_type=DateTime(timezone=True))
+    checked_by: str
+    evidence: str = Field(sa_type=SQLText)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "season_start_year", name="uq_organization_season_check"),
+        CheckConstraint("season_start_year BETWEEN 1000 AND 9998", name="ck_season_check_start_year"),
+        CheckConstraint("length(trim(checked_by)) > 0", name="ck_season_check_actor"),
+        CheckConstraint("length(trim(evidence)) > 0", name="ck_season_check_evidence"),
+    )
+
+    @model_validator(mode="after")
+    def validate_check(self) -> OrganizationSeasonCheck:
+        """Reject invalid season, actor, and evidence values."""
+        if isinstance(self.season_start_year, bool) or not 1000 <= self.season_start_year <= 9998:
+            raise ValueError("Season must be a four-digit start year")
+        if not self.checked_by.strip() or not self.evidence.strip():
+            raise ValueError("A season check requires an actor and nonblank evidence")
+        return self
 
 
 class ProductionRole(StrEnum):

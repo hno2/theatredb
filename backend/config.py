@@ -19,6 +19,9 @@ from backend.models import (
     TextTitle,
 )
 
+# Editorially controlled rollover; assessments remain stored against start years.
+CURRENT_SEASON_START_YEAR = 2026
+
 # Canonical role: display label, exact aliases, pattern for descriptive source credits.
 ROLE_CONFIG: dict[str, tuple[str, tuple[str, ...], str | None]] = {
     "director": ("Regie", ("regie", "inszenierung"), r"Regie|Inszenierung"),

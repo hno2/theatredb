@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from backend.config import canonical_role
+from backend.data_quality import public_summary
 from backend.date_precision import DatePrecision, date_interval, format_date, intervals_overlap
 from backend.date_precision import parse_date as parse_domain_date
 from backend.entity_management import entities_by_ids, get_organization_profile
@@ -500,6 +501,7 @@ def render_organization(data: dict) -> None:
         history.append(f"Geschlossen {data['closed_year']}")
     if history:
         st.caption(" · ".join(history))
+    render_quality_summary(data)
     productions = data.get("productions") or []
     dated, _ = production_dates(productions)
     sources = data.get("sources") or []
@@ -523,6 +525,25 @@ def render_organization(data: dict) -> None:
     with st.expander("Technische Angaben"):
         st.caption("Interne Kennung dieses Eintrags")
         st.code(str(data["id"]), language=None)
+
+
+def render_quality_summary(data: dict) -> None:
+    """Show editorial coverage separately from programme freshness and source review."""
+    summary = public_summary(data, data.get("season_checks") or [])
+    with st.container(border=True):
+        st.subheader("Datenqualität")
+        st.text(summary["general_label"])
+        st.text(summary["history_label"])
+        st.text(summary["season_label"])
+        if summary["update_reason"]:
+            st.warning(summary["update_reason"])
+        if summary["evidence"]:
+            with st.expander("Belege zur Prüfung"):
+                for evidence in dict.fromkeys(summary["evidence"]):
+                    if url := web_url(evidence):
+                        st.link_button("Prüfquelle öffnen", url)
+                    else:
+                        st.text(evidence)
 
 
 def render_house(data: dict) -> None:

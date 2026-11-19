@@ -9,6 +9,8 @@ administrative tools for imports, review, and data maintenance.
 ## Main workflows
 
 - Browse theatre and production details, with source links.
+- Review theatre general information, scoped production-history coverage, and
+  the current Spielzeit; browse assessment colours and filters on the overview.
 - Search and filter productions across the full dataset.
 - Upload theatre production JSON. Conflict-free changes can be applied
   automatically; ambiguous matches wait for review.
@@ -89,6 +91,15 @@ administrative tools for imports, review, and data maintenance.
   Wikidata label confirms them.
 - Publisher extraction accepts supplied HTML and CSS rules. Site-specific
   crawling rules need verified fixtures.
+
+## Data-quality assessments
+
+The [data-quality specification](data-quality.md) defines editorial
+verification, scoped production-history coverage, current-Spielzeit checks,
+and overview map colours. Assessments are explicit, independently dated actions
+with SCD2 history, not scores inferred from imports. Organization management
+defaults to the current Spielzeit and reuses the theatre's programme URL as
+evidence. Conflicting assessments require grouped choices during merges.
 
 See the [ingestion guide](../backend/ingestion/README.md) and
 [crawler guide](../backend/crawling/README.md) for operational details.
