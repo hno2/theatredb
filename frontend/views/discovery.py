@@ -18,9 +18,7 @@ def render_pagination(page: int, pages: int, page_key: str, position: str) -> No
         return
     bottom_key = f"{page_key}_bottom"
     key, other_key = (page_key, bottom_key) if position == "top" else (bottom_key, page_key)
-    if st.session_state.get(key) != page:
-        st.session_state[key] = page
-    st.pagination(pages, key=key, on_change=_sync_page, args=(key, other_key))
+    st.pagination(pages, key=key, default=page, on_change=_sync_page, args=(key, other_key))
     st.caption(f"Seite {page} von {pages}")
 
 
