@@ -1,7 +1,7 @@
 from datetime import date
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 from uuid import uuid4
 
 import pandas as pd
@@ -67,9 +67,23 @@ def test_web_url(raw: str | None, expected: str | None) -> None:
     assert organization.web_url(raw) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("https://archive.example/about", "https://archive.example/favicon.ico"),
+        ("http://[::1]:8000/archive", "http://[::1]:8000/favicon.ico"),
+        ("https://user:pass@archive.example/about", "https://archive.example/favicon.ico"),
+        ("javascript:alert(1)", None),
+        ("https://archive.example:invalid/about", None),
+    ],
+)
+def test_favicon_url(raw: str, expected: str | None) -> None:
+    assert organization.favicon_url(raw) == expected
+
+
 @pytest.fixture
 def profile(monkeypatch: pytest.MonkeyPatch) -> ProfileFixture:
-    source = Source(name="Theaterarchiv")
+    source = Source(name="Theaterarchiv", base_url="https://archive.example/about")
     monkeypatch.setattr(organization, "entities_by_ids", lambda model, ids: [source] if source.id in ids else [])
     links = Mock()
     monkeypatch.setattr(organization, "entity_link", links)
@@ -126,14 +140,51 @@ def test_profile_has_map_address_and_readable_sources(profile: ProfileFixture) -
     assert "Theaterstraße 1" in text
     assert "1010 Wien" in text
     assert "Theaterarchiv" in text
-    assert "Eintrag im Theaterarchiv" in text
     captions = [element.value for element in app.caption]
+    assert "Eintrag im Theaterarchiv" in captions
     assert "Geprüft · Erfasst am 05.11.2026" in captions
     assert (
         ":material/event: Premiere 01.02.2025 · :material/family_restroom: Ab 0 Jahren · :material/schedule: 90 Minuten"
     ) in captions
     assert not any("source_id" in value or "external_url" in value for value in text)
     assert links.call_args_list[0].args == ("Neu", "production", "new")
+
+
+def test_sources_render_with_source_favicon(profile: ProfileFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _, _ = profile
+    image = Mock()
+    load = Mock(return_value=b"favicon")
+    monkeypatch.setattr(organization.st, "image", image)
+    monkeypatch.setattr(organization, "load_favicon", load)
+    app.run()
+    assert not app.exception
+    load.assert_called_once_with("https://archive.example/favicon.ico")
+    image.assert_called_once_with(
+        b"favicon",
+        width=24,
+        alt="Favicon Theaterarchiv",
+    )
+
+
+def test_favicon_download_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = MagicMock()
+    response.headers.get_content_type.return_value = "image/x-icon"
+    response.read.return_value = b"favicon"
+    response.__enter__.return_value = response
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr(
+        organization.socket,
+        "getaddrinfo",
+        lambda *args: [(organization.socket.AF_INET, organization.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(organization, "build_opener", Mock(return_value=opener))
+    organization.load_favicon.clear()
+    url = "https://favicon-cache-test.example/favicon.ico"
+    assert organization.load_favicon(url) == b"favicon"
+    assert organization.load_favicon(url) == b"favicon"
+    opener.open.assert_called_once()
+    organization.load_favicon.clear()
 
 
 def test_list_order_and_undated_entries(profile: ProfileFixture) -> None:
