@@ -1213,9 +1213,7 @@ def _check_values(check: OrganizationSeasonCheck) -> tuple:
     return (check.season_start_year, check.checked_at, check.checked_by, check.evidence)
 
 
-def _organization_quality_conflicts(
-    session: Session, target: Organization, duplicate: Organization
-) -> list[dict]:
+def _organization_quality_conflicts(session: Session, target: Organization, duplicate: Organization) -> list[dict]:
     conflicts = []
     for block, fields in _ORGANIZATION_ASSESSMENTS.items():
         target_values = _assessment_values(target, fields)
@@ -1280,8 +1278,7 @@ def _organization_assessment_values(
         return {"entity_id": str(source.id), "value": value}
 
     assessment_options = {
-        conflict["key"]: [option(target, conflict["key"]), option(duplicate, conflict["key"])]
-        for conflict in conflicts
+        conflict["key"]: [option(target, conflict["key"]), option(duplicate, conflict["key"])] for conflict in conflicts
     }
     for conflict in conflicts:
         conflict["options"] = assessment_options[conflict["key"]]
@@ -1367,11 +1364,15 @@ def _organization_quality_preview(
     return conflicts, result, state
 
 
-def _validate_assessment_choices(conflicts: list[dict], choices: dict[str, str] | None) -> tuple[set[str], dict[str, str]]:
+def _validate_assessment_choices(
+    conflicts: list[dict], choices: dict[str, str] | None
+) -> tuple[set[str], dict[str, str]]:
     conflict_keys = {item["key"] for item in conflicts}
     choices = choices or {}
     if conflict_keys - choices.keys():
-        raise ValueError(f"Choose an assessment for every conflict: {', '.join(sorted(conflict_keys - choices.keys()))}")
+        raise ValueError(
+            f"Choose an assessment for every conflict: {', '.join(sorted(conflict_keys - choices.keys()))}"
+        )
     if choices.keys() - conflict_keys:
         raise ValueError(f"Assessment choices are not conflicting: {', '.join(sorted(choices.keys() - conflict_keys))}")
     return conflict_keys, choices
@@ -1387,7 +1388,9 @@ def _carry_organization_blocks(
     for block, fields in _ORGANIZATION_ASSESSMENTS.items():
         target_values = _assessment_values(target, fields)
         duplicate_values = _assessment_values(duplicate, fields)
-        if not any(value is not None for value in target_values) and any(value is not None for value in duplicate_values):
+        if not any(value is not None for value in target_values) and any(
+            value is not None for value in duplicate_values
+        ):
             for field, value in zip(fields, duplicate_values, strict=True):
                 setattr(target, field, value)
             changed = True
@@ -1515,9 +1518,7 @@ def _merge(
     target_changed: bool = False,
 ) -> None:
     duplicate = _get(session, case.entity_type, duplicate_id)
-    _prepare_organization_merge(
-        session, case, target, duplicate, actor_id, assessment_choices, target_changed
-    )
+    _prepare_organization_merge(session, case, target, duplicate, actor_id, assessment_choices, target_changed)
     if case.entity_type == EntityType.TEXT:
         _prepare_text_merge(session, target.id, duplicate.id, actor_id)
     touched = set()
