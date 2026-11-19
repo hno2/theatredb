@@ -1,8 +1,13 @@
+import ipaddress
+import logging
 import re
+import socket
 from datetime import date, datetime, time, timedelta
 from html import escape
 from textwrap import shorten
 from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.response import addinfourl
 from uuid import UUID
 
 import pandas as pd
@@ -14,6 +19,15 @@ from backend.date_precision import parse_date as parse_domain_date
 from backend.entity_management import entities_by_ids, get_organization_profile
 from backend.models import Source
 from frontend.views.helpers import entity_link, has_coordinates, role_label
+
+LOG = logging.getLogger(__name__)
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Request, fp: object, code: int, msg: str, headers: object, newurl: str
+    ) -> Request | None:
+        return None
 
 
 @st.cache_data(ttl=30, max_entries=64)
@@ -70,6 +84,62 @@ def web_url(value: str | None) -> str | None:
     except ValueError:
         return None
     return None
+
+
+def favicon_url(value: str | None) -> str | None:
+    """Build a favicon URL from a valid source URL without carrying its path or credentials."""
+    if not (url := web_url(value)):
+        return None
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname
+    if not host:
+        return None
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None:
+        authority += f":{port}"
+    return f"{parsed.scheme}://{authority}/favicon.ico"
+
+
+@st.cache_data(persist="disk", max_entries=256)
+def load_favicon(url: str) -> bytes | None:
+    """Fetch a public favicon once and persist its bytes in Streamlit's local disk cache."""
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path != "/favicon.ico":
+        return None
+    addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        for result in socket.getaddrinfo(parsed.hostname, port):
+            address = result[4][0]
+            if not isinstance(address, str):
+                raise TypeError(f"Unexpected socket address for {parsed.hostname}")
+            addresses.add(ipaddress.ip_address(address.split("%", maxsplit=1)[0]))
+    except (OSError, TypeError, ValueError) as error:
+        raise OSError(f"Cannot resolve favicon host {parsed.hostname}") from error
+    if not addresses or any(not address.is_global for address in addresses):
+        LOG.warning("Skipping favicon from non-public host %s", parsed.hostname)
+        return None
+    opener = build_opener(_NoRedirectHandler(), ProxyHandler({}))
+    try:
+        with opener.open(url, timeout=5) as response:
+            return _favicon_image(response, parsed.hostname)
+    except OSError as error:
+        raise OSError(f"Cannot load favicon from {parsed.hostname}") from error
+
+
+def _favicon_image(response: addinfourl, host: str) -> bytes | None:
+    if not response.headers.get_content_type().startswith("image/"):
+        LOG.warning("Ignoring non-image favicon response from %s", host)
+        return None
+    image = response.read(64 * 1024 + 1)
+    if len(image) > 64 * 1024:
+        LOG.warning("Ignoring oversized favicon response from %s", host)
+        return None
+    return image
 
 
 def production_dates(productions: list[dict]) -> tuple[list[tuple[date, dict]], list[dict]]:
@@ -356,28 +426,27 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         render_theatre_production(production)
 
 
-def render_sources(sources: list[dict]) -> None:
-    """Show provenance as readable citations instead of serialized source records."""
-    st.subheader("Quellen & Nachweise")
-    st.caption("Externe Belege zu diesem Eintrag. „Geprüft“ bezeichnet die Prüfung des verknüpften Quelldatensatzes.")
-    if not sources:
-        st.info("Für diesen Eintrag sind noch keine Quellen hinterlegt.")
-        return
-    names = {
-        str(source.id): source.name
-        for source in entities_by_ids(
-            Source, {UUID(str(item["source_id"])) for item in sources if item.get("source_id")}
-        )
-    }
-    for source in sources:
-        url = web_url(source.get("external_url"))
-        name = (
-            names.get(str(source.get("source_id"))) or (urlsplit(url).hostname if url else None) or "Unbekannte Quelle"
-        )
-        with st.container(border=True):
+def _render_source(source: dict, source_record: Source | None) -> None:
+    url = web_url(source.get("external_url"))
+    name = (
+        source_record.name if source_record else None
+    ) or (urlsplit(url).hostname if url else None) or "Unbekannte Quelle"
+    icon = favicon_url(source_record.base_url if source_record else None) or favicon_url(source.get("external_url"))
+    with st.container():
+        icon_column, content_column = st.columns([1, 20], vertical_alignment="center")
+        with icon_column:
+            if icon:
+                try:
+                    image = load_favicon(icon)
+                except OSError as error:
+                    LOG.warning("%s", error)
+                else:
+                    if image:
+                        st.image(image, width=24, alt=f"Favicon {name}")
+        with content_column:
             st.text(name)
             if source.get("title") and source["title"] != name:
-                st.text(source["title"])
+                st.caption(source["title"])
             metadata = ["Geprüft" if source.get("reviewed") else "Noch nicht geprüft"]
             if source.get("sourced_at"):
                 sourced_at = parse_date(source["sourced_at"])
@@ -386,9 +455,29 @@ def render_sources(sources: list[dict]) -> None:
                 else:
                     st.warning(f"Ungültiges Erfassungsdatum: {source['sourced_at']}")
             st.caption(" · ".join(metadata))
-            render_web_link("Quelle öffnen", source.get("external_url"))
+            if url:
+                st.link_button("Quelle öffnen", url, type="tertiary")
+            else:
+                render_web_link("Quelle öffnen", source.get("external_url"))
             if not source.get("external_url"):
                 st.caption("Kein direkter Quellenlink hinterlegt.")
+
+
+def render_sources(sources: list[dict]) -> None:
+    """Show provenance as readable citations instead of serialized source records."""
+    st.subheader("Quellen & Nachweise")
+    st.caption("Externe Belege zu diesem Eintrag. „Geprüft“ bezeichnet die Prüfung des verknüpften Quelldatensatzes.")
+    if not sources:
+        st.info("Für diesen Eintrag sind noch keine Quellen hinterlegt.")
+        return
+    source_records = {
+        str(source.id): source
+        for source in entities_by_ids(
+            Source, {UUID(str(item["source_id"])) for item in sources if item.get("source_id")}
+        )
+    }
+    for source in sources:
+        _render_source(source, source_records.get(str(source.get("source_id"))))
 
 
 def render_organization(data: dict) -> None:

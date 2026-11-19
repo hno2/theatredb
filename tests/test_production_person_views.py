@@ -177,7 +177,7 @@ def test_production_preserves_sources_tags_and_critics(credits) -> None:
     assert not app.exception
     assert any(element.value == "Drama" for element in app.text)
     assert any(element.value == "Eine Kritik" for element in app.markdown)
-    assert any(element.value == "Archiv" for element in app.text)
+    assert any(element.value == "Archiv" for element in app.caption)
     assert {button.proto.url for button in app.get("link_button")} == {
         "https://theatre.example",
         "https://theatre.example/production",
