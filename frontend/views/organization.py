@@ -429,8 +429,10 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
 def _render_source(source: dict, source_record: Source | None) -> None:
     url = web_url(source.get("external_url"))
     name = (
-        source_record.name if source_record else None
-    ) or (urlsplit(url).hostname if url else None) or "Unbekannte Quelle"
+        (source_record.name if source_record else None)
+        or (urlsplit(url).hostname if url else None)
+        or "Unbekannte Quelle"
+    )
     icon = favicon_url(source_record.base_url if source_record else None) or favicon_url(source.get("external_url"))
     with st.container():
         icon_column, content_column = st.columns([1, 20], vertical_alignment="center")
