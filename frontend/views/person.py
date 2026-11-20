@@ -1,7 +1,7 @@
 import streamlit as st
 
 from backend.entity_management import get_people_productions
-from frontend.views.helpers import entity_link, production_people
+from frontend.views.helpers import entity_link, production_people, theatre_label
 from frontend.views.organization import (
     domain_date_label,
     parse_date,
@@ -18,7 +18,10 @@ def collaboration_groups(productions: list[dict], person_id: str) -> tuple[dict[
     for production in {str(production["id"]): production for production in productions}.values():
         organization = production.get("organization")
         if organization:
-            group = theatres.setdefault(str(organization["id"]), {"name": organization["name"], "productions": []})
+            group = theatres.setdefault(
+                str(organization["id"]),
+                {"name": theatre_label(organization["name"], organization.get("city")), "productions": []},
+            )
             group["productions"].append(production)
         for collaborator_id, person in production_people(production).items():
             if collaborator_id != person_id:

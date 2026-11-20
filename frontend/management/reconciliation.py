@@ -46,6 +46,7 @@ from backend.reconciliation import (
 from frontend.management.merge import format_value as _format
 from frontend.management.merge import styled as _styled
 from frontend.management.uifactory import _actor_id
+from frontend.views.helpers import theatre_city, theatre_label
 from frontend.views.organization import load_organization_profile, render_quality_summary, render_web_link
 
 NEW_PRODUCTION = "__new__"
@@ -53,13 +54,13 @@ NEW_PRODUCTION = "__new__"
 
 @st.cache_data(ttl=30)
 def _theatre_names() -> dict[str, str]:
-    return {str(org.id): org.name for org in list_entities(Organization)}
+    return {str(org.id): theatre_label(org.name, org.city) for org in list_entities(Organization)}
 
 
 def _label(record: dict) -> str:
     name = record.get("name") or record.get("title") or "Ohne Titel"
     details = [
-        record.get("city")
+        theatre_city(name, record.get("city"))
         or (_format("premiere", record["premiere"], record.get("premiere_precision")) if record.get("premiere") else "")
         or record.get("born")
         or ""
@@ -83,10 +84,6 @@ def _actor() -> str:
     return _actor_id() or "reconciliation-ui"
 
 
-def _theatre_label(org: Organization) -> str:
-    return f"{org.name} · {org.city}" if org.city else org.name
-
-
 def _import_tab() -> None:
     st.write(
         "Theater wählen und JSON hochladen. Gleiche Produktionen dieses Theaters werden automatisch ergänzt, "
@@ -98,7 +95,7 @@ def _import_tab() -> None:
         st.info("Noch kein Theater vorhanden. Bitte zuerst unter Verwaltung → Organisationen anlegen.")
         return
     by_id = {str(org.id): org for org in theatres}
-    theatre_labels = _unique({key: _theatre_label(org) for key, org in by_id.items()})
+    theatre_labels = _unique({key: theatre_label(org.name, org.city) for key, org in by_id.items()})
     theatre = st.selectbox(
         "Theater",
         list(by_id),

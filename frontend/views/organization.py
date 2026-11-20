@@ -19,7 +19,7 @@ from backend.date_precision import DatePrecision, date_interval, format_date, in
 from backend.date_precision import parse_date as parse_domain_date
 from backend.entity_management import entities_by_ids, get_organization_profile
 from backend.models import Source
-from frontend.views.helpers import entity_link, has_coordinates, role_label
+from frontend.views.helpers import entity_link, has_coordinates, render_tags, role_label, theatre_city
 
 LOG = logging.getLogger(__name__)
 
@@ -218,8 +218,8 @@ def render_production_card(production: dict, *, compact: bool = False, show_orga
         organization = production.get("organization") or {}
         if organization and show_organization:
             entity_link(organization["name"], "organization", organization["id"])
-            if organization.get("city"):
-                st.caption(organization["city"])
+            if city := theatre_city(organization["name"], organization.get("city")):
+                st.caption(city)
         render_production_summary(production)
         if production.get("description"):
             if compact:
@@ -249,8 +249,7 @@ def render_production_summary(production: dict) -> None:
         details.append(f"Ab {production['age_rating']} Jahren")
     if details:
         st.caption(" · ".join(details))
-    if production.get("tags"):
-        st.text(" · ".join(production["tags"]))
+    render_tags(production.get("tags") or [])
     text = production.get("text") or {}
     if text.get("title"):
         st.caption(f"Textgrundlage: {text['title']}")
@@ -296,6 +295,7 @@ def render_theatre_production(production: dict) -> None:
     if production.get("duration") is not None:
         facts.append(f":material/schedule: {production['duration']} Minuten")
     st.caption(" · ".join(facts))
+    render_tags(production.get("tags") or [])
     if production.get("premiere") and premiere is None:
         st.warning(f"Ungültiges Premierendatum: {production['premiere']}")
     if production.get("description"):
@@ -318,13 +318,16 @@ def filter_productions(
     person: str,
     ages: list[str],
     premiere_range: tuple[date, ...],
+    tags: list[str] | None = None,
 ) -> list[dict]:
     """Combine literal title, credited-person, age and inclusive premiere filters."""
     matching = []
     for production in productions:
         if search.casefold() not in production["name"].casefold():
             continue
-        if ages and age_label(production) not in ages:
+        if (ages and age_label(production) not in ages) or (
+            tags and not set(tags).intersection(production.get("tags") or [])
+        ):
             continue
         contributors = [
             *(production.get("memberships") or []),
@@ -378,6 +381,12 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         if any(row.get("age_rating") is None for row in productions):
             age_options.append("Nicht hinterlegt")
         ages = st.multiselect("Altersempfehlung", age_options, key=f"production_ages_{organization_id}")
+        tags = st.multiselect(
+            "Schlagworte",
+            sorted({tag for row in productions for tag in row.get("tags") or []}),
+            key=f"production_tags_{organization_id}",
+            help="Ein Treffer muss mindestens eines der gewählten Schlagworte haben.",
+        )
         dated, _ = production_dates(productions)
         dates = [premiere for premiere, _ in dated]
         dates.extend(
@@ -414,7 +423,7 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         ["Neueste zuerst", "Älteste zuerst", "Titel A-Z"],
         key=f"production_order_{organization_id}",
     )
-    matching = filter_productions(productions, search, person, ages, premiere_range)
+    matching = filter_productions(productions, search, person, ages, premiere_range, tags)
     dated, undated = production_dates(matching)
     dated.sort(key=lambda item: (item[0], item[1]["name"].casefold()), reverse=order == "Neueste zuerst")
     ordered = [row for _, row in dated] + sorted(undated, key=lambda row: row["name"].casefold())
@@ -424,7 +433,7 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
     if not matching:
         st.info("Keine Produktionen für diese Suche und Filter gefunden.")
         return
-    page_key = f"theatre_page_{organization_id}_{search}_{person}_{ages}_{premiere_range}_{order}"
+    page_key = f"theatre_page_{organization_id}_{search}_{person}_{ages}_{premiere_range}_{tags}_{order}"
     page = st.pagination((len(ordered) + 11) // 12, key=page_key) if len(ordered) > 12 else 1
     for index, production in enumerate(ordered[(page - 1) * 12 : page * 12]):
         if index:
@@ -524,9 +533,10 @@ def render_organization(data: dict) -> None:
     """Render a German theatre profile with location, premiere timeline and citations."""
     st.caption("THEATERDB / THEATERPORTRÄT")
     st.title(data["name"])
-    context = [str(data[field]) for field in ("city", "country", "type") if data.get(field)]
+    context = list(filter(None, (theatre_city(data["name"], data.get("city")), data.get("country"), data.get("type"))))
     if context:
         st.text(" · ".join(context))
+    render_tags(data.get("tags") or [])
     history = []
     if data.get("founded"):
         history.append(f"Gegründet {domain_date_label(data, 'founded')}")

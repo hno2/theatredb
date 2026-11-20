@@ -44,7 +44,7 @@ def test_missing_detail_keeps_same_tab_directory_link(monkeypatch) -> None:
     app.run()
     assert not app.exception
     assert app.error[0].value == "Not found"
-    assert 'href="detail" target="_self"' in app.markdown[0].value
+    assert 'href="produktionen" target="_self"' in app.markdown[0].value
 
 
 def test_production_directory_has_direct_links_and_theatre_context(directory) -> None:
@@ -158,7 +158,7 @@ def test_direct_theatre_link_respects_filter_without_exposing_quality(monkeypatc
         app.run()
         assert not app.exception
         assert app.title[0].value == unchecked.name
-        assert 'href="detail?verified_only=0"' in app.markdown[0].value
+        assert 'href="theater?verified_only=0"' in app.markdown[0].value
     finally:
         organization.load_organization_profile.clear()
         engine.dispose()

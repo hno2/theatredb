@@ -31,11 +31,16 @@ if "_flash" in st.session_state:
 pages = {
     "Entdecken": [
         st.Page("views/overview.py", title="Startseite", icon=":material/map:", default=True),
-        st.Page("views/detail.py", title="Theater & Produktionen", icon=":material/visibility:", url_path="detail"),
-        # st.Page("views/people.py", title="People", icon=":material/person:"),
-        # st.Page("views/productions.py", title="Productions", icon=":material/local_activity:"),
-        # st.Page("views/texts.py", title="Texts", icon=":material/menu_book:"),
-        # st.Page("views/awards.py", title="Awards", icon=":material/trophy:"),
+        st.Page("views/catalog_theater.py", title="Theater", icon=":material/event_seat:", url_path="theater"),
+        st.Page(
+            "views/catalog_productions.py",
+            title="Produktionen",
+            icon=":material/local_activity:",
+            url_path="produktionen",
+        ),
+        st.Page("views/catalog_people.py", title="Personen", icon=":material/person:", url_path="personen"),
+        st.Page("views/catalog_texts.py", title="Texte", icon=":material/menu_book:", url_path="texte"),
+        st.Page("views/detail.py", title="Detailansicht", url_path="detail", visibility="hidden"),
     ],
     "Verwaltung": [
         st.Page("management/reconciliation.py", title="Datenabgleich & Duplikate", icon=":material/merge:"),
@@ -48,7 +53,7 @@ pages = {
     ],
 }
 nav = st.navigation(pages)
-if nav.url_path in {"", "detail"}:
+if nav.url_path in {"", "detail", "theater"}:
     with st.sidebar:
         st.subheader("Einstellungen")
         render_verified_toggle("_sidebar_verified_only")

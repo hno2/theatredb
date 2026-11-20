@@ -1,5 +1,6 @@
 import math
 from html import escape
+from unicodedata import normalize
 from urllib.parse import urlencode
 
 import streamlit as st
@@ -11,6 +12,27 @@ from frontend.views.settings import theatre_filter_link_params
 def role_label(role: str | None) -> str:
     """Translate known canonical roles while retaining source-specific labels."""
     return ROLE_LABELS.get(canonical_role(role) or "", role or "")
+
+
+def theatre_city(name: str, city: str | None) -> str:
+    """Return the city only when it adds information to the theatre name."""
+    city = (city or "").strip()
+    normalized_city = normalize("NFC", " ".join(city.split())).casefold()
+    normalized_name = normalize("NFC", " ".join(name.split())).casefold()
+    return "" if normalized_city in normalized_name else city
+
+
+def theatre_label(name: str, city: str | None) -> str:
+    """Format a theatre name with nonredundant city context."""
+    return " · ".join(filter(None, (name, theatre_city(name, city))))
+
+
+def render_tags(tags: list[str]) -> None:
+    """Show source tags as wrapping, noninteractive pills."""
+    if tags:
+        with st.container(horizontal=True, gap="xsmall"):
+            for tag in dict.fromkeys(tags):
+                st.badge(tag, color="gray")
 
 
 def has_coordinates(lat: float | None, lon: float | None) -> bool:
@@ -25,9 +47,7 @@ def has_coordinates(lat: float | None, lon: float | None) -> bool:
     )
 
 
-def entity_anchor(
-    label: str, kind: str, entity_id: str, *, include_unverified: bool = False, path: str = ""
-) -> str:
+def entity_anchor(label: str, kind: str, entity_id: str, *, include_unverified: bool = False, path: str = "") -> str:
     """Build a same-tab entity link for use within a line of text."""
     filters = {"verified_only": "0"} if include_unverified else theatre_filter_link_params()
     query = urlencode({"kind": kind, "id": entity_id, **filters})

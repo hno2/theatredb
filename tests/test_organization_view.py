@@ -150,6 +150,18 @@ def test_profile_has_map_address_and_readable_sources(profile: ProfileFixture) -
     assert links.call_args_list[0].args == ("Neu", "production", "new")
 
 
+def test_theatre_production_tags_are_pills_and_filterable(profile: ProfileFixture) -> None:
+    app, _, links = profile
+    app.run()
+    assert any(element.value == ":gray-badge[Drama]" for element in app.markdown)
+    tags = app.multiselect(key="production_tags_theater-1")
+    assert tags.options == ["Drama"]
+    links.reset_mock()
+    tags.set_value(["Drama"]).run()
+    assert not app.exception
+    assert [call.args[2] for call in links.call_args_list] == ["new"]
+
+
 def test_sources_render_with_source_favicon(profile: ProfileFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     app, _, _ = profile
     image = Mock()

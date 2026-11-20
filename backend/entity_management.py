@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, TypeVar, cast
+from datetime import datetime
+from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
+from sqlalchemy import case, extract
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstrumentedAttribute, Mapper, raiseload, selectinload
 from sqlalchemy.sql.elements import ColumnElement
@@ -11,6 +13,7 @@ from sqlmodel import Session, SQLModel, col, func, or_, select
 from sqlmodel.sql.expression import SelectOfScalar
 
 from backend.data_quality import QUALITY_FIELDS
+from backend.date_precision import DatePrecision
 from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
@@ -139,13 +142,19 @@ def list_entities_where[ModelT: SQLModel](
 
 
 def _matching_entities[ModelT: SQLModel](
-    model_cls: type[ModelT], search: str, filters: Sequence[ColumnElement[bool]] = ()
+    model_cls: type[ModelT],
+    search: str,
+    filters: Sequence[ColumnElement[bool]] = (),
+    *,
+    production_context: bool = False,
 ) -> SelectOfScalar[ModelT]:
     identifier = _resolve_order_by(model_cls, "id")
     label = _resolve_order_by(model_cls)
     if identifier is None or label is None:
         raise ValueError(f"{model_cls.__name__} cannot be listed")
     stmt = select(model_cls).where(*filters)
+    if model_cls is Production and production_context:
+        stmt = stmt.outerjoin(Organization)
     if search := search.strip():
         try:
             entity_id = UUID(search)
@@ -153,6 +162,8 @@ def _matching_entities[ModelT: SQLModel](
             fields = (
                 [label, col(Organization.city), col(Organization.country)] if model_cls is Organization else [label]
             )
+            if model_cls is Production and production_context:
+                fields.extend((col(Organization.name), col(Organization.city), col(Organization.country)))
             conditions = [field.icontains(search, autoescape=True) for field in fields]
             if model_cls is Text:
                 conditions.append(
@@ -258,6 +269,19 @@ def get_unique_field_values[ModelT: SQLModel](model_cls: type[ModelT], field_nam
         else:
             unique.add(value)
     return sorted(unique, key=str)
+
+
+def tag_filter(model: type[Organization | Production], tags: list[str]) -> ColumnElement[bool]:
+    """Match any selected tag as an exact JSON array value."""
+    with get_session() as session:
+        dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        values = func.json_array_elements_text(col(model.tags)).table_valued("value")
+    elif dialect == "sqlite":
+        values = func.json_each(col(model.tags)).table_valued("value")
+    else:
+        raise ValueError(f"Tag filters do not support {dialect}")
+    return select(1).select_from(values).where(values.c.value.in_(tags)).exists()
 
 
 def get_entity_graph[ModelT: SQLModel](
@@ -417,6 +441,116 @@ def browse_entities(
                 entry["organization"] = _public_snapshot(row.organization) if row.organization else None
             entries.append(entry)
         return entries, total
+
+
+type CatalogModel = type[Organization | Production | Person | Text]
+
+
+def catalog_page(
+    model: CatalogModel,
+    search: str,
+    filters: Sequence[ColumnElement[bool]],
+    *,
+    limit: int,
+    offset: int = 0,
+    upcoming_from: datetime | None = None,
+    sort_by: Literal["name", "premiere"] = "premiere",
+    descending: bool = True,
+) -> tuple[list[dict[str, Any]], int]:
+    """Fetch one public result page, ranking by distinct productions or premiere date."""
+    if not 1 <= limit <= 100 or offset < 0:
+        raise ValueError("Invalid catalog page bounds")
+    if sort_by not in {"name", "premiere"}:
+        raise ValueError("Invalid catalog sort field")
+    stmt = _matching_entities(model, search, filters, production_context=True)
+    if model is Production:
+        premiere = col(Production.premiere)
+        if upcoming_from is not None:
+            stmt = stmt.where(
+                premiere >= upcoming_from,
+                col(Production.premiere_precision).in_([DatePrecision.DAY, DatePrecision.MINUTE]),
+            )
+        sort_column = col(Production.name) if sort_by == "name" else premiere
+        order = (
+            premiere.asc()
+            if upcoming_from is not None
+            else (sort_column.desc() if descending else sort_column.asc()).nulls_last()
+        )
+        with get_session() as session:
+            total = session.exec(select(func.count()).select_from(stmt.order_by(None).subquery())).one()
+            rows = session.exec(
+                stmt.order_by(None)
+                .order_by(order, col(Production.name), col(Production.id))
+                .options(selectinload(cast(InstrumentedAttribute, Production.organization)))
+                .limit(limit)
+                .offset(offset)
+            ).all()
+            return [
+                _public_snapshot(row)
+                | {"organization": _public_snapshot(row.organization) if row.organization else None}
+                for row in rows
+                if isinstance(row, Production)
+            ], total
+
+    entity_id = col(model.id)
+    if model is Person:
+        owner = col(ProductionMembership.person_id)
+        count = func.count(col(ProductionMembership.production_id).distinct())
+    else:
+        owner = col(Production.organization_id) if model is Organization else col(Production.text_id)
+        count = func.count(col(Production.id))
+    counts = select(owner.label("owner"), count.label("count")).where(owner.is_not(None)).group_by(owner).subquery()
+    production_count = func.coalesce(counts.c.count, 0)
+    matches = stmt.order_by(None).subquery()
+    with get_session() as session:
+        total = session.exec(select(func.count()).select_from(matches)).one()
+        rows = session.exec(
+            select(model, production_count)
+            .join(matches, entity_id == matches.c.id)
+            .outerjoin(counts, entity_id == counts.c.owner)
+            .order_by(production_count.desc(), matches.c.title if model is Text else matches.c.name, entity_id)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return [_public_snapshot(row) | {"production_count": count} for row, count in rows], total
+
+
+def catalog_summary(model: CatalogModel, search: str, filters: Sequence[ColumnElement[bool]]) -> list[tuple[str, int]]:
+    """Aggregate the whole filtered result set, independent of pagination."""
+    matches = _matching_entities(model, search, filters, production_context=True).order_by(None).subquery()
+    if model is Production:
+        bucket = extract("year", matches.c.premiere)
+        stmt = select(bucket, func.count()).where(matches.c.premiere.is_not(None)).group_by(bucket).order_by(bucket)
+    else:
+        fields: dict[CatalogModel, str] = {Organization: "country", Person: "nationality", Text: "genre"}
+        field = fields[model]
+        bucket = matches.c[field]
+        count = func.count()
+        stmt = select(bucket, count).where(func.length(bucket) > 0).group_by(bucket)
+        stmt = stmt.order_by(count.desc(), bucket).limit(8)
+    with get_session() as session:
+        return [(str(label), count) for label, count in session.exec(stmt)]
+
+
+def catalog_suggestions(model: CatalogModel, search: str, filters: Sequence[ColumnElement[bool]]) -> list[str]:
+    """Return up to five distinct matching labels, preferring prefix matches."""
+    if len(search) < 2:
+        return []
+    stmt = _matching_entities(model, search, filters, production_context=True).order_by(None)
+    matches = stmt.subquery()
+    label = matches.c.title if model is Text else matches.c.name
+    labels = select(label.label("label")).where(func.lower(label) != search.lower()).distinct()
+    if model is Text:
+        variants = select(col(TextTitle.title)).where(
+            col(TextTitle.text_id).in_(select(matches.c.id)),
+            col(TextTitle.title).icontains(search, autoescape=True),
+            func.lower(col(TextTitle.title)) != search.lower(),
+        )
+        labels = labels.union(variants)
+    names = labels.subquery()
+    prefix_rank = case((names.c.label.istartswith(search, autoescape=True), 0), else_=1)
+    with get_session() as session:
+        return list(session.exec(select(names.c.label).order_by(prefix_rank, names.c.label).limit(5)))
 
 
 def create_entity[ModelT: SQLModel](

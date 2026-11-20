@@ -6,7 +6,7 @@ import streamlit as st
 
 from backend.config import canonical_role
 from backend.entity_management import get_people_productions
-from frontend.views.helpers import entity_anchor, role_label
+from frontend.views.helpers import entity_anchor, render_tags, role_label, theatre_label
 from frontend.views.organization import (
     domain_date_interval,
     domain_date_label,
@@ -94,7 +94,9 @@ def _related_productions(entries: list[dict], current_id: str) -> list[dict]:
 def _related_line(entry: dict, *, context_field: str | None) -> str:
     organization = entry.get("organization") or {}
     parts = [entry["name"]]
-    if context_field and (context := organization.get(context_field) or organization.get("name")):
+    theatre = theatre_label(organization.get("name") or "", organization.get("city"))
+    context = (organization.get("city") or theatre) if context_field == "city" else theatre
+    if context_field and context:
         parts.append(context)
     if year := _premiere_year(entry):
         parts.append(str(year))
@@ -260,7 +262,7 @@ def _render_text_credit(text: dict, production_title: str, cast_ids: set[str]) -
 
 def _render_heading(data: dict, organization: dict, memberships: list[dict]) -> None:
     if organization.get("id"):
-        back = _organization_anchor(f"← {organization['name']}", organization)
+        back = _organization_anchor(f"← {theatre_label(organization['name'], organization.get('city'))}", organization)
         st.markdown(f"<p>{back}</p>", unsafe_allow_html=True)
     st.title(data["name"])
     if text := data.get("text"):
@@ -275,8 +277,7 @@ def _render_heading(data: dict, organization: dict, memberships: list[dict]) -> 
         st.markdown(" · ".join(filter(None, facts)), help="Die Premiere ist kein aktueller Aufführungstermin.")
     if data.get("premiere") and premiere == "Nicht hinterlegt":
         st.warning(f"Ungültiges Premierendatum: {data['premiere']}")
-    if tags := data.get("tags"):
-        st.caption(" · ".join(tags))
+    render_tags(data.get("tags") or [])
 
 
 def _render_overview(data: dict, memberships: list[dict]) -> None:

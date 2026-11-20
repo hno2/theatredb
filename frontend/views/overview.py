@@ -14,7 +14,7 @@ from backend.entity_management import (
 )
 from backend.models import Award, Organization, Person, Production, Source, Text
 from backend.reconciliation import stable_digest
-from frontend.views.helpers import has_coordinates
+from frontend.views.helpers import has_coordinates, theatre_city
 from frontend.views.settings import render_verified_toggle, theatre_filter_link_params, verified_only
 
 
@@ -26,7 +26,7 @@ def organization_data(organizations: list[Organization]) -> pd.DataFrame:
             {
                 "id": str(org.id),
                 "name": org.name,
-                "city": (org.city or "").strip(),
+                "city": theatre_city(org.name, org.city),
                 "country": (org.country or "").strip(),
                 "lat": org.lat,
                 "lon": org.lon,

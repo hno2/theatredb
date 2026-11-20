@@ -119,8 +119,7 @@ def test_production_profile_shows_theatre_navigation_facts_and_cast_without_tabs
     assert not app.tabs
     assert not any("weitere Produktion" in element.label for element in app.expander)
     back = app.markdown[0].value
-    assert "← Theater" in back
-    assert "Wien" not in back
+    assert "← Theater · Wien" in back
     assert "?kind=organization&amp;id=theatre&amp;verified_only=0" in back
     html = "\n".join(element.value for element in app.markdown)
     assert "Premiere: 03.01.2026 · 90 Minuten · Ab 0 Jahren" in html
@@ -183,7 +182,7 @@ def test_production_preserves_sources_tags_and_critics(credits) -> None:
     app.session_state.profile = current
     app.run()
     assert not app.exception
-    assert any(element.value == "Drama" for element in app.caption)
+    assert any(element.value == ":gray-badge[Drama]" for element in app.markdown)
     assert any(element.value == "Eine Kritik" for element in app.markdown)
     assert app.subheader[-1].value == "Quellen & Nachweise"
     assert app.markdown[-1].value == (
@@ -234,7 +233,7 @@ def test_related_production_previews_are_distinct_sorted_and_limited(credits) ->
         assert indices == sorted(indices)
     assert ">Stück 2025 · Wien · 2025</a>" in rows[0]
     assert ">Stück 2025 · 2025</a>" in rows[1]
-    assert ">Stück 2025 · Bühne am Fluss · 2025</a>" in rows[2]
+    assert ">Stück 2025 · Bühne am Fluss · Wien · 2025</a>" in rows[2]
     footers = "\n".join(element.value for element in app.caption)
     assert 'id=theatre&amp;verified_only=0" target="_self">Mehr vom Theater →</a>' in footers
     assert 'id=alice" target="_self">Mehr von Alex →</a>' in footers

@@ -2,7 +2,7 @@ import streamlit as st
 
 from backend.config import DISCOVERY_KINDS
 from backend.entity_management import browse_entities
-from frontend.views.helpers import entity_link
+from frontend.views.helpers import entity_link, theatre_city
 from frontend.views.organization import render_production_card
 from frontend.views.settings import verified_only
 
@@ -77,7 +77,7 @@ def render_discovery(initial_kind: str = "organization") -> None:
         with st.container(border=True):
             entity_link(entry["name"], kind, entry["id"])
             if kind == "organization":
-                context = [entry.get(field) for field in ("city", "country", "type")]
+                context = [theatre_city(entry["name"], entry.get("city")), entry.get("country"), entry.get("type")]
             else:
                 context = [*(entry.get("type") or []), entry.get("nationality")]
             if any(context):
