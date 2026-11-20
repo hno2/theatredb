@@ -149,6 +149,14 @@ class TheapolisProfileCache(SQLModel, table=True):
     captured_at: float = Field(index=True)
 
 
+class TheapolisImportCheckpoint(SQLModel, table=True):
+    """Last fully applied archive run for one archive and import scope."""
+
+    archive_id: str = Field(primary_key=True)
+    scope: str = Field(primary_key=True)
+    run: int
+
+
 class EntityType(StrEnum):
     """Represents the type of an entity."""
 

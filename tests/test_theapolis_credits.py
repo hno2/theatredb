@@ -1,0 +1,153 @@
+import datetime as dt
+
+import pytest
+from sqlmodel import Session, SQLModel, create_engine, select
+
+from backend.ingestion.theapolis import _import_productions, _import_record, _prepare_import, validate_detail
+from backend.ingestion.theapolis_import import accept_records
+from backend.models import EntityType, ProductionMembership, Source, SourceRecord, TextContribution
+
+
+@pytest.fixture
+def db():
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        source = Source(name="theapolis.de")
+        session.add(source)
+        session.flush()
+        yield session, source.id
+    engine.dispose()
+
+
+def _detail(*credits: dict):
+    return {
+        "theapolis_detail_status": "parsed" if credits else "confirmed_empty",
+        "theapolis_detail": {"credits": list(credits)},
+    }
+
+
+def _credit(person_id=9, name="Alex", role="Darstellerin", **extra: object):
+    return {"person_id": person_id, "name": name, "role": role, **extra}
+
+
+def _import(db, day, *items: dict):
+    session, source_id = db
+
+    def accept(kind, records):
+        return accept_records(
+            session, source_id, kind, records, captured_at=dt.datetime(2026, 1, day, tzinfo=dt.UTC), actor_id="test"
+        )
+
+    _, people, productions, _ = _prepare_import({"items": iter(items)}, archived=True)
+    ids, _ = accept(
+        EntityType.PERSON,
+        [
+            _import_record(
+                {field: value for field, value in payload.items() if field != "profile_url"},
+                external_id=key,
+                external_url=payload.get("profile_url"),
+            )
+            for key, payload in people.items()
+        ],
+    )
+    mapping = dict(zip(people, ids, strict=True))
+    _import_productions(session, tuple(productions), {}, mapping, people, accept)
+    return mapping
+
+
+def test_detail_roles_characters_and_work_credit_scope(db):
+    session, _ = db
+    item = {
+        "id": 1,
+        "name": "Hamlet",
+        "directors": [{"id": 9, "name": "Alex", "profile": {"url": "https://example.org/alex"}}],
+        "creators": [{"id": 9, "name": "Alex"}],
+        **_detail(
+            _credit(character="  Hamlet / Prinz  ", profile_url="https://example.org/alex"),
+            _credit(character="Hamlet / Prinz"),
+            _credit(character="HAMLET / Prinz"),
+            _credit(role=" Lichtdesign "),
+            _credit(role="Puppenbau"),
+            _credit(role="Maskenbau"),
+            _credit(role="Autor"),
+        ),
+    }
+    ids = _import(db, 2, item)
+    _import(db, 2, item)
+    _import(db, 3, {**item, **_detail()})
+    assert len(set(ids.values())) == 3  # Name, URL and numeric ID alone do not link.
+    assert {(row.person_id, row.role, row.character) for row in session.exec(select(ProductionMembership))} == {
+        (ids["directors:9"], "director", None),
+        (ids["creators:9"], "author", None),
+        (ids["detail:9"], "actor", "Hamlet / Prinz"),
+        (ids["detail:9"], "actor", "HAMLET / Prinz"),
+        (ids["detail:9"], "light_designer", None),
+        (ids["detail:9"], "puppenbau", None),
+        (ids["detail:9"], "maskenbau", None),
+        (ids["detail:9"], "author", None),
+    }
+    assert len(session.exec(select(ProductionMembership)).all()) == 8
+    assert [(row.person_id, row.role) for row in session.exec(select(TextContribution))] == [
+        (ids["creators:9"], "author")
+    ]
+    _import(db, 4, item)
+    production = session.exec(select(SourceRecord).where(SourceRecord.entity_type == EntityType.PRODUCTION)).one()
+    assert production.payload["context"]["theapolis_detail"]["credits"][4]["role"] == "Puppenbau"
+
+
+def test_profile_credit_name_variants_keep_one_person_and_source_names(db, caplog):
+    first = {"id": 1, "name": "Play", **_detail(_credit("profile:89612", name="Alex Example"))}
+    second = {"id": 2, "name": "Other", **_detail(_credit("profile:89612", name="A. Example"))}
+    ids = _import(db, 1, first, second)
+    assert list(ids) == ["detail:profile:89612"]
+    assert len(db[0].exec(select(ProductionMembership)).all()) == 2
+    names = {
+        row.payload["context"]["theapolis_detail"]["credits"][0]["name"]
+        for row in db[0].exec(select(SourceRecord).where(SourceRecord.entity_type == EntityType.PRODUCTION))
+    }
+    assert names == {"Alex Example", "A. Example"}
+    assert "retaining one identity and both source names" in caplog.text
+
+
+def test_explicit_alias_links_to_existing_legacy_person_and_persists(db):
+    item = {"id": 1, "name": "Play", "directors": [{"id": 1, "name": "Alex"}]}
+    legacy_id = _import(db, 1, item)["directors:1"]
+    _import(db, 2, {**item, **_detail(_credit(name="Alex Example", role="Regie", legacy_ids={"directors": 1}))})
+    ids = _import(db, 3, {"id": 2, "name": "Other", **_detail(_credit(name="Alex Example"))})
+    assert ids["detail:9"] == legacy_id
+    assert len(db[0].exec(select(ProductionMembership)).all()) == 2  # Verified director overlap deduplicated.
+    with pytest.raises(ValueError, match="Conflicting Theapolis detail IDs"):
+        _import(db, 4, {**item, **_detail(_credit(10, legacy_ids={"directors": "1"}))})
+
+
+def test_alias_claim_does_not_merge_two_preexisting_people(db):
+    legacy = {"id": 1, "name": "Play", "directors": [{"id": 1, "name": "Alex"}]}
+    assert _import(db, 1, legacy)["directors:1"] != _import(db, 2, {**legacy, **_detail(_credit())})["detail:9"]
+    with pytest.raises(ValueError, match="source identity collision"):
+        _import(db, 3, {**legacy, **_detail(_credit(legacy_ids={"directors": 1}))})
+
+
+def test_alias_registered_before_legacy_listing_exists(db):
+    detail_id = _import(db, 1, {"id": 2, "name": "Other", **_detail(_credit(legacy_ids={"creators": 9}))})["detail:9"]
+    legacy = {"id": 1, "name": "Play", "creators": [{"id": 9, "name": "Alex"}]}
+    assert _import(db, 2, legacy)["creators:9"] == detail_id
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"theapolis_detail_status": "parsed", "theapolis_detail": {"credits": []}},
+        {"theapolis_detail_status": "confirmed_empty", "theapolis_detail": {"credits": [None]}},
+        {"theapolis_detail": {"credits": []}},
+        _detail(_credit(True)),
+        _detail(_credit(" 9 ")),
+        _detail(_credit(legacy_ids={"actors": 9})),
+        _detail(_credit(legacy_ids={"creators": "a\x00b"})),
+        _detail(_credit(character=9)),
+        _detail(_credit(role=" ")),
+    ],
+)
+def test_overlay_validation_rejects_malformed_or_ambiguous_evidence(fields):
+    with pytest.raises((TypeError, ValueError)):
+        validate_detail({"production_id": 1, **fields})

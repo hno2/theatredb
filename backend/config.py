@@ -24,15 +24,15 @@ CURRENT_SEASON_START_YEAR = 2026
 
 # Canonical role: display label, exact aliases, pattern for descriptive source credits.
 ROLE_CONFIG: dict[str, tuple[str, tuple[str, ...], str | None]] = {
-    "director": ("Regie", ("regie", "inszenierung"), r"Regie|Inszenierung"),
-    "set_designer": ("Bühnenbild", ("bühne", "bühnenbild", "ausstattung"), r"Bühne|Ausstattung"),
-    "costume_designer": ("Kostüme", ("kostüm", "kostüme"), r"Kostüm"),
-    "composer": ("Musik", ("musik", "komposition"), r"Musik|Komposition"),
+    "director": ("Regie", ("regie", "inszenierung", "schauspielregie", "opernregie"), r"Regie|Inszenierung"),
+    "set_designer": ("Bühnenbild", ("bühne", "bühnenbild", "ausstattung", "stage design"), r"Bühne|Ausstattung"),
+    "costume_designer": ("Kostüme", ("kostüm", "kostüme", "kostümbild", "costume design"), r"Kostüm"),
+    "composer": ("Musik", ("musik", "komposition", "bühnenmusik"), r"Musik|Komposition"),
     "lyricist": ("Liedtexte/Gesangstexte", ("liedtexte", "gesangstexte", "lyrics"), r"Liedtext|Gesangstext|Lyrics"),
     "choreographer": ("Choreografie", ("choreografie", "choreographie", "coreographer"), r"Choreograph|Tanz"),
     "dramaturg": ("Dramaturgie", ("dramaturgie",), r"Dramaturgi"),
-    "light_designer": ("Licht", ("licht", "lighting_designer"), r"Licht"),
-    "video_designer": ("Video", ("video", "medien"), r"Video|Medien"),
+    "light_designer": ("Licht", ("licht", "lichtdesign", "lichtgestaltung", "lighting_designer"), r"Licht"),
+    "video_designer": ("Video", ("video", "videodesign", "medien"), r"Video|Medien"),
     "theatre_educator": (
         "Theaterpädagogik",
         ("vermittlung", "theaterpädagoge", "theaterpädagogin", "theaterpädagogik"),
@@ -41,7 +41,21 @@ ROLE_CONFIG: dict[str, tuple[str, tuple[str, ...], str | None]] = {
     "author": ("Text", ("autor", "creator", "text", "buch"), r"Text|Buch"),
     "translator": ("Übersetzung", ("übersetzung",), r"Übersetz"),
     "adapter": ("Bearbeitung", ("bearbeitung", "fassung"), r"Bearb|Fassung"),
-    "actor": ("Schauspiel", ("schauspiel", "schauspieler"), None),
+    "actor": (
+        "Schauspiel",
+        (
+            "spiel",
+            "schauspiel",
+            "schauspieler",
+            "schauspielerin",
+            "schauspiel (männliche rollen)",
+            "schauspiel (weibliche rollen)",
+            "darsteller",
+            "darstellerin",
+            "cast",
+        ),
+        None,
+    ),
     "other": ("Weitere Mitwirkung", (), None),
 }
 ROLE_LABELS = {role: label for role, (label, _, _) in ROLE_CONFIG.items()}

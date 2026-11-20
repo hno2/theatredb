@@ -1761,7 +1761,7 @@ def _old_theapolis_cases(db, item):
     cases = [*orgs.values(), *persons.values()]
     for production_id, org_id, payload, raw_credits in productions:
         assert org_id is not None
-        credits = [{"case_id": str(persons[key].id), "role": role} for key, role in raw_credits]
+        credits = [{"case_id": str(persons[key].id), "role": role} for key, role, *_ in raw_credits]
         text = propose(
             "text",
             {"title": payload["name"]},

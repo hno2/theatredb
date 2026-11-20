@@ -43,6 +43,9 @@ def render_person_header(data: dict) -> None:
                 st.warning(f"{label}: Ungültiges Datum: {data[field]}")
     for index, url in enumerate(data.get("urls") or [], start=1):
         render_web_link(f"Website {index}", url)
+    if (description := data.get("description")) and description.strip():
+        st.subheader("Biografie")
+        st.markdown(description)
 
 
 def render_person(data: dict) -> None:

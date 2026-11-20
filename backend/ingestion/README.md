@@ -146,6 +146,89 @@ uv run python -m backend.ingestion.theapolis images --concurrency 10
 uv run python -m backend.ingestion.theapolis import
 ```
 
+`download` now defaults to a local content-addressed SQLite archive at
+`data/staged/theapolis.de/theapolis.sqlite3`. No Postgres writes are made by
+archive download. Production pages are committed independently; rerun the same
+command to resume, or pass `--restart` if the upstream pagination has drifted.
+`--max-pages` is for testing and cannot replace a full snapshot. Completed
+refreshes still enumerate the upstream list; Theapolis list deltas are not
+assumed. Postgres import, however, applies only changed in-scope records after
+the first successful baseline. It remembers its checkpoint per archive and
+import scope. Keep using the same archive file.
+
+When switching from legacy downloads, add `download --reuse-profile-cache` to
+copy fresh lookup results from the existing PostgreSQL cache into the archive.
+This only reads Postgres. Positive and negative lookups are then cached locally
+for 30 days. Large batches of remaining cache misses scan the paginated public
+profile directory instead of searching one name at a time; only unique exact
+matches request profile details.
+
+To start offline with an existing full export:
+
+```bash
+uv run python -m backend.ingestion.theapolis seed --json path/to/full.source.json
+```
+
+`download --json path.json` and `import --json path.json` retain the legacy
+format. Archive imports preserve existing stable source mappings; they do not
+merge director and creator records solely by name.
+
+### Cast and crew
+
+The public production list exposes directors and creators, not complete cast
+and crew. Normal archive `download` now also fetches the paginated JSON API
+`/api/de/productions/{id}/participations` for every production missing fresh
+credits. Cast, characters, music, crew and assistants are retained, along with
+the raw API evidence. Profile IDs are scoped separately from creator/director
+IDs; missing profiles use participation-scoped IDs, never guessed name matches.
+Different credit names for the same numeric profile ID retain one person;
+each observed name stays in the production's source context and raw evidence.
+The importer logs these variants rather than aborting. Existing nonempty
+canonical person names remain unchanged.
+Legacy director/creator rows are not automatically merged with profile people
+without verified aliases. Some old and profile-backed records may therefore
+require an explicit reviewed merge.
+The legacy `download --json` interchange export remains director/creator-only;
+use the archive workflow for full API credits.
+
+To backfill an already downloaded archive without downloading its list or
+repeating biography lookups:
+
+```bash
+uv run python -m backend.ingestion.theapolis details
+```
+
+Detail downloads default to 32 concurrent requests with connection reuse and
+existing HTTP retry/backoff. Use `details --concurrency N` or
+`download --detail-concurrency N` to change that separately from list/profile
+concurrency. Successful responses and their cache checkpoints commit in bounded
+batches, with a final flush on interruption or error. Rerun after interruption to resume;
+fresh participation results are reused for seven days, independently of
+production-list timestamps (which may not reflect cast changes). The first
+backfill necessarily needs at least one API request per production; later
+imports still apply only changed records. Empty cast is confirmed only after
+validating all reported pages and counts. API errors fail the download without
+sealing the incomplete run or losing previous observations.
+
+The explicit authorized JSON Lines feed remains supported:
+
+```bash
+uv run python -m backend.ingestion.theapolis details --file authorized-credits.jsonl
+uv run python -m backend.ingestion.theapolis import
+```
+
+One line per production, using the list production ID and stable provider
+person IDs:
+
+```json
+{"production_id":"123","theapolis_detail_status":"parsed","theapolis_detail":{"credits":[{"person_id":"person-367","name":"Example Performer","role":"Spiel","character":"Hamlet"},{"person_id":"person-992","name":"Example Director","role":"Regie","legacy_ids":{"directors":"17"}}]}}
+```
+
+Only supply `legacy_ids` for provider-verified aliases; `creators` is the other
+supported scope. Use `confirmed_empty` with `credits: []` for a verified empty
+detail; omit unobserved productions. Missing and empty data do not delete any
+accepted memberships. Raw observations stay in the archive.
+
 Default import uses the DACH filter. Use `import --all` for the full export.
 `import` logs total wall time on completion or failure.
 Theapolis sends country and sometimes a state or canton in `organization.location.country`.

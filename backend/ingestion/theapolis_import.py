@@ -358,6 +358,7 @@ def _batch_identities(
 ) -> tuple[dict[str, SourceRecord], dict[str, set[uuid.UUID]], dict[uuid.UUID, uuid.UUID]]:
     keys = [record["record_key"] for record in records]
     external_ids = [record["context"]["external_id"] for record in records if record["context"].get("external_id")]
+    external_ids.extend(alias for record in records for alias in record["context"].get("legacy_ids", []))
     observations = session.exec(
         select(SourceRecord)
         .where(
@@ -389,12 +390,81 @@ def _mapped_identity(
     by_external: dict[str, set[uuid.UUID]],
     resolved: dict[uuid.UUID, uuid.UUID],
 ) -> uuid.UUID | None:
-    candidates = set(by_external.get(incoming["context"].get("external_id") or "", set()))
+    context = incoming["context"]
+    candidates = set().union(
+        *(by_external.get(key or "", set()) for key in [context.get("external_id"), *context.get("legacy_ids", [])])
+    )
     if record:
         candidates.add(resolved.get(record.entity_id, record.entity_id))
     if len(candidates) > 1:
         raise ValueError(f"Theapolis source identity collision: {kind}:{incoming['record_key']}")
     return next(iter(candidates), None)
+
+
+def _detail_person_records(kind: EntityType, records: list[ImportRecord]) -> list[ImportRecord]:
+    if kind != EntityType.PERSON:
+        return records
+    return [
+        {
+            **record,
+            "incoming": {field: value for field, value in record["incoming"].items() if field != "legacy_ids"},
+            "context": {**record["context"], "legacy_ids": record["incoming"]["legacy_ids"]},
+        }
+        if record["record_key"].startswith("id:detail:") and "legacy_ids" in record["incoming"]
+        else record
+        for record in records
+    ]
+
+
+def _register_person_aliases(
+    source_id: uuid.UUID,
+    incoming: ImportRecord,
+    identity: uuid.UUID,
+    by_key: dict[str, SourceRecord],
+    by_external: dict[str, set[uuid.UUID]],
+    detail_owners: dict[uuid.UUID, set[str]],
+    *,
+    older: bool,
+) -> None:
+    detail_key = incoming["record_key"]
+    aliases = incoming["context"].get("legacy_ids", [])
+    if detail_key.startswith("id:detail:"):
+        known = detail_owners.setdefault(identity, set())
+        if aliases and known and detail_key not in known:
+            raise ValueError(f"Conflicting Theapolis detail IDs for person {identity}")
+        known.add(detail_key)
+    for alias in aliases:
+        key = f"alias:{alias}"
+        record = by_key.get(key)
+        if record is not None and record.payload.get("detail_record_key") != detail_key:
+            raise ValueError(f"Conflicting Theapolis detail IDs for legacy alias {alias}")
+        if record is None and not older:
+            by_key[key] = SourceRecord(
+                source_id=source_id,
+                entity_type=EntityType.PERSON,
+                record_key=key,
+                external_id=alias,
+                entity_id=identity,
+                payload={"detail_record_key": detail_key},
+            )
+            by_external.setdefault(alias, set()).add(identity)
+
+
+def _detail_owners(
+    session: Session, source_id: uuid.UUID, records: list[ImportRecord], ids: set[uuid.UUID]
+) -> dict[uuid.UUID, set[str]]:
+    owners: dict[uuid.UUID, set[str]] = {}
+    if ids and any(record["context"].get("legacy_ids") for record in records):
+        for identity, key in session.exec(
+            select(SourceRecord.entity_id, SourceRecord.record_key).where(
+                SourceRecord.source_id == source_id,
+                SourceRecord.entity_type == EntityType.PERSON,
+                col(SourceRecord.entity_id).in_(ids),
+                col(SourceRecord.record_key).startswith("id:detail:"),
+            )
+        ):
+            owners.setdefault(identity, set()).add(key)
+    return owners
 
 
 def _observe(
@@ -480,11 +550,13 @@ def accept_records(
     actor_id: str,
 ) -> tuple[list[uuid.UUID], set[uuid.UUID]]:
     """Accept a bounded batch, returning identities and changed observation targets."""
+    records = _detail_person_records(kind, records)
     model = ENTITY_MODELS[kind]
     captured_at = _utc(captured_at) if captured_at else None
     by_key, by_external, resolved = _batch_identities(session, source_id, kind, records)
     ids = set(resolved.values())
     entities = {row.id: row for row in session.exec(select(model).where(col(model.id).in_(ids)).with_for_update())}
+    detail_owners = _detail_owners(session, source_id, records, ids)
     latest = {
         entity_id: _utc(captured)
         for entity_id, captured in session.exec(
@@ -536,6 +608,7 @@ def accept_records(
             if _fill_blanks(entity, payload, record) and identity not in inserted:
                 updated[identity] = entity
         _save_observation(source_id, kind, identity, incoming, captured_at, by_key, sources)
+        _register_person_aliases(source_id, incoming, identity, by_key, by_external, detail_owners, older=older)
         if captured_at:
             latest[identity] = max(latest.get(identity, captured_at), captured_at)
         if external_id := incoming["context"].get("external_id"):
@@ -556,7 +629,7 @@ def accept_records(
 def add_credits_batch(
     session: Session, kind: EntityType, credits: dict[uuid.UUID, list[dict]], *, actor_id: str
 ) -> None:
-    """Add Theapolis director/author credits with one endpoint query and bulk inserts."""
+    """Add Theapolis credits with one endpoint query and bulk inserts."""
     if not credits:
         return
     model, endpoint = (
@@ -564,22 +637,36 @@ def add_credits_batch(
     )
     rows = session.exec(select(model).where(getattr(model, endpoint).in_(credits)).with_for_update()).all()
     existing = {
-        (getattr(row, endpoint), row.person_id, canonical_role(row.role), getattr(row, "character", None))
+        (
+            getattr(row, endpoint),
+            row.person_id,
+            canonical_role(row.role),
+            normalize_character(getattr(row, "character", None)),
+        )
         for row in rows
     }
     inserted: list[SQLModel] = []
     for entity_id, members in credits.items():
         for credit in members:
             person_id, role = uuid.UUID(credit["person_id"]), canonical_role(credit["role"])
-            key = (entity_id, person_id, role, None)
+            character = normalize_character(credit.get("character")) if kind == EntityType.PRODUCTION else None
+            key = (entity_id, person_id, role, character)
             if key in existing:
                 continue
-            inserted.append(model.model_validate({endpoint: entity_id, "person_id": person_id, "role": role}))
+            payload = {endpoint: entity_id, "person_id": person_id, "role": role}
+            if character is not None:
+                payload["character"] = character
+            inserted.append(model.model_validate(payload))
             existing.add(key)
     if inserted:
         session.execute(insert(model), [row.model_dump() for row in inserted])
     session.flush()
     add_scd2_events(session, inserted=inserted, updated=[], actor_id=actor_id)
+
+
+def normalize_character(value: str | None) -> str | None:
+    """Trim surrounding space without changing character spelling, case, or internal spacing."""
+    return (value or "").strip() or None
 
 
 def _utc(value: dt.datetime) -> dt.datetime:
