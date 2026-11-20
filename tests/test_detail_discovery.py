@@ -29,6 +29,7 @@ def directory(monkeypatch) -> Mock:
 def test_detail_entry_shows_links_without_dropdowns_or_open_button(directory) -> None:
     app = AppTest.from_file(DETAIL_PAGE).run()
     assert not app.exception
+    assert app.text_input[0].proto.live_debounce_ms == 500
     directory.assert_called_once_with(Organization, "", limit=12, offset=0, verified_only=True)
     assert not app.selectbox
     assert not app.button

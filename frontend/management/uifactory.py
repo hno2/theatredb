@@ -8,7 +8,6 @@ from uuid import UUID
 
 import pandas as pd
 import streamlit as st
-from backend.data_quality import QUALITY_FIELDS
 from pydantic import ValidationError
 from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,6 +16,7 @@ from sqlmodel import SQLModel, col, select
 from streamlit import session_state, user
 
 from backend.config import ENTITY_LABELS, FORM_FIELD_KINDS, canonical_role
+from backend.data_quality import QUALITY_FIELDS
 from backend.date_precision import DatePrecision, iso_date, parse_date
 from backend.entity_management import (
     count_entities,
@@ -1063,7 +1063,12 @@ def _render_item_count(model_cls: type[SQLModel], count: int) -> None:
 
 def _render_crud_page(model_cls: type[SQLModel], fields: list[_FieldUI]) -> pd.DataFrame:
     kind = model_cls.__name__.lower()
-    query = st.text_input("Alle Einträge durchsuchen", key=f"crud_search_{kind}").strip()
+    query = st.text_input(
+        "Alle Einträge durchsuchen",
+        key=f"crud_search_{kind}",
+        type="search",
+        live="500ms",
+    ).strip()
     filters, filter_values = render_filter_section(model_cls, fields, key=kind)
     page_key = f"crud_page_{kind}_{stable_digest([query, filter_values])}"
     page = st.session_state.get(page_key, 1)

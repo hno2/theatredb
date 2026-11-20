@@ -59,7 +59,7 @@ def _render_field_filter(model_cls: type[SQLModel], field: _FieldUI, key: str) -
     if column is None or not hasattr(column, "type"):
         return [], None
     if field.kind == "fk_select" and field.fk_model is not None:
-        value = st.text_input(f"{field.label} enthält", key=key).strip()
+        value = st.text_input(f"{field.label} enthält", key=key, type="search", live="500ms").strip()
         if not value:
             return [], None
         target = field.fk_model
@@ -82,7 +82,7 @@ def _render_field_filter(model_cls: type[SQLModel], field: _FieldUI, key: str) -
         labels = field.option_labels or {}
         values = st.multiselect(field.label, field.options, format_func=lambda v: labels.get(v, v), key=key)
         return ([col(column).in_(values)] if values else []), values or None
-    value = st.text_input(f"{field.label} enthält", key=key).strip()
+    value = st.text_input(f"{field.label} enthält", key=key, type="search", live="500ms").strip()
     if not value:
         return [], None
     return [_json_contains(column, value) if isinstance(column.type, JSON) else _contains(column, value)], value

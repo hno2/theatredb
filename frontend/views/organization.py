@@ -365,7 +365,7 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         placeholder="Nach Titel suchen",
         key=f"production_search_{organization_id}",
         type="search",
-        live=True,
+        live="500ms",
     ).strip()
     with st.expander("Filter", expanded=False):
         ratings = sorted({row["age_rating"] for row in productions if row.get("age_rating") is not None})
@@ -400,7 +400,7 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
             placeholder="Name aus Besetzung, Team oder Textbeiträgen",
             key=f"production_person_{organization_id}",
             type="search",
-            live=True,
+            live="500ms",
         ).strip()
     if len(premiere_range) == 1:
         st.info("Bitte auch das Enddatum wählen. Der Zeitraumfilter ist noch nicht aktiv.")

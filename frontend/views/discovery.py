@@ -23,6 +23,7 @@ def render_pagination(page: int, pages: int, page_key: str, position: str) -> No
     st.caption(f"Seite {page} von {pages}")
 
 
+@st.fragment
 def render_discovery(initial_kind: str = "organization") -> None:
     """Offer direct detail links without requiring an entity selection first."""
     st.caption("THEATERDB / ENTDECKEN")
@@ -40,6 +41,8 @@ def render_discovery(initial_kind: str = "organization") -> None:
     query = st.text_input(
         "Person suchen" if kind == "person" else "Titel, Theater oder Ort suchen",
         key=f"discovery_search_{kind}",
+        type="search",
+        live="500ms",
     ).strip()
     only_verified = kind == "organization" and verified_only()
     page_key = f"discovery_page_{kind}_{only_verified}_{query}"

@@ -93,6 +93,7 @@ def test_homepage_metrics_and_literal_search(homepage: HomepageFixture) -> None:
     app, _ = homepage
     app.run()
     assert not app.exception
+    assert app.text_input[0].proto.live_debounce_ms == 500
     assert app.title[0].value == "Theaterlandschaft entdecken"
     assert [(metric.label, metric.value) for metric in app.metric] == [
         ("Theater & Organisationen", "3"),

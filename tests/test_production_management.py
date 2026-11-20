@@ -87,6 +87,7 @@ def test_search_covers_productions_beyond_first_page(db) -> None:
     app = AppTest.from_file(str(PRODUCTION_APP)).run()
     assert not app.exception
     assert len(app.dataframe[0].value) == 50
+    assert app.text_input(key="crud_search_production").proto.live_debounce_ms == 500
     app.text_input(key="crud_search_production").set_value("100%").run()
     assert not app.exception
     assert list(app.dataframe[0].value["name"]) == ["Zeta 100%"]
@@ -110,6 +111,8 @@ def test_filter_section_applies_sql_filters(db) -> None:
     app = AppTest.from_file(str(PRODUCTION_APP)).run()
     assert not app.exception
     assert not app.expander[0].proto.expanded
+    assert app.text_input(key="filter_production_organization_id").proto.live_debounce_ms == 500
+    assert app.text_input(key="filter_production_tags").proto.live_debounce_ms == 500
     app.text_input(key="filter_production_organization_id").set_value("schauspiel")
     app.number_input(key="filter_production_duration_to").set_value(120)
     app.text_input(key="filter_production_tags").set_value("komödie")

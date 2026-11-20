@@ -259,8 +259,8 @@ def test_invalid_coordinates_are_not_mapped(profile: ProfileFixture, monkeypatch
 def test_live_search_filters_list_without_hiding_sources(profile: ProfileFixture) -> None:
     app, _, links = profile
     app.run()
-    assert app.text_input[0].proto.live_debounce_ms == 250
-    assert app.text_input[1].proto.live_debounce_ms == 250
+    assert app.text_input[0].proto.live_debounce_ms == 500
+    assert app.text_input[1].proto.live_debounce_ms == 500
     assert not next(expander for expander in app.expander if expander.label == "Filter").proto.expanded
     links.reset_mock()
     app.text_input[0].set_value("NEU").run()

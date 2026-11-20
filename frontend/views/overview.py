@@ -86,6 +86,61 @@ def render_location_links(data: pd.DataFrame, entity_id: str) -> None:
                 )
 
 
+@st.fragment
+def _render_theatre_search(only_verified: bool, total: int) -> None:
+    search = st.text_input(
+        "Theater, Ort oder Land suchen",
+        placeholder="Zum Beispiel: Burgtheater, Berlin oder Österreich",
+        type="search",
+        live="500ms",
+    ).strip()
+    filters = (verified_organization_filter(),) if only_verified else ()
+    data = organization_data(list_matching_entities(Organization, search, filters=filters))
+    positions = data[["lat", "lon"]].itertuples(index=False, name=None)
+    visible = data.take([index for index, valid in enumerate(starmap(has_coordinates, positions)) if valid])
+
+    st.caption(
+        f"{len(data)} Treffer insgesamt · {len(visible)} davon auf der Karte. "
+        "Punkt anklicken und über den Link das Theater öffnen."
+    )
+    if not visible.empty:
+        event = st.pydeck_chart(
+            theater_map(visible),
+            key=f"theater_map_{stable_digest([search, only_verified])}",
+            on_select="rerun",
+            selection_mode="single-object",
+            height=480,
+            alt="Standorte der gefundenen Theater und Organisationen",
+        )
+        selected = event["selection"].get("objects", {}).get("theaters", [])
+        if selected:
+            render_location_links(visible, selected[0]["id"])
+    elif data.empty:
+        if only_verified:
+            st.info("Keine geprüften Theater gefunden. Ändere die Suche oder deaktiviere „Nur geprüfte Theater“.")
+        else:
+            st.info("Keine Theater gefunden. Versuche einen anderen Suchbegriff.")
+    else:
+        st.info("Für diese Treffer sind noch keine gültigen Koordinaten hinterlegt. Nutze das Verzeichnis unten.")
+
+    st.subheader("Theaterverzeichnis")
+    st.caption("Auch Treffer ohne Kartenposition werden angezeigt. Über „Ansehen“ öffnest du den jeweiligen Eintrag.")
+    if not data.empty:
+        st.dataframe(
+            data[["name", "city", "country", "detail"]],
+            hide_index=True,
+            column_config={
+                "name": st.column_config.TextColumn("Theater / Organisation", width="large"),
+                "city": "Ort",
+                "country": "Land",
+                "detail": st.column_config.LinkColumn("Eintrag", display_text="Ansehen"),
+            },
+            alt="Gefundene Theater mit Ort und Link zum Eintrag",
+        )
+    elif not total and not only_verified:
+        st.info("Noch keine Theater erfasst. Sobald Einträge vorliegen, erscheinen sie hier und auf der Karte.")
+
+
 def render_overview() -> None:
     """Render the German-language entry point to the theatre database."""
     st.caption("THEATERDB / THEATER IM DEUTSCHSPRACHIGEN RAUM")
@@ -117,39 +172,8 @@ def render_overview() -> None:
     st.divider()
 
     st.subheader("Häuser finden")
-    search = st.text_input(
-        "Theater, Ort oder Land suchen",
-        placeholder="Zum Beispiel: Burgtheater, Berlin oder Österreich",
-    ).strip()
-    filters = (verified_organization_filter(),) if only_verified else ()
-    data = organization_data(list_matching_entities(Organization, search, filters=filters))
-    positions = data[["lat", "lon"]].itertuples(index=False, name=None)
-    visible = data.take([index for index, valid in enumerate(starmap(has_coordinates, positions)) if valid])
-
-    st.caption(
-        f"{len(data)} Treffer insgesamt · {len(visible)} davon auf der Karte. "
-        "Punkt anklicken und über den Link das Theater öffnen."
-    )
     render_verified_toggle("_map_verified_only")
-    if not visible.empty:
-        event = st.pydeck_chart(
-            theater_map(visible),
-            key=f"theater_map_{stable_digest([search, only_verified])}",
-            on_select="rerun",
-            selection_mode="single-object",
-            height=480,
-            alt="Standorte der gefundenen Theater und Organisationen",
-        )
-        selected = event["selection"].get("objects", {}).get("theaters", [])
-        if selected:
-            render_location_links(visible, selected[0]["id"])
-    elif data.empty:
-        if only_verified:
-            st.info("Keine geprüften Theater gefunden. Ändere die Suche oder deaktiviere „Nur geprüfte Theater“.")
-        else:
-            st.info("Keine Theater gefunden. Versuche einen anderen Suchbegriff.")
-    else:
-        st.info("Für diese Treffer sind noch keine gültigen Koordinaten hinterlegt. Nutze das Verzeichnis unten.")
+    _render_theatre_search(only_verified, total)
 
     coverage_column, cities_column = st.columns(2, gap="large")
     with coverage_column:
@@ -181,22 +205,6 @@ def render_overview() -> None:
         else:
             st.caption("Noch keine Ortsangaben vorhanden.")
 
-    st.subheader("Theaterverzeichnis")
-    st.caption("Auch Treffer ohne Kartenposition werden angezeigt. Über „Ansehen“ öffnest du den jeweiligen Eintrag.")
-    if not data.empty:
-        st.dataframe(
-            data[["name", "city", "country", "detail"]],
-            hide_index=True,
-            column_config={
-                "name": st.column_config.TextColumn("Theater / Organisation", width="large"),
-                "city": "Ort",
-                "country": "Land",
-                "detail": st.column_config.LinkColumn("Eintrag", display_text="Ansehen"),
-            },
-            alt="Gefundene Theater mit Ort und Link zum Eintrag",
-        )
-    elif not total and not only_verified:
-        st.info("Noch keine Theater erfasst. Sobald Einträge vorliegen, erscheinen sie hier und auf der Karte.")
     st.divider()
     st.caption(
         "Die Datenbasis wächst. Fehlende Angaben bedeuten nicht, dass es keine Verbindung gibt. "

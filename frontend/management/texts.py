@@ -331,7 +331,7 @@ def _link(session: Session, text: Text) -> None:
         ["Dieser Text ist davon abgeleitet", "Das gewählte Werk ist von diesem Text abgeleitet"],
         key=f"direction_{text.id}",
     )
-    query = st.text_input("Titel in Datenbank suchen", key=f"link_query_{text.id}").strip()
+    query = st.text_input("Titel in Datenbank suchen", key=f"link_query_{text.id}", type="search", live="500ms").strip()
     labels = _text_options(session, query, {text.id}) if query else {}
     chosen = st.selectbox(
         "Passendes Werk",
@@ -426,7 +426,9 @@ def _credit(session: Session, text: Text, family_ids: set[UUID]) -> None:  # ruf
         ).strip()
         source_id = None
         if parsed["source_authors"] or parsed["source_titles"] or parsed["source_notes"]:
-            source_query = st.text_input("Vorlagentitel suchen", key=f"credit_source_search_{text.id}").strip()
+            source_query = st.text_input(
+                "Vorlagentitel suchen", key=f"credit_source_search_{text.id}", type="search", live="500ms"
+            ).strip()
             source_labels = _text_options(session, source_query, family_ids)
             source_id = st.selectbox(
                 "Vorlage zum nach-Credit (optional)",
@@ -536,7 +538,9 @@ def _lineage_proposal(session: Session, text: Text) -> None:
     ).first()
     if incident_edge is not None:
         return
-    query = st.text_input("Kandidatentitel suchen", key=f"ai_candidate_search_{text.id}").strip()
+    query = st.text_input(
+        "Kandidatentitel suchen", key=f"ai_candidate_search_{text.id}", type="search", live="500ms"
+    ).strip()
     labels = _text_options(session, query, {text.id})
     selected = st.multiselect(
         "Mögliche Vorlagen für KI-Prüfung",
@@ -588,7 +592,9 @@ def _inbox() -> None:
                 st.write(case.reason)
                 st.json({"Vorschlag": case.incoming, "Kontext": case.context})
                 suggested = str(case.target_id or case.context.get("suggested_target_id") or "")
-                query = st.text_input("Texttitel suchen", key=f"case_search_{case.id}").strip()
+                query = st.text_input(
+                    "Texttitel suchen", key=f"case_search_{case.id}", type="search", live="500ms"
+                ).strip()
                 labels = _text_options(session, query, set(), suggested)
                 options = [None, *labels]
                 target_label = "Vorlage für den neuen Text" if case.context.get("pending_derived") else "Ziel"

@@ -480,7 +480,7 @@ def _duplicates_tab() -> None:
         format_func=KINDS.__getitem__,
         key="duplicate_kind",
     )
-    query = st.text_input("Name, Titel oder UUID suchen", key="duplicate_query")
+    query = st.text_input("Name, Titel oder UUID suchen", key="duplicate_query", type="search", live="500ms")
     if kind in {"person", "text"}:
         st.info(f"{KINDS[kind]} direkt in ihrer Verwaltungsansicht auswählen und zusammenführen.")
     else:
@@ -498,7 +498,12 @@ def _duplicate_pairs(kind: str, query: str, records: list[dict]) -> None:
         format_func=left_labels.__getitem__,
         key="duplicate_left",
     )
-    right_query = st.text_input("Zweiten Datensatz suchen (auch anderer Name möglich)", key="duplicate_right_query")
+    right_query = st.text_input(
+        "Zweiten Datensatz suchen (auch anderer Name möglich)",
+        key="duplicate_right_query",
+        type="search",
+        live="500ms",
+    )
     right_records = search_entities(kind, right_query) if right_query else records
     right_choices = {row["id"]: row for row in right_records if row["id"] != left}
     right_labels = _unique({None: "Bitte wählen", **{key: _label(row) for key, row in right_choices.items()}})
@@ -559,7 +564,12 @@ def _select_target(case: dict, initial: dict) -> str | None:
             format_func=labels.__getitem__,
             key=f"survivor_{case['id']}",
         )
-    query = st.text_input("Zusätzlich nach bestehendem Ziel suchen (Name oder UUID)", key=f"target_query_{case['id']}")
+    query = st.text_input(
+        "Zusätzlich nach bestehendem Ziel suchen (Name oder UUID)",
+        key=f"target_query_{case['id']}",
+        type="search",
+        live="500ms",
+    )
     options = {c["id"]: c["record"] for c in initial["candidates"]}
     if query:
         options.update({row["id"]: row for row in search_entities(case["entity_type"], query)})
@@ -769,7 +779,7 @@ def _review_tab() -> None:
         ["pending", "approved", "rejected"],
         format_func=REVIEW_STATUS_LABELS.__getitem__,
     )
-    query = st.text_input("Prüffälle suchen (Name, Titel, Grund oder Fall-UUID)")
+    query = st.text_input("Prüffälle suchen (Name, Titel, Grund oder Fall-UUID)", type="search", live="500ms")
     page = st.number_input("Seite", min_value=1, value=1, step=1)
     cases = list_cases(
         status=status,
