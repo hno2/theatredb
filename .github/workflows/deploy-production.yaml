@@ -83,8 +83,13 @@ jobs:
           trap 'rm -f -- "$ssh_dir/key" "$ssh_dir/known_hosts"; rmdir -- "$ssh_dir"' EXIT
           printf '%s\n' "$SSH_KEY" > "$ssh_dir/key"
           printf '%s\n' "$SSH_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          status=0
           ssh -T -p "$SSH_PORT" -i "$ssh_dir/key" \
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -o "UserKnownHostsFile=$ssh_dir/known_hosts" -o ConnectTimeout=15 \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
-            -- "$SSH_TARGET" "$IMAGE"
+            -- "$SSH_TARGET" "$IMAGE" || status=$?
+          if [ "$status" -eq 127 ]; then
+            echo "SSH command not found. Check the production deploy key's forced command; see specs/development.md." >&2
+          fi
+          exit "$status"

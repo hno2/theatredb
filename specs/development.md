@@ -77,6 +77,14 @@ that the displayed containers are your existing production stack.
   chmod 700 ~/.ssh
   touch ~/.ssh/authorized_keys
   chmod 600 ~/.ssh/authorized_keys
+  if awk -v key="$public_key" '
+    BEGIN { split(key, k, " ") }
+    { for (i = 1; i < NF; i++) if ($i == k[1] && $(i+1) == k[2]) found = 1 }
+    END { exit !found }
+  ' ~/.ssh/authorized_keys; then
+    echo "Key already exists in authorized_keys; inspect and replace its entry instead" >&2
+    exit 1
+  fi
   printf '\nrestrict,command="/usr/local/lib/theatredb/deploy-production %s %s" %s\n' \
     "$PWD" "$project" "$public_key" >> ~/.ssh/authorized_keys
   printf 'Compose directory: %s\nCompose project: %s\nSSH user: %s\n' "$PWD" "$project" "$(id -un)"
@@ -97,6 +105,16 @@ create `production` and restrict deployment branches to `main`. Add:
 Use the host key from your trusted server session, not an unverified network
 scan. The dedicated Actions key is restricted to the deploy script; the
 server account's Docker access is still effectively root access.
+
+If the deploy log says the image digest is not a file or command, SSH ran it
+directly instead of invoking the forced command. On the server, check the
+`authorized_keys` of the user in `SSH_TARGET`: the public key matching
+`SSH_KEY` must have the `restrict,command="..."` entry shown above, with the
+correct production directory and project. Remove any unrestricted or
+duplicate entries for that same key, rather than merely appending a restricted
+entry after them. Confirm the installed deploy script and Compose override
+exist, then rerun the workflow. Do not send an unrestricted shell command from
+the workflow as a workaround.
 
 ### Release and rollback
 
