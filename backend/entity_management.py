@@ -10,6 +10,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Session, SQLModel, col, func, or_, select
 from sqlmodel.sql.expression import SelectOfScalar
 
+from backend.data_quality import QUALITY_FIELDS
 from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
 from backend.user_management import get_session
@@ -19,6 +20,7 @@ from .models import (
     EntityType,
     Organization,
     OrganizationMembership,
+    OrganizationSeasonCheck,
     Person,
     Production,
     ProductionMembership,
@@ -34,6 +36,17 @@ ModelT = TypeVar("ModelT", bound=SQLModel)
 def _snapshot[ModelT: SQLModel](entity: ModelT) -> dict[str, Any]:
     """Create a JSON-serializable snapshot of the entity's current state."""
     return entity.model_dump(mode="json")
+
+
+def _public_snapshot(entity: SQLModel) -> dict[str, Any]:
+    """Serialize public organization data without internal reviewer identities."""
+    data = _snapshot(entity)
+    if isinstance(entity, Organization):
+        for field in ("general_verified_by", "history_verified_by", "update_flagged_by"):
+            data.pop(field, None)
+    elif isinstance(entity, OrganizationSeasonCheck):
+        data.pop("checked_by", None)
+    return data
 
 
 def _entity_identity(entity: SQLModel) -> tuple[str, str]:
@@ -55,7 +68,7 @@ def _serialize_entity_graph(
     """Serialize entity plus attached relationships into JSON-safe nested dict."""
     seen = seen or set()
     ident = _entity_identity(entity)
-    data = entity.model_dump(mode="json")
+    data = _public_snapshot(entity)
     if ident in seen or max_depth <= 0:
         return data
 
@@ -267,7 +280,7 @@ def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
         return [
             {
                 **_snapshot(production),
-                "organization": _snapshot(production.organization) if production.organization else None,
+                "organization": _public_snapshot(production.organization) if production.organization else None,
                 "memberships": [
                     {**_snapshot(membership), "person": _snapshot(membership.person)}
                     for membership in production.memberships
@@ -300,6 +313,11 @@ def get_organization_profile(entity_id: str) -> dict[str, Any]:
         ).one_or_none()
         if organization is None:
             raise ValueError("Organization not found")
+        quality_checks = session.exec(
+            select(OrganizationSeasonCheck)
+            .where(OrganizationSeasonCheck.organization_id == resolved_id)
+            .order_by(col(OrganizationSeasonCheck.season_start_year))
+        ).all()
         entries = []
         for production in organization.productions:
             text = production.text
@@ -322,7 +340,15 @@ def get_organization_profile(entity_id: str) -> dict[str, Any]:
                 }
             )
         return {
-            **_snapshot(organization),
+            **_public_snapshot(organization),
+            "season_checks": [
+                {
+                    "season_start_year": check.season_start_year,
+                    "checked_at": check.checked_at.isoformat(),
+                    "evidence": check.evidence,
+                }
+                for check in quality_checks
+            ],
             "productions": entries,
             "memberships": [
                 {**_snapshot(membership), "person": _snapshot(membership.person)}
@@ -367,9 +393,9 @@ def browse_entities(
         rows = session.exec(stmt.order_by(col(model_cls.name), col(model_cls.id)).offset(offset).limit(limit)).all()
         entries = []
         for row in rows:
-            entry = _snapshot(row)
+            entry = _public_snapshot(row)
             if isinstance(row, Production):
-                entry["organization"] = _snapshot(row.organization) if row.organization else None
+                entry["organization"] = _public_snapshot(row.organization) if row.organization else None
             entries.append(entry)
         return entries, total
 
@@ -396,6 +422,10 @@ def create_entity[ModelT: SQLModel](
         The created (or existing) entity instance.
     """
     with get_session() as session:
+        if model_cls is Organization and QUALITY_FIELDS.intersection(payload):
+            raise ValueError("Organization assessments must use apply_quality_action")
+        if model_cls is OrganizationSeasonCheck:
+            raise ValueError("Season checks must use apply_quality_action")
         if get_if_exists:
             stmt = select(model_cls)
             for key, value in get_if_exists.items():
@@ -470,6 +500,10 @@ def update_entity[ModelT: SQLModel](
     actor_id: str | None,
 ) -> ModelT:
     """Update an existing entity by id, recording the operation in SCD2 history."""
+    if model_cls is Organization and QUALITY_FIELDS.intersection(payload):
+        raise ValueError("Organization assessments must use apply_quality_action")
+    if model_cls is OrganizationSeasonCheck:
+        raise ValueError("Season checks must use apply_quality_action")
     with get_session() as session:
         entity = session.get(model_cls, UUID(entity_id))
         if entity is None:
@@ -508,10 +542,27 @@ def delete_entity[ModelT: SQLModel](
     actor_id: str | None,
 ) -> None:
     """Delete an entity by id, recording the operation in SCD2 history."""
+    if model_cls is OrganizationSeasonCheck:
+        raise ValueError("Season checks must use apply_quality_action")
     with get_session() as session:
-        entity = session.get(model_cls, entity_id)
+        entity = session.get(model_cls, UUID(str(entity_id)))
         if entity is None:
             raise ValueError(f"{model_cls.__name__} not found")
+
+        if isinstance(entity, Organization):
+            checks = session.exec(
+                select(OrganizationSeasonCheck).where(OrganizationSeasonCheck.organization_id == entity.id)
+            ).all()
+            for check in checks:
+                add_scd2_event(
+                    session,
+                    entity_name="organizationseasoncheck",
+                    entity_id=str(check.id),
+                    operation="delete",
+                    snapshot=_snapshot(check),
+                    actor_id=actor_id,
+                )
+                session.delete(check)
 
         add_scd2_event(
             session,

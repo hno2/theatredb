@@ -24,6 +24,7 @@ from sqlmodel import Session, SQLModel, col, select
 from sqlmodel.sql.expression import Select, SelectOfScalar
 
 from backend.config import ENTITY_MODELS, LINK_IDENTITY_FIELDS, canonical_role
+from backend.data_quality import QUALITY_FIELDS
 from backend.date_precision import DatePrecision, date_interval, intervals_overlap, parse_date
 from backend.models import (
     Award,
@@ -31,6 +32,7 @@ from backend.models import (
     EntitySource,
     EntityType,
     Organization,
+    OrganizationSeasonCheck,
     Person,
     Production,
     ProductionMembership,
@@ -429,7 +431,8 @@ def find_candidates(
 def validate_payload(kind: EntityType, payload: dict, *, complete: bool = False) -> dict:
     """Validate entity fields and return their JSON-compatible representation."""
     model = ENTITY_MODELS[kind]
-    unknown = set(payload) - (set(model.model_fields) - {"id"})
+    protected = QUALITY_FIELDS if kind == EntityType.ORGANIZATION else set()
+    unknown = set(payload) - (set(model.model_fields) - {"id"} - protected)
     if unknown:
         raise ValueError(f"Unknown or protected fields: {', '.join(sorted(unknown))}")
     label = "title" if kind == EntityType.TEXT else "name"
@@ -919,16 +922,25 @@ def _credit_comparison(session: Session, case: ReconciliationCase, target: Entit
     return result
 
 
+def _review_incoming(case: ReconciliationCase, incoming: dict, duplicate: Entity | None) -> dict:
+    if duplicate:
+        incoming = entity_snapshot(duplicate)
+        incoming.pop("id")
+    elif case.entity_type == EntityType.ORGANIZATION:
+        incoming = {field: value for field, value in incoming.items() if field not in QUALITY_FIELDS}
+    return incoming
+
+
 def _preview(session: Session, case: ReconciliationCase, target_id: uuid.UUID | str | None) -> dict:
     incoming, blocked = _dependencies(session, case)
     target, duplicate = _preview_pair(session, case, target_id)
     current = entity_snapshot(target) if target else {}
-    if duplicate:
-        incoming = entity_snapshot(duplicate)
-        incoming.pop("id")
+    incoming = _review_incoming(case, incoming, duplicate)
     fields = []
     date_fields = getattr(ENTITY_MODELS[case.entity_type], "date_fields", ())
     for field, value in incoming.items():
+        if case.entity_type == EntityType.ORGANIZATION and field in QUALITY_FIELDS:
+            continue
         if field.endswith("_precision") and field.removesuffix("_precision") in date_fields:
             continue
         precision_name = f"{field}_precision" if field in date_fields else None
@@ -966,7 +978,24 @@ def _preview(session: Session, case: ReconciliationCase, target_id: uuid.UUID | 
         related = session.get(ReconciliationCase, uuid.UUID(credit["case_id"]))
         if related and related.target_id:
             credit_targets.append(str(resolve_id(session, EntityType.PERSON, related.target_id)))
-    state = [case.id, case.status, case.context, incoming, blocked, credit_targets, target_state, duplicate_state]
+    assessment_conflicts = []
+    assessment_state = None
+    assessment_result = None
+    if isinstance(target, Organization) and isinstance(duplicate, Organization):
+        assessment_conflicts, assessment_result, assessment_state = _organization_quality_preview(
+            session, target, duplicate, target_state, duplicate_state
+        )
+    state = [
+        case.id,
+        case.status,
+        case.context,
+        incoming,
+        blocked,
+        credit_targets,
+        target_state,
+        duplicate_state,
+        assessment_state,
+    ]
     return {
         "case": entity_snapshot(case),
         "current": current,
@@ -979,6 +1008,8 @@ def _preview(session: Session, case: ReconciliationCase, target_id: uuid.UUID | 
         "target_id": str(target.id) if target else None,
         "target_state": target_state,
         "duplicate_state": duplicate_state,
+        "assessment_conflicts": assessment_conflicts,
+        "assessment_result": assessment_result,
     }
 
 
@@ -989,6 +1020,22 @@ def preview_case(case_id: uuid.UUID | str, *, target_id: uuid.UUID | str | None 
         if case is None:
             raise ValueError("Review case not found")
         return _preview(session, case, target_id)
+
+
+def _apply_reviewed_changes(
+    session: Session, case: ReconciliationCase, entity: Entity, changes: dict, actor_id: str
+) -> bool:
+    before = entity_snapshot(entity)
+    validated = revalidate(entity, changes)
+    for field in changes:
+        setattr(entity, field, getattr(validated, field))
+    changed = entity_snapshot(entity) != before
+    if changed:
+        session.add(entity)
+    defer_audit = case.operation == "merge" and isinstance(entity, Organization)
+    if changed and not defer_audit:
+        audit_event(session, entity, "update", actor_id)
+    return changed and defer_audit
 
 
 def audit_event(session: Session, entity: SQLModel, operation: str, actor_id: str | None) -> None:
@@ -1141,6 +1188,282 @@ def _archive_source(
         session.add(record)
 
 
+_ORGANIZATION_ASSESSMENTS = {
+    "general": (
+        "general_verified_at",
+        "general_verified_by",
+        "general_verification_evidence",
+    ),
+    "history": (
+        "history_from_season",
+        "history_through_season",
+        "history_verified_at",
+        "history_verified_by",
+        "history_verification_evidence",
+    ),
+    "update": ("update_scope", "update_reason", "update_flagged_at", "update_flagged_by"),
+}
+
+
+def _assessment_values(record: SQLModel, fields: tuple[str, ...]) -> tuple:
+    return tuple(getattr(record, field) for field in fields)
+
+
+def _check_values(check: OrganizationSeasonCheck) -> tuple:
+    return (check.season_start_year, check.checked_at, check.checked_by, check.evidence)
+
+
+def _organization_quality_conflicts(session: Session, target: Organization, duplicate: Organization) -> list[dict]:
+    conflicts = []
+    for block, fields in _ORGANIZATION_ASSESSMENTS.items():
+        target_values = _assessment_values(target, fields)
+        duplicate_values = _assessment_values(duplicate, fields)
+        if (
+            all(value is not None for value in target_values)
+            and all(value is not None for value in duplicate_values)
+            and target_values != duplicate_values
+        ):
+            conflicts.append(
+                {
+                    "key": block,
+                    "field": f"assessment:{block}",
+                    "sources": [str(target.id), str(duplicate.id)],
+                }
+            )
+    target_checks = {
+        row.season_start_year: row
+        for row in session.exec(
+            select(OrganizationSeasonCheck).where(OrganizationSeasonCheck.organization_id == target.id)
+        ).all()
+    }
+    duplicate_checks = {
+        row.season_start_year: row
+        for row in session.exec(
+            select(OrganizationSeasonCheck).where(OrganizationSeasonCheck.organization_id == duplicate.id)
+        ).all()
+    }
+    for year in target_checks.keys() & duplicate_checks.keys():
+        left, right = target_checks[year], duplicate_checks[year]
+        if _check_values(left) != _check_values(right):
+            key = f"season:{year}"
+            conflicts.append({"key": key, "field": f"assessment:{key}", "sources": [str(target.id), str(duplicate.id)]})
+    return conflicts
+
+
+def _organization_assessment_values(
+    session: Session, target: Organization, duplicate: Organization
+) -> tuple[list[dict], dict]:
+    conflicts = _organization_quality_conflicts(session, target, duplicate)
+    conflict_keys = {item["key"] for item in conflicts}
+    sources = (target, duplicate)
+
+    def option(source: Organization, block: str) -> dict:
+        record = entity_snapshot(source)
+        if block.startswith("season:"):
+            year = int(block.split(":", 1)[1])
+            check = session.exec(
+                select(OrganizationSeasonCheck).where(
+                    OrganizationSeasonCheck.organization_id == source.id,
+                    OrganizationSeasonCheck.season_start_year == year,
+                )
+            ).one()
+            value = {
+                "season_start_year": check.season_start_year,
+                "checked_at": check.checked_at.isoformat(),
+                "checked_by": check.checked_by,
+                "evidence": check.evidence,
+            }
+        else:
+            value = {field: record[field] for field in _ORGANIZATION_ASSESSMENTS[block]}
+        return {"entity_id": str(source.id), "value": value}
+
+    assessment_options = {
+        conflict["key"]: [option(target, conflict["key"]), option(duplicate, conflict["key"])] for conflict in conflicts
+    }
+    for conflict in conflicts:
+        conflict["options"] = assessment_options[conflict["key"]]
+    results = {}
+    for block, fields in _ORGANIZATION_ASSESSMENTS.items():
+        target_values = _assessment_values(target, fields)
+        duplicate_values = _assessment_values(duplicate, fields)
+        results[block] = (
+            {"conflict": True, "options": assessment_options[block]}
+            if block in conflict_keys
+            else dict(
+                zip(
+                    fields,
+                    target_values if any(value is not None for value in target_values) else duplicate_values,
+                    strict=True,
+                )
+            )
+        )
+    checks_by_year: dict[str, dict[str, object]] = {}
+    for source in sources:
+        checks = session.exec(
+            select(OrganizationSeasonCheck).where(OrganizationSeasonCheck.organization_id == source.id)
+        ).all()
+        for check in checks:
+            key = f"season:{check.season_start_year}"
+            if key in conflict_keys:
+                checks_by_year[key] = {"conflict": True, "options": assessment_options[key]}
+            else:
+                checks_by_year.setdefault(
+                    key,
+                    {
+                        "season_start_year": check.season_start_year,
+                        "checked_at": check.checked_at.isoformat(),
+                        "checked_by": check.checked_by,
+                        "evidence": check.evidence,
+                    },
+                )
+    return conflicts, {"blocks": results, "season_checks": checks_by_year}
+
+
+def _organization_quality_preview(
+    session: Session,
+    target: Organization,
+    duplicate: Organization,
+    target_state: dict | None,
+    duplicate_state: dict | None,
+) -> tuple[list[dict], dict, list]:
+    conflicts, result = _organization_assessment_values(session, target, duplicate)
+    for state, organization in ((target_state, target), (duplicate_state, duplicate)):
+        if state is None:
+            continue
+        record = state["record"]
+        for block, assessment_fields in _ORGANIZATION_ASSESSMENTS.items():
+            record[f"assessment:{block}"] = (
+                {field: record[field] for field in assessment_fields}
+                if all(record[field] is not None for field in assessment_fields)
+                else None
+            )
+        for check in session.exec(
+            select(OrganizationSeasonCheck).where(OrganizationSeasonCheck.organization_id == organization.id)
+        ).all():
+            record[f"assessment:season:{check.season_start_year}"] = {
+                "season_start_year": check.season_start_year,
+                "checked_at": check.checked_at.isoformat(),
+                "checked_by": check.checked_by,
+                "evidence": check.evidence,
+            }
+    state = [
+        {field: getattr(target, field) for fields in _ORGANIZATION_ASSESSMENTS.values() for field in fields},
+        {field: getattr(duplicate, field) for fields in _ORGANIZATION_ASSESSMENTS.values() for field in fields},
+        [
+            entity_snapshot(row)
+            for row in session.exec(
+                select(OrganizationSeasonCheck)
+                .where(col(OrganizationSeasonCheck.organization_id).in_([target.id, duplicate.id]))
+                .order_by(
+                    col(OrganizationSeasonCheck.organization_id),
+                    col(OrganizationSeasonCheck.season_start_year),
+                )
+            ).all()
+        ],
+    ]
+    return conflicts, result, state
+
+
+def _validate_assessment_choices(
+    conflicts: list[dict], choices: dict[str, str] | None
+) -> tuple[set[str], dict[str, str]]:
+    conflict_keys = {item["key"] for item in conflicts}
+    choices = choices or {}
+    if conflict_keys - choices.keys():
+        raise ValueError(
+            f"Choose an assessment for every conflict: {', '.join(sorted(conflict_keys - choices.keys()))}"
+        )
+    if choices.keys() - conflict_keys:
+        raise ValueError(f"Assessment choices are not conflicting: {', '.join(sorted(choices.keys() - conflict_keys))}")
+    return conflict_keys, choices
+
+
+def _carry_organization_blocks(
+    target: Organization,
+    duplicate: Organization,
+    conflicts: set[str],
+    choices: dict[str, str],
+) -> bool:
+    changed = False
+    for block, fields in _ORGANIZATION_ASSESSMENTS.items():
+        target_values = _assessment_values(target, fields)
+        duplicate_values = _assessment_values(duplicate, fields)
+        if not any(value is not None for value in target_values) and any(
+            value is not None for value in duplicate_values
+        ):
+            for field, value in zip(fields, duplicate_values, strict=True):
+                setattr(target, field, value)
+            changed = True
+        if block in conflicts:
+            selected = str(choices[block])
+            if selected not in {str(target.id), str(duplicate.id)}:
+                raise ValueError(f"Invalid source for assessment conflict {block}")
+            if selected == str(duplicate.id):
+                for field, value in zip(fields, duplicate_values, strict=True):
+                    setattr(target, field, value)
+                changed = True
+    return changed
+
+
+def _merge_organization_season_checks(
+    session: Session,
+    target: Organization,
+    duplicate: Organization,
+    conflicts: set[str],
+    choices: dict[str, str],
+    actor_id: str | None,
+) -> None:
+    checks = session.exec(
+        select(OrganizationSeasonCheck).where(OrganizationSeasonCheck.organization_id == duplicate.id)
+    ).all()
+    target_check_map = {
+        row.season_start_year: row
+        for row in session.exec(
+            select(OrganizationSeasonCheck).where(OrganizationSeasonCheck.organization_id == target.id)
+        ).all()
+    }
+    for check in checks:
+        existing = target_check_map.get(check.season_start_year)
+        if existing is None:
+            check.organization_id = target.id
+            session.add(check)
+            session.flush()
+            audit_event(session, check, "update", actor_id)
+            continue
+        key = f"season:{check.season_start_year}"
+        selected = str(choices.get(key, target.id))
+        if selected not in {str(target.id), str(duplicate.id)}:
+            raise ValueError(f"Invalid source for assessment conflict {key}")
+        if selected == str(duplicate.id) and key in conflicts:
+            audit_event(session, existing, "delete", actor_id)
+            session.delete(existing)
+            session.flush()
+            check.organization_id = target.id
+            session.add(check)
+            session.flush()
+            audit_event(session, check, "update", actor_id)
+        else:
+            audit_event(session, check, "delete", actor_id)
+            session.delete(check)
+
+
+def _apply_organization_assessments(
+    session: Session,
+    target: Organization,
+    duplicate: Organization,
+    actor_id: str | None,
+    choices: dict[str, str] | None,
+) -> bool:
+    conflict_keys, selected = _validate_assessment_choices(
+        _organization_quality_conflicts(session, target, duplicate), choices
+    )
+    changed = _carry_organization_blocks(target, duplicate, conflict_keys, selected)
+    _merge_organization_season_checks(session, target, duplicate, conflict_keys, selected, actor_id)
+    if changed:
+        audit_event(session, target, "update", actor_id)
+    return changed
+
+
 def _deduplicate_links(session: Session, actor_id: str | None, touched: set[tuple[type, uuid.UUID]]) -> None:
     for model, fields in LINK_IDENTITY_FIELDS.items():
         for touched_model, row_id in touched:
@@ -1165,6 +1488,24 @@ def _deduplicate_links(session: Session, actor_id: str | None, touched: set[tupl
     session.flush()
 
 
+def _prepare_organization_merge(
+    session: Session,
+    case: ReconciliationCase,
+    target: Entity,
+    duplicate: Entity,
+    actor_id: str | None,
+    choices: dict[str, str] | None,
+    target_changed: bool,
+) -> None:
+    if case.entity_type != EntityType.ORGANIZATION:
+        return
+    if not isinstance(target, Organization) or not isinstance(duplicate, Organization):
+        raise TypeError("Organization merge target mismatch")
+    quality_changed = _apply_organization_assessments(session, target, duplicate, actor_id, choices)
+    if target_changed and not quality_changed:
+        audit_event(session, target, "update", actor_id)
+
+
 def _merge(
     session: Session,
     case: ReconciliationCase,
@@ -1173,8 +1514,11 @@ def _merge(
     actor_id: str | None,
     *,
     approved_ids: Collection[uuid.UUID] = (),
+    assessment_choices: dict[str, str] | None = None,
+    target_changed: bool = False,
 ) -> None:
     duplicate = _get(session, case.entity_type, duplicate_id)
+    _prepare_organization_merge(session, case, target, duplicate, actor_id, assessment_choices, target_changed)
     if case.entity_type == EntityType.TEXT:
         _prepare_text_merge(session, target.id, duplicate.id, actor_id)
     touched = set()
@@ -1579,6 +1923,7 @@ def approve_case(
     fields: list[str] | None = None,
     allow_create: bool = False,
     note: str = "",
+    assessment_choices: dict[str, str] | None = None,
 ) -> uuid.UUID:
     """Apply exactly reviewed fields atomically; creation always requires explicit opt-in.
 
@@ -1603,23 +1948,26 @@ def approve_case(
         if set(selected) - options.keys():
             raise ValueError("Selected fields are not in the preview")
         model = ENTITY_MODELS[case.entity_type]
+        defer_merge_audit = False
         if target_id:
             entity = _get(session, case.entity_type, target_id)
-            before = entity_snapshot(entity)
             changes = _selected_changes(entity, options, selected)
-            validated = revalidate(entity, changes)
-            for field in changes:
-                setattr(entity, field, getattr(validated, field))
-            if entity_snapshot(entity) != before:
-                session.add(entity)
-                audit_event(session, entity, "update", actor_id)
+            defer_merge_audit = _apply_reviewed_changes(session, case, entity, changes, actor_id)
         else:
             entity = model.model_validate(preview["incoming"])
             session.add(entity)
             audit_event(session, entity, "insert", actor_id)
         session.flush()
         if case.operation == "merge":
-            _merge(session, case, entity, preview["duplicate_state"]["record"]["id"], actor_id)
+            _merge(
+                session,
+                case,
+                entity,
+                preview["duplicate_state"]["record"]["id"],
+                actor_id,
+                assessment_choices=assessment_choices,
+                target_changed=defer_merge_audit,
+            )
             case.duplicate_id = uuid.UUID(preview["duplicate_state"]["record"]["id"])
         else:
             _save_source(session, case, entity.id)

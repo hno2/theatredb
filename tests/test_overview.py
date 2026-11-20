@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 import math
 from unittest.mock import Mock
@@ -7,8 +8,8 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 from streamlit.testing.v1 import AppTest
 
-from backend import user_management
-from backend.models import Organization, Person, Production
+from backend import config, user_management
+from backend.models import Organization, OrganizationSeasonCheck, Person, Production
 from frontend.views import overview
 
 OVERVIEW_SCRIPT = "from frontend.views.overview import render_overview\nrender_overview()"
@@ -74,7 +75,9 @@ def homepage(monkeypatch: pytest.MonkeyPatch) -> HomepageFixture:
             for item in organizations
             if any(search.casefold() in (value or "").casefold() for value in (item.name, item.city, item.country))
         ]
+
     monkeypatch.setattr(overview, "list_matching_entities", matching_entities)
+    monkeypatch.setattr(overview, "season_checks_many", lambda ids: {})
     monkeypatch.setattr(overview, "organization_coverage", lambda: (3, 2, 2, [("Berlin", "Deutschland", 2)]))
     monkeypatch.setattr(
         overview,
@@ -193,3 +196,60 @@ def test_shared_map_position_links_every_theater(homepage: HomepageFixture, monk
         str(organizations[0].id),
         str(organizations[1].id),
     }
+
+
+def test_quality_filter_keeps_map_directory_and_missing_positions_consistent(
+    homepage: HomepageFixture,
+) -> None:
+    app, organizations = homepage
+    organizations[0].general_verified_at = dt.datetime.now(dt.UTC)
+    organizations[0].general_verified_by = "editor"
+    organizations[0].general_verification_evidence = "Source"
+    organizations[2].general_verified_at = dt.datetime.now(dt.UTC)
+    organizations[2].general_verified_by = "editor"
+    organizations[2].general_verification_evidence = "Source"
+    app.run()
+    app.selectbox(key="overview_quality").set_value("general").run()
+    assert not app.exception
+    assert set(app.dataframe[0].value["name"]) == {"Bühne [Mitte]", "Ohne Position"}
+    layer = json.loads(app.get("deck_gl_json_chart")[0].proto.json)["layers"][0]
+    assert layer["getFillColor"] == "@@=color"
+    assert [row["name"] for row in layer["data"]] == ["Bühne [Mitte]"]
+    assert layer["data"][0]["color"] == [37, 99, 235, 200]
+    app.text_input[0].set_value("Wien").run()
+    assert not app.exception
+    assert not app.dataframe
+
+
+def test_pending_season_filter_includes_older_checks_and_keeps_source_review_separate(
+    homepage: HomepageFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, organizations = homepage
+    current = OrganizationSeasonCheck(
+        organization_id=organizations[0].id,
+        season_start_year=config.CURRENT_SEASON_START_YEAR,
+        checked_at=dt.datetime.now(dt.UTC),
+        checked_by="editor",
+        evidence="Programme",
+    )
+    older = OrganizationSeasonCheck(
+        organization_id=organizations[1].id,
+        season_start_year=config.CURRENT_SEASON_START_YEAR - 1,
+        checked_at=dt.datetime.now(dt.UTC),
+        checked_by="editor",
+        evidence="Old programme",
+    )
+    monkeypatch.setattr(
+        overview,
+        "season_checks_many",
+        lambda ids: {organizations[0].id: [current], organizations[1].id: [older]},
+    )
+    app.run()
+    app.toggle(key="overview_pending_season").set_value(True).run()
+    assert not app.exception
+    assert set(app.dataframe[0].value["name"]) == {"Burgtheater", "Ohne Position"}
+    assert all("ungeprüft" in label for label in app.dataframe[0].value["quality_label"])
+    app.text_input[0].set_value("Bühne").run()
+    assert not app.exception
+    assert not app.dataframe

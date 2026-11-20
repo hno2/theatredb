@@ -1,4 +1,7 @@
+from backend.data_quality import QUALITY_FIELDS
+
 from backend.models import Organization, OrganizationMembership, Person
+from frontend.management.quality import render_quality_editor
 from frontend.management.uifactory import render_sqlmodel_crud
 
 
@@ -7,9 +10,11 @@ def main() -> None:
     render_sqlmodel_crud(
         model_cls=Organization,
         field_overrides={
+            **{field: {"exclude": True} for field in QUALITY_FIELDS},
             "lat": {"exclude": True},  # TODO: Should be added by geocoding, but currently is not
             "lon": {"exclude": True},
         },
+        selected_callback=render_quality_editor,
         inline_relations=[
             {
                 "model": OrganizationMembership,

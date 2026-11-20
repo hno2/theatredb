@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pandas as pd
 import streamlit as st
+from backend.data_quality import QUALITY_FIELDS
 from pydantic import ValidationError
 from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
@@ -944,6 +945,8 @@ def _render_table(
     actor: str | None = None,
 ) -> list[dict]:
     df_view = df.drop(columns=["id"], errors="ignore").copy()
+    if model_cls is Organization:
+        df_view.drop(columns=list(QUALITY_FIELDS), errors="ignore", inplace=True)
     if merge_kind == "text":
         if "languages" in df_view:
             df_view["languages"] = df_view["languages"].map(lambda values: ", ".join(values or []))
@@ -1004,7 +1007,7 @@ def _render_add_form(model_cls: type[SQLModel], fields: list[_FieldUI], actor: s
         vals = {f.name: _render_field(f, {}, form_key=add_form_key, errors=add_errors.fields) for f in fields}
         if add_errors.global_error:
             st.error(add_errors.global_error)
-        if st.form_submit_button("Add", icon=":material/add_circle:", use_container_width=True, type="primary"):
+        if st.form_submit_button("Add", icon=":material/add_circle:", width="stretch", type="primary"):
             try:
                 resolved = _resolve_new_entities(vals, actor)
                 create_entity(model_cls, payload=resolved, actor_id=actor)
