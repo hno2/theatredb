@@ -9,11 +9,21 @@
 - [ ] Icons for sources, e.g. Wikipedia. --> Use Favicon
 - [ ] Types of Theatre (Staatstheater: https://de.wikipedia.org/wiki/Liste_von_Staatstheatern)
 - [x] Person with multiple roles in Prod shows up multiple times
-- [ ] Country import from theapolis contains both Bundesland as well as country
+- [x] Country import from theapolis contains both Bundesland as well as country
 - [ ] Not all persons are imported from Theapolis (e.g. Cinderalla Example from BST)
 - [/] Each Management Page should show the number of entries in general
 - [x] THeapolis only import german ?
--
+- [ ] Better Overview Page on the front
+- [ ] Nice easy graph Hamlet over time
+- [ ] Besetzung looks not nice, too much vertical space, not enough, at one glance?
+- [ ] Better colour schema
+- [ ] Production Page Tag styling
+- [ ] Production Sort SChauspiel/Crew
+- [ ] Handle/Understand Alt names Theatre/Person 
+- [ ] Fix Favicon
+- [ ] Understand Wikidata mapping
+- [ ] Page top level nav (go back to theatre, page before)
+- [ ] Details sort by number productions, beschreibung shortened not in expander
 ## Sources
 - [ ] TheatreBW
 - [ ] Theaterverlage https://www.concordtheatricals.de/
