@@ -136,4 +136,4 @@ def render_production(data: dict) -> None:
             for critic in data["critics"]:
                 st.write(critic)
     with st.expander("Technische Angaben"):
-        st.json(data, expanded=False)
+        st.json(data)
