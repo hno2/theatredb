@@ -25,13 +25,18 @@ def has_coordinates(lat: float | None, lon: float | None) -> bool:
     )
 
 
+def entity_anchor(
+    label: str, kind: str, entity_id: str, *, include_unverified: bool = False, path: str = ""
+) -> str:
+    """Build a same-tab entity link for use within a line of text."""
+    filters = {"verified_only": "0"} if include_unverified else theatre_filter_link_params()
+    query = urlencode({"kind": kind, "id": entity_id, **filters})
+    return f'<a href="{escape(path, quote=True)}?{escape(query, quote=True)}" target="_self">{escape(label)}</a>'
+
+
 def entity_link(label: str, kind: str, entity_id: str) -> None:
     """Link to an entity within the current detail page."""
-    query = urlencode({"kind": kind, "id": entity_id, **theatre_filter_link_params()})
-    st.markdown(
-        f'<a href="?{escape(query, quote=True)}" target="_self">{escape(label)}</a>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(entity_anchor(label, kind, entity_id), unsafe_allow_html=True)
 
 
 def production_people(production: dict) -> dict[str, dict]:

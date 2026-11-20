@@ -166,11 +166,16 @@ def premiere_label(production: dict) -> str:
     return str(production["premiere_year"]) if production.get("premiere_year") else "Nicht hinterlegt"
 
 
+def is_theapolis_url(url: str) -> bool:
+    """Identify archive links that should not be labeled as official theatre sites."""
+    host = urlsplit(url).hostname or ""
+    return host == "theapolis.de" or host.endswith(".theapolis.de")
+
+
 def render_web_link(label: str, value: str | None, *, official: bool = False) -> None:
     """Render a source-provided URL or explicitly flag an unusable one."""
     if url := web_url(value):
-        host = urlsplit(url).hostname or ""
-        if official and (host == "theapolis.de" or host.endswith(".theapolis.de")):
+        if official and is_theapolis_url(url):
             st.link_button("Theapolis-Quelle", url, icon=":material/open_in_new:")
             return
         st.link_button(label, url, icon=":material/open_in_new:")
@@ -427,14 +432,25 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         render_theatre_production(production)
 
 
-def _render_source(source: dict, source_record: Source | None) -> None:
-    url = web_url(source.get("external_url"))
-    name = (
-        (source_record.name if source_record else None)
-        or (urlsplit(url).hostname if url else None)
-        or "Unbekannte Quelle"
-    )
-    icon = favicon_url(source_record.base_url if source_record else None) or favicon_url(source.get("external_url"))
+def _render_compact_source(source: dict, name: str, url: str | None, metadata: list[str]) -> None:
+    title = source.get("title") or name
+    details = [] if source.get("link_only") else metadata
+    if title != name and not source.get("link_only"):
+        details = [name, *details]
+    citation = escape(title)
+    if url:
+        citation = f'<a href="{escape(url)}" target="_blank" rel="noopener noreferrer">{citation}</a>'
+    elif source.get("external_url"):
+        details.append("Kein gültiger HTTP(S)-Link hinterlegt.")
+    else:
+        details.append("Kein direkter Quellenlink hinterlegt.")
+    line = " · ".join([citation, *(escape(item) for item in details)])
+    st.markdown(f"<p>{line}</p>", unsafe_allow_html=True)
+
+
+def _render_source_with_icon(
+    source: dict, name: str, icon: str | None, url: str | None, metadata: list[str], date_warning: str | None
+) -> None:
     with st.container():
         icon_column, content_column = st.columns([1, 20], vertical_alignment="center")
         with icon_column:
@@ -450,13 +466,8 @@ def _render_source(source: dict, source_record: Source | None) -> None:
             st.text(name)
             if source.get("title") and source["title"] != name:
                 st.caption(source["title"])
-            metadata = ["Geprüft" if source.get("reviewed") else "Noch nicht geprüft"]
-            if source.get("sourced_at"):
-                sourced_at = parse_date(source["sourced_at"])
-                if sourced_at is not None:
-                    metadata.append(f"Erfasst am {sourced_at:%d.%m.%Y}")
-                else:
-                    st.warning(f"Ungültiges Erfassungsdatum: {source['sourced_at']}")
+            if date_warning:
+                st.warning(date_warning)
             st.caption(" · ".join(metadata))
             if url:
                 st.link_button("Quelle öffnen", url, type="tertiary")
@@ -466,10 +477,35 @@ def _render_source(source: dict, source_record: Source | None) -> None:
                 st.caption("Kein direkter Quellenlink hinterlegt.")
 
 
-def render_sources(sources: list[dict]) -> None:
+def _render_source(source: dict, source_record: Source | None, *, compact: bool) -> None:
+    url = web_url(source.get("external_url"))
+    name = (
+        (source_record.name if source_record else None)
+        or (urlsplit(url).hostname if url else None)
+        or "Unbekannte Quelle"
+    )
+    metadata = ["Geprüft" if source.get("reviewed") else "Noch nicht geprüft"]
+    date_warning = None
+    if source.get("sourced_at"):
+        sourced_at = parse_date(source["sourced_at"])
+        if sourced_at is not None:
+            metadata.append(f"Erfasst am {sourced_at:%d.%m.%Y}")
+        else:
+            date_warning = f"Ungültiges Erfassungsdatum: {source['sourced_at']}"
+    if compact:
+        _render_compact_source(source, name, url, [*metadata, date_warning] if date_warning else metadata)
+    else:
+        icon = favicon_url(source_record.base_url if source_record else None) or favicon_url(url)
+        _render_source_with_icon(source, name, icon, url, metadata, date_warning)
+
+
+def render_sources(sources: list[dict], *, compact: bool = False) -> None:
     """Show provenance as readable citations instead of serialized source records."""
     st.subheader("Quellen & Nachweise")
-    st.caption("Externe Belege zu diesem Eintrag. „Geprüft“ bezeichnet die Prüfung des verknüpften Quelldatensatzes.")
+    if not compact:
+        st.caption(
+            "Externe Belege zu diesem Eintrag. „Geprüft“ bezeichnet die Prüfung des verknüpften Quelldatensatzes."
+        )
     if not sources:
         st.info("Für diesen Eintrag sind noch keine Quellen hinterlegt.")
         return
@@ -479,8 +515,9 @@ def render_sources(sources: list[dict]) -> None:
             Source, {UUID(str(item["source_id"])) for item in sources if item.get("source_id")}
         )
     }
-    for source in sources:
-        _render_source(source, source_records.get(str(source.get("source_id"))))
+    with st.container(gap="xsmall" if compact else "small"):
+        for source in sources:
+            _render_source(source, source_records.get(str(source.get("source_id"))), compact=compact)
 
 
 def render_organization(data: dict) -> None:

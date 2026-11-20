@@ -9,6 +9,15 @@ administrative tools for imports, review, and data maintenance.
 ## Main workflows
 
 - Browse theatre and production details, with source links.
+  Production details link back using the theatre name alone, show description
+  and cast together, and preview up to five related productions per group (same
+  text, theatre, or director). The same-text list expands when more are available.
+  Text credits sit under the title. Related rows open
+  individual productions; separate links open the theatre or director’s
+  production list. The same-text and same-director cards include premiere
+  counts and charts below their lists, with production titles on hover.
+  Directly linked translations and adaptations have a matching card grouped
+  by publication year. Sources appear at the bottom.
 - Review theatre general information, scoped production-history coverage, and
   the current Spielzeit; browse assessment colours and filters on the overview.
 - Search and filter productions across the full dataset.
