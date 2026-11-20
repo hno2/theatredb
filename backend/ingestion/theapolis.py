@@ -1044,7 +1044,38 @@ def _detail_person(people: dict, key: str, name: str) -> dict:
     return person
 
 
-def _add_detail_people(item: dict, people: dict, alias_owners: dict[str, str]) -> tuple[list[PreparedCredit], dict]:
+def _listed_profile_credits(item: dict) -> dict[tuple[str, str, str], set[str]]:
+    credits: dict[tuple[str, str, str], set[str]] = {}
+    for group, role in (("directors", "director"), ("creators", "author")):
+        for person in item.get(group) or []:
+            if url := (person.get("profile") or {}).get("url"):
+                key = (_name(person), role, canonical_url(url))
+                credits.setdefault(key, set()).add(f"{group}:{_identity(person)}")
+    return credits
+
+
+def _match_profile_credit(
+    matches: dict[str, set[str]],
+    listed: dict[tuple[str, str, str], set[str]],
+    credit: tuple[str, str, str, str, str | None, list[str]],
+    url: str,
+) -> None:
+    key, name, _, role, character, _ = credit
+    if (
+        character is None
+        and re.fullmatch(r"detail:profile:\d+", key)
+        and re.fullmatch(r"https://www\.theapolis\.de/de/profil/[^/?]+", url)
+    ):
+        for alias in listed.get((name, role, url), ()):
+            matches.setdefault(alias, set()).add(key)
+
+
+def _add_detail_people(
+    item: dict,
+    people: dict,
+    alias_owners: dict[str, str],
+    profile_matches: dict[str, set[str]] | None = None,
+) -> tuple[list[PreparedCredit], dict]:
     """Read authorized detail observations; absence is not evidence of an empty cast."""
     if "theapolis_detail" not in item and "theapolis_detail_status" not in item:
         return [], {}
@@ -1056,11 +1087,15 @@ def _add_detail_people(item: dict, people: dict, alias_owners: dict[str, str]) -
 
     credits: list[PreparedCredit] = []
     raw_credits = []
+    listed = _listed_profile_credits(item) if profile_matches is not None else {}
     for row in rows:
-        key, name, raw_role, role, character, aliases = _detail_credit(row)
+        credit = _detail_credit(row)
+        key, name, raw_role, role, character, aliases = credit
         person = _detail_person(people, key, name)
         if row.get("profile_url"):
-            person["profile_url"] = canonical_url(row["profile_url"])
+            url = person["profile_url"] = canonical_url(row["profile_url"])
+            if profile_matches is not None:
+                _match_profile_credit(profile_matches, listed, credit, url)
         if role not in person["type"]:
             person["type"].append(role)
         for alias in aliases:
@@ -1079,6 +1114,20 @@ def _add_detail_people(item: dict, people: dict, alias_owners: dict[str, str]) -
             }
         )
     return credits, {"status": status, "credits": raw_credits}
+
+
+def _set_profile_matches(people: dict[str, dict], matches: dict[str, set[str]], alias_owners: dict[str, str]) -> None:
+    by_scope: dict[tuple[str, str], set[str]] = {}
+    for alias, keys in matches.items():
+        for key in keys:
+            by_scope.setdefault((key, alias.partition(":")[0]), set()).add(alias)
+    for (key, _), aliases in by_scope.items():
+        if len(aliases) != 1 or any(len(matches[alias]) != 1 for alias in aliases):
+            LOG.warning("Ambiguous Theapolis profile overlap for %s: %s", key, sorted(aliases))
+            continue
+        alias = next(iter(aliases))
+        if alias not in alias_owners and not people[key]["legacy_ids"]:
+            people[key].setdefault("matched_legacy_ids", []).append(alias)
 
 
 def validate_detail(entry: dict) -> None:
@@ -1148,6 +1197,7 @@ def _prepare_import(
 ) -> tuple[dict[str, tuple[dict, str | None]], dict[str, dict], list[PreparedProduction], dt.datetime | None]:
     items, captured_at = _import_items(snapshot, archived=archived)
     organizations, people, productions, alias_owners = {}, {}, [], {}
+    profile_matches: dict[str, set[str]] = {}
     for raw_item in items:
         item = {
             key: _clean_import_strings(value, f"production[{raw_item.get('id')!r}].{key}")
@@ -1161,7 +1211,9 @@ def _prepare_import(
         if org_id:
             organizations[org_id] = _organization(org, organizations.get(org_id, ({}, None))[0])
         credits: list[PreparedCredit] = [*_add_people(item, people)]
-        detail_credits, detail = _add_detail_people(raw_item, people, alias_owners)
+        detail_credits, detail = _add_detail_people(
+            raw_item, people, alias_owners, profile_matches if archived else None
+        )
         credits.extend(detail_credits)
         payload = validate_payload(
             EntityType.PRODUCTION,
@@ -1176,17 +1228,21 @@ def _prepare_import(
             validate_payload(EntityType.ORGANIZATION, payload, complete=True),
             canonical_url(url) if url else None,
         )
+    _set_profile_matches(people, profile_matches, alias_owners)
+    metadata = {"profile_url", "legacy_ids", "matched_legacy_ids"}
     for key, payload in people.items():
         people[key] = validate_payload(
             EntityType.PERSON,
-            {field: value for field, value in payload.items() if field not in {"profile_url", "legacy_ids"}},
+            {field: value for field, value in payload.items() if field not in metadata},
             complete=True,
         )
         if payload.get("profile_url"):
             people[key]["profile_url"] = canonical_url(payload["profile_url"])
         if payload.get("legacy_ids"):
             people[key]["legacy_ids"] = sorted(payload["legacy_ids"])
-    # Register explicitly linked detail identities before accepting their legacy aliases.
+        if payload.get("matched_legacy_ids"):
+            people[key]["matched_legacy_ids"] = sorted(payload["matched_legacy_ids"])
+    # Register detail identities before accepting their legacy aliases.
     people = dict(sorted(people.items(), key=lambda entry: not entry[0].startswith("detail:")))
     return organizations, people, productions, captured_at
 

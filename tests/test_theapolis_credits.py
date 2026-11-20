@@ -128,6 +128,39 @@ def test_alias_claim_does_not_merge_two_preexisting_people(db):
         _import(db, 3, {**legacy, **_detail(_credit(legacy_ids={"directors": 1}))})
 
 
+@pytest.mark.parametrize("existing", ["list_only", "split", "ambiguous"])
+def test_archive_links_only_unambiguous_profile_overlap(db, existing, caplog):
+    session, _ = db
+    url = "https://www.theapolis.de/de/profil/alex"
+    item = {
+        "id": 1,
+        "name": "Macbeth",
+        "directors": [{"id": 4656, "name": "Alex", "profile": {"url": url}}],
+    }
+    key = "detail:profile:130702"
+    credit = _credit("profile:130702", role="Schauspielregie", profile_url=f"{url}/")
+    legacy_id = _import(db, 1, item)["directors:4656"]
+    credits = [credit]
+    if existing == "split":
+        _import(db, 2, {**item, **_detail(_credit("profile:130702", role="Regie"))})
+    elif existing == "ambiguous":
+        credits.append({**credit, "person_id": "profile:130703"})
+    archive_item = {**item, **_detail(*credits)}
+    ids = _import(db, 3, archive_item)
+    assert _import(db, 3, archive_item) == ids
+    members = session.exec(select(ProductionMembership)).all()
+    assert all(member.role == "director" for member in members)
+    if existing == "list_only":
+        assert ids[key] == legacy_id
+        assert [member.person_id for member in members] == [legacy_id]
+        alias = session.exec(select(SourceRecord).where(SourceRecord.record_key == "alias:directors:4656")).one()
+        assert alias.entity_id == legacy_id
+    else:
+        assert ids[key] != legacy_id
+        assert len(members) == (2 if existing == "split" else 3)
+        assert "profile overlap" in caplog.text
+
+
 def test_alias_registered_before_legacy_listing_exists(db):
     detail_id = _import(db, 1, {"id": 2, "name": "Other", **_detail(_credit(legacy_ids={"creators": 9}))})["detail:9"]
     legacy = {"id": 1, "name": "Play", "creators": [{"id": 9, "name": "Alex"}]}

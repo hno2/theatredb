@@ -185,9 +185,11 @@ Different credit names for the same numeric profile ID retain one person;
 each observed name stays in the production's source context and raw evidence.
 The importer logs these variants rather than aborting. Existing nonempty
 canonical person names remain unchanged.
-Legacy director/creator rows are not automatically merged with profile people
-without verified aliases. Some old and profile-backed records may therefore
-require an explicit reviewed merge.
+Archive imports link a legacy director/creator ID to a numeric profile ID when
+both feeds agree on the production, credit name, role and Theapolis profile URL
+without ambiguity. Explicit feed aliases take precedence. Existing separate
+people are logged for a reviewed merge, not automatically merged. No new
+download is needed for this matching when the archive already has both feeds.
 The legacy `download --json` interchange export remains director/creator-only;
 use the archive workflow for full API credits.
 

@@ -1,6 +1,7 @@
 """Accepted Theapolis records and explicit migration of old source proposals."""
 
 import datetime as dt
+import logging
 import uuid
 from typing import TypedDict
 
@@ -42,6 +43,7 @@ from backend.scd2 import add_scd2_events
 from backend.user_management import get_session, init_db
 
 ACTOR = "theapolis"
+LOG = logging.getLogger(__name__)
 
 
 class ImportRecord(TypedDict):
@@ -358,7 +360,12 @@ def _batch_identities(
 ) -> tuple[dict[str, SourceRecord], dict[str, set[uuid.UUID]], dict[uuid.UUID, uuid.UUID]]:
     keys = [record["record_key"] for record in records]
     external_ids = [record["context"]["external_id"] for record in records if record["context"].get("external_id")]
-    external_ids.extend(alias for record in records for alias in record["context"].get("legacy_ids", []))
+    external_ids.extend(
+        alias
+        for record in records
+        for field in ("legacy_ids", "matched_legacy_ids")
+        for alias in record["context"].get(field, [])
+    )
     observations = session.exec(
         select(SourceRecord)
         .where(
@@ -404,16 +411,45 @@ def _mapped_identity(
 def _detail_person_records(kind: EntityType, records: list[ImportRecord]) -> list[ImportRecord]:
     if kind != EntityType.PERSON:
         return records
+    fields = {"legacy_ids", "matched_legacy_ids"}
     return [
         {
             **record,
-            "incoming": {field: value for field, value in record["incoming"].items() if field != "legacy_ids"},
-            "context": {**record["context"], "legacy_ids": record["incoming"]["legacy_ids"]},
+            "incoming": {field: value for field, value in record["incoming"].items() if field not in fields},
+            "context": {**record["context"], **{field: record["incoming"][field] for field in aliases}},
         }
-        if record["record_key"].startswith("id:detail:") and "legacy_ids" in record["incoming"]
+        if record["record_key"].startswith("id:detail:") and (aliases := fields & record["incoming"].keys())
         else record
         for record in records
     ]
+
+
+def _accept_profile_matches(
+    incoming: ImportRecord,
+    by_key: dict[str, SourceRecord],
+    by_external: dict[str, set[uuid.UUID]],
+    detail_owners: dict[uuid.UUID, set[str]],
+) -> ImportRecord:
+    if "matched_legacy_ids" not in incoming["context"]:
+        return incoming
+    context = dict(incoming["context"])
+    aliases = context.pop("matched_legacy_ids")
+    key = incoming["record_key"]
+    owners = set().union(*(by_external.get(external_id, set()) for external_id in [context["external_id"], *aliases]))
+    if (
+        len(owners) > 1
+        or any(detail_owners.get(owner, set()) - {key} for owner in owners)
+        or any(
+            (record := by_key.get(f"alias:{alias}")) is not None and record.payload.get("detail_record_key") != key
+            for alias in aliases
+        )
+    ):
+        LOG.warning(
+            "Theapolis profile overlap for %s conflicts with existing mappings %s; review manually", key, aliases
+        )
+    else:
+        context["legacy_ids"] = aliases
+    return {**incoming, "context": context}
 
 
 def _register_person_aliases(
@@ -454,7 +490,9 @@ def _detail_owners(
     session: Session, source_id: uuid.UUID, records: list[ImportRecord], ids: set[uuid.UUID]
 ) -> dict[uuid.UUID, set[str]]:
     owners: dict[uuid.UUID, set[str]] = {}
-    if ids and any(record["context"].get("legacy_ids") for record in records):
+    if ids and any(
+        record["context"].get("legacy_ids") or record["context"].get("matched_legacy_ids") for record in records
+    ):
         for identity, key in session.exec(
             select(SourceRecord.entity_id, SourceRecord.record_key).where(
                 SourceRecord.source_id == source_id,
@@ -585,6 +623,7 @@ def accept_records(
     changed = set()
 
     def accept(incoming: ImportRecord) -> uuid.UUID:
+        incoming = _accept_profile_matches(incoming, by_key, by_external, detail_owners)
         key, payload = incoming["record_key"], incoming["incoming"]
         record = by_key.get(key)
         identity = _mapped_identity(kind, incoming, record, by_external, resolved)
