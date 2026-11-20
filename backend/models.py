@@ -325,6 +325,7 @@ class Organization(SourceMixin, DomainModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str = Field(index=True)
     type: str | None = None  # e.g. "theater", "opera house", "festival", "venue", "company", etc.
+    tags: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     url: str | None = None
     url_plays: str | None = None
     street: str | None = None

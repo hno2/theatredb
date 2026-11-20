@@ -19,7 +19,7 @@ from backend import db, user_management
 def test_alembic_config_uses_pyproject_outside_project(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     config = user_management.alembic_config()
-    assert ScriptDirectory.from_config(config).get_current_head() == "0007"
+    assert ScriptDirectory.from_config(config).get_current_head() == "0009"
     with create_engine("sqlite://").connect() as connection:
         assert user_management.alembic_config(connection).attributes["connection"] is connection
 
@@ -32,7 +32,7 @@ def test_alembic_cli_discovers_pyproject(monkeypatch) -> None:
     monkeypatch.setattr(cli, "run_cmd", run_cmd)
     cli.main(["heads"])
     config = run_cmd.call_args.args[0]
-    assert ScriptDirectory.from_config(config).get_current_head() == "0007"
+    assert ScriptDirectory.from_config(config).get_current_head() == "0009"
 
 
 @pytest.fixture
@@ -104,10 +104,12 @@ def test_baseline_upgrade_preserves_data_and_indexes_round_trip(postgres) -> Non
     with postgres.begin() as connection:
         command.upgrade(user_management.alembic_config(connection), "0001")
         connection.execute(text("INSERT INTO award (id, name) VALUES (gen_random_uuid(), 'kept')"))
+        connection.execute(text("INSERT INTO organization (id, name) VALUES (gen_random_uuid(), 'kept theatre')"))
     user_management.init_db()
     _assert_at_head_without_drift(postgres)
     with postgres.begin() as connection:
         assert connection.execute(text("SELECT name FROM award")).scalar_one() == "kept"
+        assert connection.execute(text("SELECT name, tags FROM organization")).one() == ("kept theatre", [])
         config = user_management.alembic_config(connection)
         command.downgrade(config, "0001")
         command.upgrade(config, "head")
