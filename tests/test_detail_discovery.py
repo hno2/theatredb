@@ -7,8 +7,9 @@ from sqlmodel import Session, SQLModel, create_engine
 from streamlit.testing.v1 import AppTest
 
 from backend import entity_management
+from backend.data_quality import apply_quality_action
 from backend.models import Organization, Person, Production
-from frontend.views import discovery
+from frontend.views import discovery, organization
 
 DETAIL_PAGE = Path(__file__).resolve().parents[1] / "frontend" / "views" / "detail.py"
 
@@ -28,7 +29,7 @@ def directory(monkeypatch) -> Mock:
 def test_detail_entry_shows_links_without_dropdowns_or_open_button(directory) -> None:
     app = AppTest.from_file(DETAIL_PAGE).run()
     assert not app.exception
-    directory.assert_called_once_with(Organization, "", limit=12, offset=0)
+    directory.assert_called_once_with(Organization, "", limit=12, offset=0, verified_only=True)
     assert not app.selectbox
     assert not app.button
     assert any("?kind=organization&amp;id=theatre" in element.value for element in app.markdown)
@@ -61,7 +62,7 @@ def test_production_directory_has_direct_links_and_theatre_context(directory) ->
     app.query_params["kind"] = "production"
     app.run()
     assert not app.exception
-    directory.assert_called_once_with(Production, "", limit=12, offset=0)
+    directory.assert_called_once_with(Production, "", limit=12, offset=0, verified_only=False)
     html = "\n".join(element.value for element in app.markdown)
     assert "?kind=production&amp;id=production" in html
     assert "?kind=organization&amp;id=theatre" in html
@@ -76,21 +77,21 @@ def test_directory_search_pagination_and_changed_search_reset(directory) -> None
     assert [widget.value for widget in app.pagination] == [1, 1]
     app.pagination[0].set_value(3).run()
     assert not app.exception
-    directory.assert_called_with(Organization, "", limit=12, offset=24)
+    directory.assert_called_with(Organization, "", limit=12, offset=24, verified_only=True)
     assert [widget.value for widget in app.pagination] == [3, 3]
     app.pagination[1].set_value(2).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=12)
+    directory.assert_called_with(Organization, "", limit=12, offset=12, verified_only=True)
     assert [widget.value for widget in app.pagination] == [2, 2]
     app.pagination[1].set_value(3).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=24)
+    directory.assert_called_with(Organization, "", limit=12, offset=24, verified_only=True)
     app.text_input[0].set_value("  Wien  ").run()
-    directory.assert_called_with(Organization, "Wien", limit=12, offset=0)
+    directory.assert_called_with(Organization, "Wien", limit=12, offset=0, verified_only=True)
     assert [widget.value for widget in app.pagination] == [1, 1]
     app.pagination[0].set_value(3).run()
     directory.return_value = (directory.return_value[0], 1)
     app.run()
     assert not app.exception
-    directory.assert_called_with(Organization, "Wien", limit=12, offset=0)
+    directory.assert_called_with(Organization, "Wien", limit=12, offset=0, verified_only=True)
     assert not app.pagination
 
 
@@ -102,12 +103,12 @@ def test_large_directory_keeps_pagination_bounded_and_last_page_reachable(direct
     assert all(widget.num_pages == 100 for widget in app.pagination)
     assert all(widget.proto.max_visible_pages == 7 for widget in app.pagination)
     app.pagination[0].set_value(100).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=1188)
+    directory.assert_called_with(Organization, "", limit=12, offset=1188, verified_only=True)
     assert [widget.value for widget in app.pagination] == [100, 100]
     app.pagination[0].set_value(99).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=1176)
+    directory.assert_called_with(Organization, "", limit=12, offset=1176, verified_only=True)
     app.pagination[1].set_value(1).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=0)
+    directory.assert_called_with(Organization, "", limit=12, offset=0, verified_only=True)
     assert [widget.value for widget in app.pagination] == [1, 1]
 
 
@@ -115,11 +116,51 @@ def test_empty_directory_and_search_are_explicit(directory) -> None:
     directory.return_value = ([], 0)
     app = AppTest.from_file(DETAIL_PAGE).run()
     assert not app.exception
-    assert app.info[0].value == "Noch keine Einträge erfasst."
+    assert "Keine geprüften Theater gefunden" in app.info[0].value
     app.text_input[0].set_value("Hamlet").run()
-    assert "Keine Einträge gefunden" in app.info[0].value
+    assert "Ändere die Suche" in app.info[0].value
     app.radio[0].set_value("person").run()
-    directory.assert_called_with(Person, "", limit=12, offset=0)
+    directory.assert_called_with(Person, "", limit=12, offset=0, verified_only=False)
+
+
+def test_direct_theatre_link_respects_filter_without_exposing_quality(monkeypatch, tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'profiles.db'}")
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("backend.user_management._get_engine", lambda: engine)
+    with Session(engine, expire_on_commit=False) as session:
+        theatres = [Organization(name=name) for name in ("Unverified", "Verified", "General update")]
+        session.add_all(theatres)
+        session.commit()
+    unchecked, checked, flagged = theatres
+    for theatre, scope in ((checked, "productions"), (flagged, "general")):
+        apply_quality_action(theatre.id, "verify_general", actor_id="editor", evidence="Audit citation")
+        apply_quality_action(
+            theatre.id, "flag_update", actor_id="editor", update_scope=scope, update_reason="Audit note"
+        )
+    try:
+        rows, total = entity_management.browse_entities(Organization, limit=1, verified_only=True)
+        assert total == 1
+        assert [row["name"] for row in rows] == [checked.name]
+        for theatre in (unchecked, flagged, checked):
+            app = AppTest.from_file(DETAIL_PAGE)
+            app.query_params.update(kind="organization", id=str(theatre.id))
+            app.run()
+            assert not app.exception
+            if theatre is checked:
+                assert app.title[0].value == checked.name
+                assert not any(item.value == "Datenqualität" for item in app.subheader)
+            else:
+                assert not app.title
+                assert "Kein passendes Theater" in app.info[0].value
+        app = AppTest.from_file(DETAIL_PAGE)
+        app.query_params.update(kind="organization", id=str(unchecked.id), verified_only="0")
+        app.run()
+        assert not app.exception
+        assert app.title[0].value == unchecked.name
+        assert 'href="detail?verified_only=0"' in app.markdown[0].value
+    finally:
+        organization.load_organization_profile.clear()
+        engine.dispose()
 
 
 def test_browse_query_is_bounded_searchable_literal_and_detached(monkeypatch) -> None:

@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import streamlit as st
 from streamlit.user_info import UserInfoProxy
 
+from frontend.views.settings import render_verified_toggle
+
 
 def _get_effective_user() -> UserInfoProxy | SimpleNamespace:
     real_user = st.user
@@ -46,4 +48,8 @@ pages = {
     ],
 }
 nav = st.navigation(pages)
+if nav.url_path in {"", "detail"}:
+    with st.sidebar:
+        st.subheader("Einstellungen")
+        render_verified_toggle("_sidebar_verified_only")
 nav.run()

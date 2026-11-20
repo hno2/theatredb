@@ -32,9 +32,9 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
 
 @st.cache_data(ttl=30, max_entries=64)
-def load_organization_profile(entity_id: str) -> dict:
+def load_organization_profile(entity_id: str, *, verified_only: bool = False) -> dict:
     """Reuse detached public profile data across reruns, for at most 30 seconds."""
-    return get_organization_profile(entity_id)
+    return get_organization_profile(entity_id, verified_only=verified_only)
 
 
 def parse_date(value: str | None) -> date | None:
@@ -501,7 +501,6 @@ def render_organization(data: dict) -> None:
         history.append(f"Geschlossen {data['closed_year']}")
     if history:
         st.caption(" · ".join(history))
-    render_quality_summary(data)
     productions = data.get("productions") or []
     dated, _ = production_dates(productions)
     sources = data.get("sources") or []

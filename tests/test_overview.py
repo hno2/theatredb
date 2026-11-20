@@ -1,6 +1,7 @@
-import datetime as dt
 import json
 import math
+from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 
@@ -8,11 +9,13 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 from streamlit.testing.v1 import AppTest
 
-from backend import config, user_management
-from backend.models import Organization, OrganizationSeasonCheck, Person, Production
+from backend import user_management
+from backend.data_quality import apply_quality_action
+from backend.models import Organization, Person, Production
 from frontend.views import overview
 
 OVERVIEW_SCRIPT = "from frontend.views.overview import render_overview\nrender_overview()"
+APP = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
 HomepageFixture = tuple[AppTest, list[Organization]]
 
 
@@ -62,29 +65,28 @@ def test_map_supports_single_shared_and_multiple_locations(positions: list[tuple
 
 
 @pytest.fixture
-def homepage(monkeypatch: pytest.MonkeyPatch) -> HomepageFixture:
+def homepage(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Iterator[HomepageFixture]:
     organizations = [
         Organization(name="Bühne [Mitte]", city="Berlin", country="Deutschland", lat=52.5, lon=13.4),
         Organization(name="Burgtheater", city="Wien", country="Österreich", lat=48.2, lon=16.4),
         Organization(name="Ohne Position", city="Berlin", country="Deutschland"),
     ]
 
-    def matching_entities(_model, search):
-        return [
-            item
-            for item in organizations
-            if any(search.casefold() in (value or "").casefold() for value in (item.name, item.city, item.country))
-        ]
-
-    monkeypatch.setattr(overview, "list_matching_entities", matching_entities)
-    monkeypatch.setattr(overview, "season_checks_many", lambda ids: {})
-    monkeypatch.setattr(overview, "organization_coverage", lambda: (3, 2, 2, [("Berlin", "Deutschland", 2)]))
+    engine = create_engine(f"sqlite:///{tmp_path / 'homepage.db'}")
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(user_management, "_get_engine", lambda: engine)
+    with Session(engine, expire_on_commit=False) as session:
+        session.add_all(organizations)
+        session.commit()
     monkeypatch.setattr(
         overview,
         "count_entities_many",
         lambda *models: {model: {Production: 1234, Person: 27}.get(model, 0) for model in models},
     )
-    return AppTest.from_string(OVERVIEW_SCRIPT), organizations
+    app = AppTest.from_string(OVERVIEW_SCRIPT)
+    app.query_params["verified_only"] = "0"
+    yield app, organizations
+    engine.dispose()
 
 
 def test_homepage_metrics_and_literal_search(homepage: HomepageFixture) -> None:
@@ -102,7 +104,7 @@ def test_homepage_metrics_and_literal_search(homepage: HomepageFixture) -> None:
     app.text_input[0].set_value("[Mitte]").run()
     assert not app.exception
     assert list(app.dataframe[0].value["name"]) == ["Bühne [Mitte]"]
-    app.text_input[0].set_value("öSTERREICH").run()
+    app.text_input[0].set_value("ÖSTERREICH").run()
     assert list(app.dataframe[0].value["name"]) == ["Burgtheater"]
     app.text_input[0].set_value("Berlin").run()
     assert len(app.dataframe[0].value) == 2
@@ -129,7 +131,7 @@ def test_selected_marker_has_internal_detail_link(homepage: HomepageFixture, mon
         "views/detail.py",
         label="Theater ansehen",
         icon=":material/arrow_forward:",
-        query_params={"kind": "organization", "id": selected_id},
+        query_params={"kind": "organization", "id": selected_id, "verified_only": "0"},
     )
     assert chart.call_args.kwargs["on_select"] == "rerun"
     link.reset_mock()
@@ -139,14 +141,14 @@ def test_selected_marker_has_internal_detail_link(homepage: HomepageFixture, mon
 
 
 def test_empty_homepage(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(overview, "list_matching_entities", lambda *args: [])
-    monkeypatch.setattr(overview, "organization_coverage", lambda: (0, 0, 0, []))
+    monkeypatch.setattr(overview, "list_matching_entities", lambda *args, **kwargs: [])
+    monkeypatch.setattr(overview, "organization_coverage", lambda **kwargs: (0, 0, 0, []))
     monkeypatch.setattr(overview, "count_entities_many", lambda *models: dict.fromkeys(models, 0))
     app = AppTest.from_string(OVERVIEW_SCRIPT).run()
     assert not app.exception
     assert all(metric.value == "0" for metric in app.metric)
     assert not app.dataframe
-    assert any("Noch keine Theater erfasst" in message.value for message in app.info)
+    assert any("Keine geprüften Theater gefunden" in message.value for message in app.info)
 
 
 def test_homepage_map_and_directory_are_unpaginated(monkeypatch, tmp_path) -> None:
@@ -162,7 +164,9 @@ def test_homepage_map_and_directory_are_unpaginated(monkeypatch, tmp_path) -> No
             ]
         )
         session.commit()
-    app = AppTest.from_string(OVERVIEW_SCRIPT).run()
+    app = AppTest.from_string(OVERVIEW_SCRIPT)
+    app.query_params["verified_only"] = "0"
+    app.run()
     assert not app.exception
     assert not app.pagination
     names = list(app.dataframe[0].value["name"])
@@ -181,8 +185,11 @@ def test_homepage_map_and_directory_are_unpaginated(monkeypatch, tmp_path) -> No
 
 def test_shared_map_position_links_every_theater(homepage: HomepageFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     app, organizations = homepage
-    organizations[1].lat = organizations[0].lat
-    organizations[1].lon = organizations[0].lon
+    with user_management.get_session() as session:
+        theatre = session.get(Organization, organizations[1].id)
+        assert theatre is not None
+        theatre.lat, theatre.lon = organizations[0].lat, organizations[0].lon
+        session.commit()
     monkeypatch.setattr(
         overview.st,
         "pydeck_chart",
@@ -201,55 +208,44 @@ def test_shared_map_position_links_every_theater(homepage: HomepageFixture, monk
 def test_quality_filter_keeps_map_directory_and_missing_positions_consistent(
     homepage: HomepageFixture,
 ) -> None:
-    app, organizations = homepage
-    organizations[0].general_verified_at = dt.datetime.now(dt.UTC)
-    organizations[0].general_verified_by = "editor"
-    organizations[0].general_verification_evidence = "Source"
-    organizations[2].general_verified_at = dt.datetime.now(dt.UTC)
-    organizations[2].general_verified_by = "editor"
-    organizations[2].general_verification_evidence = "Source"
-    app.run()
-    app.selectbox(key="overview_quality").set_value("general").run()
+    _, organizations = homepage
+    for index in (0, 2):
+        apply_quality_action(organizations[index].id, "verify_general", actor_id="editor", evidence="Source")
+    app = AppTest.from_file(APP).run()
     assert not app.exception
+    assert len(app.toggle) == 2
+    assert all(toggle.value for toggle in app.toggle)
+    assert app.metric[0].value == "2"
     assert set(app.dataframe[0].value["name"]) == {"Bühne [Mitte]", "Ohne Position"}
+    assert list(app.dataframe[0].value.columns) == ["name", "city", "country", "detail"]
+    assert not app.get("badge")
     layer = json.loads(app.get("deck_gl_json_chart")[0].proto.json)["layers"][0]
-    assert layer["getFillColor"] == "@@=color"
+    assert layer["getFillColor"] == [139, 58, 50, 200]
     assert [row["name"] for row in layer["data"]] == ["Bühne [Mitte]"]
-    assert layer["data"][0]["color"] == [37, 99, 235, 200]
     app.text_input[0].set_value("Wien").run()
     assert not app.exception
     assert not app.dataframe
 
 
-def test_pending_season_filter_includes_older_checks_and_keeps_source_review_separate(
-    homepage: HomepageFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app, organizations = homepage
-    current = OrganizationSeasonCheck(
-        organization_id=organizations[0].id,
-        season_start_year=config.CURRENT_SEASON_START_YEAR,
-        checked_at=dt.datetime.now(dt.UTC),
-        checked_by="editor",
-        evidence="Programme",
-    )
-    older = OrganizationSeasonCheck(
-        organization_id=organizations[1].id,
-        season_start_year=config.CURRENT_SEASON_START_YEAR - 1,
-        checked_at=dt.datetime.now(dt.UTC),
-        checked_by="editor",
-        evidence="Old programme",
-    )
-    monkeypatch.setattr(
-        overview,
-        "season_checks_many",
-        lambda ids: {organizations[0].id: [current], organizations[1].id: [older]},
-    )
-    app.run()
-    app.toggle(key="overview_pending_season").set_value(True).run()
+def test_toggles_sync_and_carry_filter_to_public_directory(homepage: HomepageFixture) -> None:
+    app = AppTest.from_file(APP).run()
     assert not app.exception
-    assert set(app.dataframe[0].value["name"]) == {"Burgtheater", "Ohne Position"}
-    assert all("ungeprüft" in label for label in app.dataframe[0].value["quality_label"])
-    app.text_input[0].set_value("Bühne").run()
-    assert not app.exception
+    assert all(toggle.value for toggle in app.toggle)
     assert not app.dataframe
+    app.toggle(key="_map_verified_only").set_value(False).run()
+    assert not app.exception
+    assert not app.toggle(key="_sidebar_verified_only").value
+    assert len(app.dataframe[0].value) == 3
+    assert all("verified_only=0" in link for link in app.dataframe[0].value["detail"])
+    app.switch_page("views/detail.py").run()
+    assert not app.exception
+    assert not app.toggle(key="_sidebar_verified_only").value
+    assert any("Burgtheater" in element.value for element in app.markdown)
+    app.toggle(key="_sidebar_verified_only").set_value(True).run()
+    assert any("Keine geprüften Theater" in message.value for message in app.info)
+    app.switch_page("views/overview.py").run()
+    assert not app.exception
+    assert all(toggle.value for toggle in app.toggle)
+    assert not app.dataframe
+    app.toggle(key="_sidebar_verified_only").set_value(False).run()
+    assert not app.toggle(key="_map_verified_only").value

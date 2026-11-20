@@ -1,3 +1,5 @@
+from urllib.parse import urlencode
+
 import streamlit as st
 
 from backend.config import DISCOVERY_KINDS
@@ -6,11 +8,14 @@ from frontend.views.discovery import render_discovery
 from frontend.views.organization import load_organization_profile, render_organization
 from frontend.views.person import render_person
 from frontend.views.production import render_production
+from frontend.views.settings import theatre_filter_link_params, verified_only
 
 params = st.query_params
 if params.get("id"):
+    filter_query = urlencode(theatre_filter_link_params())
+    directory_url = f"detail?{filter_query}" if filter_query else "detail"
     st.markdown(
-        '<a href="detail" target="_self">Zur Übersicht: Theater und Produktionen</a>',
+        f'<a href="{directory_url}" target="_self">Zur Übersicht: Theater und Produktionen</a>',
         unsafe_allow_html=True,
     )
     kind = params.get("kind")
@@ -20,12 +25,15 @@ if params.get("id"):
         _, model = DISCOVERY_KINDS[kind]
         try:
             data = (
-                load_organization_profile(params["id"])
+                load_organization_profile(params["id"], verified_only=verified_only())
                 if kind == "organization"
                 else get_entity_graph(model, params["id"])
             )
         except ValueError:
-            st.error("Not found")
+            if kind == "organization" and verified_only():
+                st.info("Kein passendes Theater gefunden. Deaktiviere „Nur geprüfte Theater“ in den Einstellungen.")
+            else:
+                st.error("Not found")
             st.stop()
         else:
             if kind == "production":

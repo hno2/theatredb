@@ -166,10 +166,22 @@ def _matching_entities[ModelT: SQLModel](
     return stmt.order_by(label, identifier)
 
 
-def list_matching_entities[ModelT: SQLModel](model_cls: type[ModelT], search: str) -> list[ModelT]:
+def list_matching_entities[ModelT: SQLModel](
+    model_cls: type[ModelT], search: str, *, filters: Sequence[ColumnElement[bool]] = ()
+) -> list[ModelT]:
     """Return all entities matching a directory search."""
     with get_session() as session:
-        return list(session.exec(_matching_entities(model_cls, search)).all())
+        return list(session.exec(_matching_entities(model_cls, search, filters)).all())
+
+
+def verified_organization_filter() -> ColumnElement[bool]:
+    """Match theatres whose general information was checked and is not flagged for update."""
+    scope = col(Organization.update_scope)
+    return (
+        col(Organization.general_verified_at).is_not(None)
+        & col(Organization.general_verification_evidence).is_not(None)
+        & (scope.is_(None) | (scope == "productions"))
+    )
 
 
 def entity_page[ModelT: SQLModel](
@@ -202,15 +214,16 @@ def linked_sources(session: Session, kind: EntityType, entity_id: UUID) -> list[
     return [(link, name) for link, name in session.exec(stmt)]
 
 
-def organization_coverage() -> tuple[int, int, int, list[tuple[str, str, int]]]:
+def organization_coverage(*, verified_only: bool = False) -> tuple[int, int, int, list[tuple[str, str, int]]]:
     """Aggregate directory and map coverage without loading organization records."""
     city = func.trim(func.coalesce(Organization.city, ""))
     country = func.trim(func.coalesce(Organization.country, ""))
     mapped = col(Organization.lat).between(-90, 90) & col(Organization.lon).between(-180, 180)
+    filters = (verified_organization_filter(),) if verified_only else ()
     locations = (
         select(city.label("city"), country.label("country"), func.count().label("entries"))
         .select_from(Organization)
-        .where(func.length(city) > 0)
+        .where(func.length(city) > 0, *filters)
         .group_by(city, country)
         .subquery()
     )
@@ -218,7 +231,9 @@ def organization_coverage() -> tuple[int, int, int, list[tuple[str, str, int]]]:
         total, positioned, places = session.exec(
             select(
                 func.count(), func.count().filter(mapped), select(func.count()).select_from(locations).scalar_subquery()
-            ).select_from(Organization)
+            )
+            .select_from(Organization)
+            .where(*filters)
         ).one()
         top = [
             (city_name, country_name, entries)
@@ -290,14 +305,15 @@ def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
         ]
 
 
-def get_organization_profile(entity_id: str) -> dict[str, Any]:
+def get_organization_profile(entity_id: str, *, verified_only: bool = False) -> dict[str, Any]:
     """Load theatre display/filter data in batches, without following reverse relationships."""
     with get_session() as session:
         resolved_id = resolve_id(session, EntityType.ORGANIZATION, UUID(entity_id))
         productions = selectinload(cast(InstrumentedAttribute, Organization.productions))
+        filters = (verified_organization_filter(),) if verified_only else ()
         organization = session.exec(
             select(Organization)
-            .where(Organization.id == resolved_id)
+            .where(Organization.id == resolved_id, *filters)
             .options(
                 raiseload("*"),
                 productions.selectinload(cast(InstrumentedAttribute, Production.memberships)).joinedload(
@@ -364,11 +380,14 @@ def browse_entities(
     *,
     limit: int = 12,
     offset: int = 0,
+    verified_only: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     """Fetch a bounded discovery page with theatre context and a matching count."""
     if not 1 <= limit <= 100 or offset < 0:
         raise ValueError("Invalid discovery page bounds")
     stmt = select(model_cls)
+    if model_cls is Organization and verified_only:
+        stmt = stmt.where(verified_organization_filter())
     if model_cls is Production:
         stmt = stmt.outerjoin(Organization)
     query = query.strip()

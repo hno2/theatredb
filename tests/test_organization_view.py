@@ -516,10 +516,10 @@ def test_detail_reuses_cached_organization_profile(profile: ProfileFixture, monk
         app.run()
         assert not app.exception
         assert app.title[0].value == data["name"]
-        fetch.assert_called_once_with(data["id"])
-        cached = organization.load_organization_profile(data["id"])
+        fetch.assert_called_once_with(data["id"], verified_only=True)
+        cached = organization.load_organization_profile(data["id"], verified_only=True)
         cached["productions"].clear()
-        assert len(organization.load_organization_profile(data["id"])["productions"]) == 4
+        assert len(organization.load_organization_profile(data["id"], verified_only=True)["productions"]) == 4
         organization.load_organization_profile.clear()
         app.run()
         assert not app.exception

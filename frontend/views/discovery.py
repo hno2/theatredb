@@ -4,6 +4,7 @@ from backend.config import DISCOVERY_KINDS
 from backend.entity_management import browse_entities
 from frontend.views.helpers import entity_link
 from frontend.views.organization import render_production_card
+from frontend.views.settings import verified_only
 
 PAGE_SIZE = 12
 
@@ -40,9 +41,12 @@ def render_discovery(initial_kind: str = "organization") -> None:
         "Person suchen" if kind == "person" else "Titel, Theater oder Ort suchen",
         key=f"discovery_search_{kind}",
     ).strip()
-    page_key = f"discovery_page_{kind}_{query}"
+    only_verified = kind == "organization" and verified_only()
+    page_key = f"discovery_page_{kind}_{only_verified}_{query}"
     page = st.session_state.get(page_key, 1)
-    entries, total = browse_entities(model, query, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
+    entries, total = browse_entities(
+        model, query, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE, verified_only=only_verified
+    )
     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     if page > pages:
         st.session_state[page_key] = pages
@@ -53,9 +57,16 @@ def render_discovery(initial_kind: str = "organization") -> None:
     )
     render_pagination(page, pages, page_key, "top")
     if not entries:
-        st.info(
-            "Keine Einträge gefunden. Versuche einen anderen Suchbegriff." if query else "Noch keine Einträge erfasst."
-        )
+        if only_verified:
+            st.info(
+                "Keine geprüften Theater gefunden. Ändere die Suche oder deaktiviere den Filter in den Einstellungen."
+            )
+        else:
+            st.info(
+                "Keine Einträge gefunden. Versuche einen anderen Suchbegriff."
+                if query
+                else "Noch keine Einträge erfasst."
+            )
     for entry in entries:
         if kind == "production":
             render_production_card(entry, compact=True)

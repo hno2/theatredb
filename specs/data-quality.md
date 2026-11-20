@@ -5,8 +5,8 @@ SCD2-audited assessments, and grouped assessment choices during merges.
 
 ## Goal
 
-Let editors explicitly assess an organization's data and make that assessment
-visible on the overview map, in the directory, and on the theatre profile.
+Let editors explicitly assess an organization's data. The public theatre filter
+uses the general-information assessment without showing the quality metadata.
 Answer three different questions without inventing a misleading quality score:
 
 1. Has the general information been checked?
@@ -23,7 +23,7 @@ assessments. Missing assessments mean unknown, not incorrect.
   having many productions, or filling particular fields.
 - General-information verification, history coverage, and season freshness are
   independent. History coverage can be recorded before general information is
-  verified; that alone does not produce a green map marker.
+  verified; history alone does not qualify a theatre for the public filter.
 - Production-history completeness means the list of productions is complete for
   the declared seasons, not that every cast, credit, or descriptive field is
   complete.
@@ -156,9 +156,9 @@ retain history coverage and season checks.
 
 ## Derived display states
 
-### Map colour
+### Editorial quality states
 
-Use the following precedence, shared by every display:
+Use the following precedence for the editorial assessment summary:
 
 | Priority | Condition | German label | RGB |
 | --- | --- | --- | --- |
@@ -166,11 +166,6 @@ Use the following precedence, shared by every display:
 | 2 | General verified and history coverage confirmed | Allgemeine Angaben und Historie geprüft | `0, 122, 94` |
 | 3 | General verified | Allgemeine Angaben geprüft | `37, 99, 235` |
 | 4 | Otherwise | Allgemeine Angaben noch ungeprüft | `107, 114, 128` |
-
-Preserve the current map's opacity and selection/highlight behaviour. Marker
-colour describes editorial coverage, not theatre quality or significance.
-Green does not imply current-season freshness or lifetime coverage. Legend and
-tooltip must make that distinction explicit.
 
 Never use an unqualified "full history" or "complete data" label. Display
 **Produktionshistorie vollständig: 1990/91–2025/26** for a confirmed range.
@@ -195,59 +190,18 @@ hiding the flag or discarding the historical check.
 
 ## Public interface
 
-### Overview map and selected-location cards
+**Nur geprüfte Theater** is on by default. The toggle above the map and its
+counterpart under **Einstellungen** in the sidebar share one setting across
+public theatre pages. The map, directories, theatre counts, and direct profile
+links show only organizations whose general information was checked and is not
+flagged for a general update. A production-only update flag, history
+assessment, or season check does not change general verification.
 
-- Replace the fixed `ScatterplotLayer` fill colour with the derived per-record
-  colour. Preserve layer ID `theaters`, coordinates, sizing, click behaviour,
-  and links.
-- Add a visible legend explaining all four colours and the separate season
-  indicator. Include text labels; colour cannot be the only status cue.
-- Tooltip shows theatre name/city, general-verification state/date, history
-  range or unknown state, current-season check state/date, and any update reason.
-- Selected-location cards show the same short quality and season labels.
-- Keep all co-located organizations accessible; each card shows its own state.
-  Do not aggregate conflicting assessments into one invented site assessment.
-- Markers with identical coordinates can still overlap, as today; explain in
-  the legend/help that a visible marker need not represent every organization
-  at that location. Use deterministic layer ordering.
-
-### Search, filters, and directory
-
-Keep the existing name/place/country search. Add:
-
-- A quality filter with "all" plus the four derived colour states.
-- A **Aktuelle Spielzeit noch nicht geprüft** toggle, including both older-only
-  and never-checked organizations.
-
-Combine search and filters with AND. Apply them to one shared dataset before
-deriving map-visible rows; the directory must still include matching
-organizations without coordinates. Keep overall database metrics unchanged
-and identify result counts as filtered.
-
-Add readable quality, history-period, and current-season columns to the
-directory, preserving detail links. Empty filtered results use the existing
-empty-state pattern and must not break map construction.
-
-### Theatre profile
-
-Add a compact read-only **Datenqualität** summary near the profile heading:
-general-verification date, confirmed history range, current Spielzeit/check
-date, and any update reason. Show evidence in the summary or an adjacent
-expandable section. Internal reviewer IDs/usernames must not be exposed on the
-public page. Existing source citations remain separate.
-
-For organizations with no assessments, show clear unknown states, not a warning
-that suggests their data is necessarily wrong.
-
-Example, with a matching explicit production-update flag:
-
-> Allgemeine Angaben geprüft am 19.11.2026
->
-> Produktionshistorie vollständig: 1990/91–2025/26
->
-> Spielzeit 2026/27 noch nicht geprüft
->
-> Aktualisierung nötig: Programm der aktuellen Spielzeit fehlt.
+Search still narrows results by name, place, or country. The directory
+includes matching organizations without coordinates, and map markers share
+one colour. The public UI does not show quality labels, review evidence, or
+update reasons. Existing profile source citations remain separate. Turning the
+toggle off shows all theatres. **Verwaltung** is unaffected.
 
 ## Integration and preservation
 
@@ -267,10 +221,8 @@ Inspect these existing paths before implementing:
 | Merges/deletion | Existing organization merge/delete paths; handle new metadata and season-check references explicitly |
 | Tests | `tests/test_overview.py` and existing organization, profile, merge, audit, and migration tests |
 
-Keep a single shared derivation of quality and freshness, reused by overview
-and profile; do not duplicate precedence rules in UI code. Batch-load season
-checks for directory results; avoid one query per organization. Do not fetch
-full production histories simply to colour the map.
+Use one database predicate for public theatre verification. The overview and
+directories do not need to load season checks or production histories.
 
 Organization merges must not silently broaden verified coverage or choose a
 reviewer arbitrarily. Preserve identical assessments; require explicit choice
@@ -304,11 +256,10 @@ internal reviewer metadata on public pages.
 Implement a few focused cases in existing test files where practical; add a
 small dedicated domain test file only when no suitable file exists.
 
-1. An existing/unassessed organization is grey; all assessment fields remain
-   unknown. Source review/import/production counts do not promote it.
-2. General verification alone is blue. History alone remains grey but its
-   period is displayed. Both together are green. An update flag overrides all
-   combinations with amber without deleting their assessments.
+1. An existing/unassessed organization is excluded by default. Source
+   review/import/production counts do not promote it.
+2. General verification qualifies a theatre unless a general update is
+   flagged. History and season assessments are independent.
 3. Reject blank evidence/reasons, incomplete assessment blocks, reversed
    history ranges, invalid/future season years, and unauthorized writes.
    Failed validation leaves persistent data unchanged.
@@ -321,12 +272,11 @@ small dedicated domain test file only when no suitable file exists.
 6. General edits/imports do not renew assessments or clear flags. Resolving a
    flag leaves checks unchanged. Explicit withdrawal/removal is audited and
    changes only the selected assessment.
-7. Map layer retains ID `theaters`, uses row colours, and includes assessment
-   tooltip data. Search and both filters agree between map and directory;
-   missing coordinates, co-located organizations, and empty results still work.
-8. Profile and directory show the same states, dates, and history period.
-   Public output omits internal reviewer identities; unsafe evidence is never
-   made an executable/clickable link.
+7. Map layer retains ID `theaters` and uses one colour. Search and the
+   synchronized toggle agree between map and directory; missing coordinates,
+   co-located organizations, and empty results still work.
+8. Direct theatre profile links respect the same filter. Public views omit
+   quality labels, review evidence, and reviewer identities.
 9. Merge preserves distinct season checks, explicitly resolves assessment
    conflicts, and cannot silently widen history coverage or clear flags.
    Deletion cannot leave orphaned checks.
@@ -357,13 +307,11 @@ do not write test assessments into production data.
    with the database, then explicitly confirm the season check. No date or
    reviewer needs to be entered.
 3. Use the other segments to confirm general information or a historical
-   coverage range, or to leave a short public update request. These are
+   coverage range, or to flag an update for editors. These are
    independent actions; confirming one does not silently change the others.
-4. To work through unreviewed current-season entries, use the overview's
-   **Aktuelle Spielzeit noch nicht geprüft** filter.
-5. To correct an erroneous check, select the relevant action/season and confirm
+4. To correct an erroneous check, select the relevant action/season and confirm
    withdrawal. The audit trail retains the earlier assessment.
 
 At season rollover, change `CURRENT_SEASON_START_YEAR` in `backend/config.py`
-once for the application. Older season checks remain intact and automatically
-stop matching the current-season filter. No annual data migration is needed.
+once for the application. Older season checks remain intact but no longer
+count as current. No annual data migration is needed.

@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 import streamlit as st
 
 from backend.config import ROLE_LABELS, canonical_role
+from frontend.views.settings import theatre_filter_link_params
 
 
 def role_label(role: str | None) -> str:
@@ -26,7 +27,7 @@ def has_coordinates(lat: float | None, lon: float | None) -> bool:
 
 def entity_link(label: str, kind: str, entity_id: str) -> None:
     """Link to an entity within the current detail page."""
-    query = urlencode({"kind": kind, "id": entity_id})
+    query = urlencode({"kind": kind, "id": entity_id, **theatre_filter_link_params()})
     st.markdown(
         f'<a href="?{escape(query, quote=True)}" target="_self">{escape(label)}</a>',
         unsafe_allow_html=True,
