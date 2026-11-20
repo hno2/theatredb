@@ -12,7 +12,8 @@ administrative tools for imports, review, and data maintenance.
   Production details link back using the theatre name alone, show description
   and cast together, and preview up to five related productions per group (same
   text, theatre, or director). The same-text list expands when more are available.
-  Text credits sit under the title. Related rows open
+  Text credits sit under the title unless grouped with the same person's roles
+  in the cast list. Related rows open
   individual productions; separate links open the theatre or director’s
   production list. The same-text and same-director cards include premiere
   counts and charts below their lists, with production titles on hover.

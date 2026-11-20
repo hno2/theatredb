@@ -38,25 +38,43 @@ def _director_ids(data: dict) -> set[str]:
     }
 
 
-def _render_cast(data: dict) -> None:
-    groups: dict[str, dict[tuple[str, str], str]] = {}
-    for credit in data.get("memberships") or []:
-        person = credit.get("person") or {}
-        if not (person.get("id") and person.get("name")):
-            continue
-        role = role_label(credit.get("role")) or "Mitwirkung"
-        character = credit.get("character") or ""
-        name = entity_anchor(person["name"], "person", person["id"])
-        groups.setdefault(role, {})[str(person["id"]), character] = (
-            f"{name} ({escape(character)})" if character else name
-        )
-    if not groups:
+def _named_credits(credits: list[dict]) -> list[dict]:
+    return [credit for credit in credits if (person := credit.get("person") or {}).get("id") and person.get("name")]
+
+
+def _role_order(role: str) -> tuple[int, str]:
+    return {"Text": 0, "Regie": 1, "Schauspiel": 2}.get(role, 3), role.casefold()
+
+
+def _render_cast(memberships: list[dict], text: dict) -> None:
+    people: dict[str, str] = {}
+    roles: dict[str, dict[str, dict[str, None]]] = {}
+    cast_ids = {credit["person"]["id"] for credit in memberships}
+    text_credits = [
+        credit for credit in _named_credits(text.get("contributions") or []) if credit["person"]["id"] in cast_ids
+    ]
+    for credits, fallback in [(memberships, "Mitwirkung"), (text_credits, "Mitwirkung am Text")]:
+        for credit in credits:
+            person = credit["person"]
+            person_id = person["id"]
+            people[person_id] = person["name"]
+            role = role_label(credit.get("role")) or fallback
+            characters = roles.setdefault(person_id, {}).setdefault(role, {})
+            if character := credit.get("character"):
+                characters[character] = None
+    if not roles:
         return
     st.subheader("Besetzung")
-    lines = [
-        f"<p><strong>{escape(role)}</strong>: {' · '.join(groups[role].values())}</p>"
-        for role in sorted(groups, key=lambda role: (role != "Regie", role != "Schauspiel", role.casefold()))
-    ]
+    lines = []
+    for person_id in sorted(roles, key=lambda pid: (min(map(_role_order, roles[pid])), people[pid].casefold())):
+        labels = []
+        for role, characters in sorted(roles[person_id].items(), key=lambda item: _role_order(item[0])):
+            label = escape(role)
+            if characters:
+                label += f" ({', '.join(map(escape, characters))})"
+            labels.append(label)
+        name = entity_anchor(people[person_id], "person", person_id)
+        lines.append(f"<p><strong>{', '.join(labels)}</strong>: {name}</p>")
     st.markdown("\n".join(lines), unsafe_allow_html=True)
 
 
@@ -210,7 +228,7 @@ def _render_connections(data: dict) -> None:
             _render_related_text_card(related_texts)
 
 
-def _render_text_credit(text: dict, production_title: str) -> None:
+def _render_text_credit(text: dict, production_title: str, cast_ids: set[str]) -> None:
     languages = ", ".join(text.get("languages") or []) or text.get("language")
     published = domain_date_label(text, "published") if text.get("published") else text.get("published_year")
     details = [f"Sprache: {languages}" if languages else "", f"Erschienen: {published}" if published else ""]
@@ -219,27 +237,34 @@ def _render_text_credit(text: dict, production_title: str) -> None:
         person = contribution.get("person") or {}
         role = role_label(contribution.get("role")) or "Mitwirkung am Text"
         if person.get("id") and person.get("name"):
-            credits.setdefault(role, {})[entity_anchor(person["name"], "person", person["id"])] = None
+            if person["id"] not in cast_ids:
+                name = entity_anchor(person["name"], "person", person["id"])
+                credits.setdefault(name, {})[role] = None
         else:
             details.append(f"{role}: Person nicht verknüpft")
 
     title = text["title"]
-    authors = ", ".join(credits.pop("Text", {}))
+    authors = ", ".join(name for name, roles in credits.items() if roles.keys() == {"Text"})
     if title.strip().casefold() != production_title.strip().casefold():
         credit = f"Nach „{escape(title)}“" + (f" von {authors}" if authors else "")
     else:
-        credit = f"Von {authors}" if authors else f"Text: „{escape(title)}“"
-    parts = [credit, *(f"{escape(role)}: {', '.join(names)}" for role, names in credits.items())]
-    st.caption(f"<p>{' · '.join(parts)}</p>", unsafe_allow_html=True, help="\n\n".join(filter(None, details)) or None)
+        credit = f"Von {authors}" if authors else ""
+    parts = [credit] if credit else []
+    for name, roles in credits.items():
+        if roles.keys() != {"Text"}:
+            parts.append(f"{escape(', '.join(sorted(roles, key=_role_order)))}: {name}")
+    help_text = "\n\n".join(filter(None, details)) or None
+    line = " · ".join(parts) or f"Text: „{escape(title)}“"
+    st.caption(f"<p>{line}</p>", unsafe_allow_html=True, help=help_text)
 
 
-def _render_heading(data: dict, organization: dict) -> None:
+def _render_heading(data: dict, organization: dict, memberships: list[dict]) -> None:
     if organization.get("id"):
         back = _organization_anchor(f"← {organization['name']}", organization)
         st.markdown(f"<p>{back}</p>", unsafe_allow_html=True)
     st.title(data["name"])
     if text := data.get("text"):
-        _render_text_credit(text, data["name"])
+        _render_text_credit(text, data["name"], {credit["person"]["id"] for credit in memberships})
     premiere = premiere_label(data)
     facts = [
         f"Premiere: {premiere}" if premiere != "Nicht hinterlegt" else "",
@@ -254,13 +279,9 @@ def _render_heading(data: dict, organization: dict) -> None:
         st.caption(" · ".join(tags))
 
 
-def _render_overview(data: dict) -> None:
+def _render_overview(data: dict, memberships: list[dict]) -> None:
     description = data.get("description")
-    has_cast = any(
-        (person := credit.get("person") or {}).get("id") and person.get("name")
-        for credit in data.get("memberships") or []
-    )
-    if description and has_cast:
+    if description and memberships:
         overview, cast = st.columns([3, 2], gap="medium")
     else:
         overview = cast = st.container()
@@ -269,13 +290,14 @@ def _render_overview(data: dict) -> None:
             st.subheader("Beschreibung")
             st.markdown(description)
     with cast:
-        _render_cast(data)
+        _render_cast(memberships, data.get("text") or {})
 
 
 def render_production(data: dict) -> None:
     """Show the production, cast, related productions and citations in one view."""
     organization = data.get("organization") or {}
-    _render_heading(data, organization)
+    memberships = _named_credits(data.get("memberships") or [])
+    _render_heading(data, organization, memberships)
     sources = list(data.get("sources") or [])
     for label, url in (("Offizielle Seite", data.get("url")), ("Theater-Website", organization.get("url"))):
         if (valid_url := web_url(url)) and is_theapolis_url(valid_url):
@@ -284,7 +306,7 @@ def render_production(data: dict) -> None:
         else:
             render_web_link(label, url)
 
-    _render_overview(data)
+    _render_overview(data, memberships)
     _render_connections(data)
     if critics := data.get("critics"):
         st.subheader("Kritiken")

@@ -124,7 +124,7 @@ def test_production_profile_shows_theatre_navigation_facts_and_cast_without_tabs
     assert "?kind=organization&amp;id=theatre&amp;verified_only=0" in back
     html = "\n".join(element.value for element in app.markdown)
     assert "Premiere: 03.01.2026 · 90 Minuten · Ab 0 Jahren" in html
-    assert "<strong>Regie</strong>" in html and "<strong>Schauspiel</strong>" in html and "(Hamlet)" in html
+    assert "<strong>Regie, Schauspiel (Hamlet)</strong>" in html
     assert "Eine Produktion" in html
     assert "Gleiche Textgrundlage" not in html
     assert "?kind=production&amp;id=current" not in html
@@ -407,6 +407,30 @@ def test_production_shows_text_credits_inline(credits, title: str, lead: str) ->
     assert "?kind=person&amp;id=author" in credit.value
     assert "?kind=person&amp;id=translator" in credit.value
     assert credit.proto.help == "Sprache: de\n\nErschienen: 1920\n\nBearbeitung: Person nicht verknüpft"
+
+
+def test_production_combines_text_and_cast_credits_by_person(credits) -> None:
+    current, *_ = credits
+    alice = current["memberships"][0]["person"]
+    current["memberships"].append({"person": alice, "role": "Regie"})
+    current["text"] = {
+        "title": "Die Vorlage",
+        "contributions": [
+            {"person": alice, "role": "author"},
+            {"person": {"id": "translator", "name": "Alex"}, "role": "translator"},
+        ],
+    }
+    app = AppTest.from_string(PRODUCTION_SCRIPT)
+    app.session_state.profile = current
+    app.run()
+    assert not app.exception
+    cast = next(element.value for element in app.markdown if "<strong>Text, Regie" in element.value)
+    assert "<strong>Text, Regie, Schauspiel (Hamlet)</strong>:" in cast
+    assert cast.count("id=alice") == 1
+    assert "<strong>Musik</strong>:" in cast and "id=bob" in cast
+    assert "Nach „Die Vorlage“" in app.caption[0].value
+    assert "id=alice" not in app.caption[0].value
+    assert "id=translator" in app.caption[0].value
 
 
 def test_production_graph_includes_text_contributor_names(monkeypatch) -> None:
