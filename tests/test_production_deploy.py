@@ -1,11 +1,42 @@
 import os
 import subprocess  # ruff: ignore[suspicious-subprocess-import] - Run the deploy script with fake tools.
+import textwrap
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "deploy-production"
+WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy-production.yaml"
 IMAGE = "ghcr.io/hno2/theatredb@sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize("ssh_status", [0, 1, 127, 255])
+def test_deploy_workflow_reports_ssh_status(tmp_path: Path, ssh_status: int) -> None:
+    ssh = tmp_path / "ssh"
+    ssh.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CALLS"\nexit "$SSH_STATUS"\n')
+    ssh.chmod(0o755)
+    calls = tmp_path / "calls"
+    command = textwrap.dedent(WORKFLOW.read_text().rsplit("        run: |\n", 1)[1])
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] - Only test-controlled commands and arguments.
+        ["/bin/bash", "-e", "-c", command],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "SSH_KEY": "test-key",
+            "SSH_KNOWN_HOSTS": "test-host-key",
+            "SSH_TARGET": "deploy@example.com",
+            "SSH_PORT": "22",
+            "IMAGE": IMAGE,
+            "CALLS": str(calls),
+            "SSH_STATUS": str(ssh_status),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == ssh_status
+    assert calls.read_text().splitlines()[-2:] == ["deploy@example.com", IMAGE]
+    assert ("Check the production deploy key's forced command" in result.stderr) == (ssh_status == 127)
 
 
 @pytest.mark.parametrize("command,backup_status", [(IMAGE, "0"), (IMAGE, "1"), (IMAGE + " extra", "0")])
