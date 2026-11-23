@@ -55,8 +55,8 @@ def entity_anchor(label: str, kind: str, entity_id: str, *, include_unverified: 
 
 
 def entity_link(label: str, kind: str, entity_id: str) -> None:
-    """Link to an entity within the current detail page."""
-    st.markdown(entity_anchor(label, kind, entity_id), unsafe_allow_html=True)
+    """Link to an entity on the detail page, from any page."""
+    st.markdown(entity_anchor(label, kind, entity_id, path="detail"), unsafe_allow_html=True)
 
 
 def production_people(production: dict) -> dict[str, dict]:

@@ -55,6 +55,7 @@ def test_entity_link_replaces_query_and_escapes_source_text(monkeypatch) -> None
     parser = LinkParser()
     parser.feed(html)
     assert parser.attributes["target"] == "_self"
+    assert urlsplit(parser.attributes["href"]).path == "detail"
     assert parse_qs(urlsplit(parser.attributes["href"]).query) == {"kind": ["production"], "id": [entity_id]}
     assert "<script>" not in html
     assert "&lt;script&gt;" in html
@@ -406,6 +407,22 @@ def test_production_shows_text_credits_inline(credits, title: str, lead: str) ->
     assert "?kind=person&amp;id=author" in credit.value
     assert "?kind=person&amp;id=translator" in credit.value
     assert credit.proto.help == "Sprache: de\n\nErschienen: 1920\n\nBearbeitung: Person nicht verknüpft"
+
+
+def test_production_text_credit_links_to_personal_text_page(credits) -> None:
+    current, *_ = credits
+    current["text"] = {
+        "id": "text-id",
+        "title": "Heute",
+        "contributions": [{"person": {"id": "author", "name": "Autorin"}, "role": "author"}],
+    }
+    app = AppTest.from_string(PRODUCTION_SCRIPT)
+    app.session_state.profile = current
+    app.run()
+    assert not app.exception
+    credit = app.caption[0].value
+    assert "Von <a" in credit
+    assert "?kind=text&amp;id=text-id" in credit
 
 
 def test_production_combines_text_and_cast_credits_by_person(credits) -> None:

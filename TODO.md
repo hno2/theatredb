@@ -59,6 +59,18 @@
 - [/] **Deployment checks:** benchmarked local PostgreSQL 18.4 and smoke-tested installed
   Streamlit 1.67. Production network latency remains unmeasured.
 
+## Personal library and authentication follow-up
+
+- [ ] Enforce active admin checks at interactive backend mutation boundaries, not only in navigation.
+- [ ] Recheck account status and OIDC token expiry on protected actions; clear personal state on logout.
+- [ ] Mount OIDC secrets read-only in production and test a real provider login, identity persistence,
+  and logout without exposing credentials.
+- [ ] Test the library migration and concurrent writes against PostgreSQL.
+- [ ] Add source-backed performance dates for upcoming/recent shows, distinct from premiere dates.
+- [ ] Allow optional visit venues and partial dates; preserve venue details if productions change.
+- [ ] Add playlist reordering with accessible controls and persistent positions.
+- [ ] Provide personal-data export and an explicit account-deletion flow.
+
 ## Stretch
 - [ ] Also have planned performances/ # number of performances
 - [ ] Plus show overview via which theatres have a config.

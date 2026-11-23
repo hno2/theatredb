@@ -16,6 +16,7 @@ from frontend.views.organization import (
     render_web_link,
     web_url,
 )
+from frontend.views.personal import render_actions
 
 RELATED_LIMIT = 5
 
@@ -257,6 +258,8 @@ def _render_text_credit(text: dict, production_title: str, cast_ids: set[str]) -
             parts.append(f"{escape(', '.join(sorted(roles, key=_role_order)))}: {name}")
     help_text = "\n\n".join(filter(None, details)) or None
     line = " · ".join(parts) or f"Text: „{escape(title)}“"
+    if text.get("id"):
+        line += f" · {entity_anchor('Zum Text', 'text', str(text['id']))}"
     st.caption(f"<p>{line}</p>", unsafe_allow_html=True, help=help_text)
 
 
@@ -299,6 +302,7 @@ def render_production(data: dict) -> None:
     organization = data.get("organization") or {}
     memberships = _named_credits(data.get("memberships") or [])
     _render_heading(data, organization, memberships)
+    render_actions("production", data["id"])
     sources = list(data.get("sources") or [])
     for label, url in (("Offizielle Seite", data.get("url")), ("Theater-Website", organization.get("url"))):
         if (valid_url := web_url(url)) and is_theapolis_url(valid_url):

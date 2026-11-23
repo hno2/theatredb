@@ -19,6 +19,35 @@ uv run python -m backend.db migrate
 Back up before migrations. In Docker, run database commands with
 `docker compose run --rm app python -m backend.db ...`.
 
+## Sign-in and development access
+
+Browsing is public. Personal lists, ratings and visits need sign-in via
+Streamlit's native OIDC (`st.login`). Configure a provider in the ignored
+`.streamlit/secrets.toml` (production: mount it read-only at
+`/app/.streamlit/secrets.toml` in the app container):
+
+```toml
+[auth]
+redirect_uri = "http://localhost:8501/oauth2callback"
+cookie_secret = "REPLACE_WITH_A_STRONG_RANDOM_SECRET"
+
+[auth.google]
+client_id = "REPLACE_WITH_CLIENT_ID"
+client_secret = "REPLACE_WITH_CLIENT_SECRET"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+```
+
+New sign-ins are readers. The **Verwaltung** pages are shown only to admins:
+
+```sql
+UPDATE "user" SET is_admin = true WHERE display_name = 'Jane Doe';
+```
+
+For local work without a provider, add `THEATERDB_DEV_AUTH=1` to `.env`. Every
+visitor then acts as one local admin (`dev:local`), marked **Dev-Zugang** in the
+sidebar. The app refuses to start with this flag when `THEATERDB_ENV=production`,
+which the production Compose override sets.
+
 ## Checks
 
 ```bash

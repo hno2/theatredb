@@ -1,30 +1,22 @@
-from types import SimpleNamespace
-
 import streamlit as st
-from streamlit.user_info import UserInfoProxy
 
+from frontend.auth import current_user, login_button
 from frontend.views.settings import render_verified_toggle
-
-
-def _get_effective_user() -> UserInfoProxy | SimpleNamespace:
-    real_user = st.user
-    if getattr(real_user, "is_logged_in", False):
-        return real_user
-
-    if "mock_user" not in st.session_state:
-        st.session_state.mock_user = SimpleNamespace(
-            is_logged_in=True,
-            name="Simon Mock",
-            email="simon@local",
-            sub="mock-user-1",
-        )
-    return st.session_state.mock_user
-
 
 st.set_page_config(page_title="TheaterDB", layout="wide")
 
-user = _get_effective_user()
-st.sidebar.write(f"User: {user.name} ({user.email})")
+user = current_user()
+st.session_state["_principal"] = user
+with st.sidebar:
+    if user is None:
+        st.caption("Merkliste, Sterne und Listen behalten?")
+        login_button("sidebar_login")
+    else:
+        st.caption(f":material/person: {user.name}")
+        if user.dev:
+            st.caption(":orange-badge[:material/developer_mode: Dev-Zugang]")
+        if st.user.get("is_logged_in"):
+            st.button("Abmelden", icon=":material/logout:", on_click=st.logout)
 
 if "_flash" in st.session_state:
     st.toast(st.session_state.pop("_flash"), icon="✅")
@@ -40,8 +32,10 @@ pages = {
         ),
         st.Page("views/catalog_people.py", title="Personen", icon=":material/person:", url_path="personen"),
         st.Page("views/catalog_texts.py", title="Texte", icon=":material/menu_book:", url_path="texte"),
+        st.Page("views/collection.py", title="Meine Sammlung", icon=":material/bookmarks:", url_path="sammlung"),
         st.Page("views/detail.py", title="Detailansicht", url_path="detail", visibility="hidden"),
     ],
+    # Pages left out of st.navigation cannot be opened, so this is the access check for management.
     "Verwaltung": [
         st.Page("management/reconciliation.py", title="Datenabgleich & Duplikate", icon=":material/merge:"),
         st.Page("management/organizations.py", title="Organisationen", icon=":material/event_seat:"),
@@ -52,6 +46,8 @@ pages = {
         st.Page("management/sources.py", title="Quellen", icon=":material/book:"),
     ],
 }
+if not (user and user.is_admin):
+    del pages["Verwaltung"]
 nav = st.navigation(pages)
 if nav.url_path in {"", "detail", "theater"}:
     with st.sidebar:
