@@ -108,6 +108,24 @@ administrative tools for imports, review, and data maintenance.
   reviewed. Merges keep the manual row when both productions have the code.
 - Public filters and badges only use `published` rows.
 
+## Semantic description search
+
+- `backend/semantic.py` embeds `Production.description` and `Text.description`
+  (title + paragraph chunks of up to 1,200 characters) into `DescriptionChunk`
+  (pgvector, 640 dimensions) with a local Harrier-OSS-v1 model. Each row stores
+  the description hash and a pipeline key (model, revision, chunking); `index`
+  only re-embeds changed or stale entries and removes chunks of cleared
+  descriptions. Queries use the model's search instruction; documents have none.
+- Search is hybrid: the nearest chunk per entity (cosine) and German full text
+  (`websearch_to_tsquery`) are fused with reciprocal rank fusion, then catalog
+  filters apply. PostgreSQL only; exact scan until an HNSW index is needed.
+- `suggest` scores each Inhalt tag (label + definition) against a production's
+  chunks and stores up to three tags whose similarity stands out from that
+  production's mean as `suggested`/`model` rows with score, evidence chunk,
+  hash and pipeline. Editors accept or reject them.
+- `cluster` is offline discovery: mean production vectors, PCA, HDBSCAN, and
+  c-TF-IDF terms. Its report feeds vocabulary decisions; nothing is written.
+
 ## Optional integrations
 
 - Wikidata lookup is read-only. Choosing an item creates an explicitly

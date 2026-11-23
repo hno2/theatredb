@@ -68,6 +68,31 @@ uv run python -m backend.taxonomy backfill
 Production management edits assignments per facet. Manual choices always win
 over source-mapped tags and survive re-imports and merges.
 
+### Semantic search and tag suggestions
+
+Production and text descriptions can be searched by meaning ("Familienkonflikt
+im Exil") with the **In Beschreibungen suchen** toggle (`semantic=true`). It
+needs PostgreSQL with pgvector (the compose `db` image is
+`pgvector/pgvector`; switch existing deployments to it before migrating) and the
+optional embeddings extra, which runs
+[`microsoft/harrier-oss-v1-270m`](https://huggingface.co/microsoft/harrier-oss-v1-270m)
+locally on CPU:
+
+```bash
+uv sync --all-groups --extra embeddings
+uv run python -m backend.semantic index --limit 500   # new/changed descriptions only
+uv run python -m backend.semantic search "Krieg und Flucht"
+uv run python -m backend.semantic suggest              # Inhalt suggestions for review
+uv run python -m backend.semantic cluster --min-size 5 # candidate new Inhalt tags
+```
+
+The first run downloads the model; pin `THEATERDB_EMBEDDING_REVISION` and set
+`HF_HUB_OFFLINE=1` in production. Changing model, revision or chunking marks
+all vectors stale. Suggestions appear in production management for accept or
+reject; the model never overrides manual, source or rejected decisions.
+`cluster` only prints a report: clusters with their typical words, examples and
+already published tags, to decide which new Inhalt tags are worth adding.
+
 ## Docs
 
 - [Production deployments](specs/development.md#production-deployments)

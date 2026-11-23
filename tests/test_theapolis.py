@@ -1263,7 +1263,9 @@ def test_cross_role_matching_uses_bounded_queries(db, monkeypatch, tmp_path, ite
     statements = []
 
     def record_statement(connection, cursor, statement, parameters, context, executemany):
-        statements.append(statement)
+        # Schema checks grow with every table; only data queries must stay bounded.
+        if not statement.startswith("PRAGMA"):
+            statements.append(statement)
 
     event.listen(db, "before_cursor_execute", record_statement)
     try:

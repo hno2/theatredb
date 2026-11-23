@@ -19,6 +19,7 @@ from backend.entity_management import (
     verified_organization_filter,
 )
 from backend.models import Organization, Person, Production, Text
+from backend.semantic import search_descriptions
 from backend.taxonomy import FACETS, LAYER_LABELS, facet_options
 from backend.user_management import get_session
 from frontend.management.filters import SqlFilter, render_filter_section
@@ -147,6 +148,23 @@ def _render_entry(kind: str, entry: dict) -> None:
         render_tags(entry.get("tags") or [])
 
 
+def _render_semantic(kind: Literal["production", "text"], query: str, filters: list) -> None:
+    try:
+        with get_session() as session, st.spinner("Beschreibungen werden durchsucht …"):
+            hits = search_descriptions(session, query, kind=kind, filters=filters)
+    except RuntimeError as error:
+        st.info(f"Die Beschreibungssuche ist auf diesem Server nicht eingerichtet. {error}")
+        return
+    if not hits:
+        st.info("Keine passenden Beschreibungen gefunden. Bisher sind nur Beschreibungen mit Index durchsuchbar.")
+        return
+    st.caption(f"{len(hits)} Treffer nach Relevanz")
+    with st.container(gap="small"):
+        for hit in hits:
+            st.markdown(entity_anchor(hit["title"], kind, hit["id"], path="detail"), unsafe_allow_html=True)
+            st.caption(hit["snippet"])
+
+
 def _render_summary(kind: str, chart_title: str, data: list[tuple[str, int]]) -> None:
     if not data:
         return
@@ -267,17 +285,30 @@ def render_catalog(kind: str) -> None:
         bind="query-params",
         max_chars=150,
     ).strip()
+    semantic = kind in {"production", "text"} and st.toggle(
+        "In Beschreibungen suchen",
+        key="semantic",
+        bind="query-params",
+        help="Findet Inhalte nach Bedeutung, z. B. „Familienkonflikt im Exil“, nicht nur nach Titelwörtern.",
+    )
     suggestion_slot = st.container()
     upcoming_slot = st.container()
     results, insights = st.columns([3, 2], gap="large")
     with results:
         heading = st.empty()
-        sort_by, descending = _render_sort() if kind == "production" else ("premiere", True)
+        sort_by, descending = (
+            _render_sort() if kind == "production" and not (semantic and query) else ("premiere", True)
+        )
         fields = [*fields, *_extra_filter_fields(kind)]
         filters, values = render_filter_section(model, fields, key=kind, shareable=True)
     only_verified = kind == "organization" and verified_only()
     if only_verified:
         filters.append(verified_organization_filter())
+    if semantic and query:
+        with results:
+            heading.subheader("Treffer in Beschreibungen", anchor=False)
+            _render_semantic("text" if kind == "text" else "production", query, filters)
+        return
     with suggestion_slot:
         _render_suggestions(catalog_suggestions(model, query, filters))
 
