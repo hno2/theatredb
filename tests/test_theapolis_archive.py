@@ -123,6 +123,8 @@ def test_api_credits_backfill_resumes_and_skips_fresh_productions(tmp_path, monk
 
     async def fetch(_session, url):
         await asyncio.sleep(0)
+        if urlsplit(url).path == "/api/de/profiles/888":
+            return json.dumps({"success": True, "data": {"id": 888, "name": "Performer"}}).encode()
         identity = urlsplit(url).path.split("/")[-2]
         requested.append(identity)
         if identity == "2" and failing:
@@ -190,7 +192,7 @@ def test_api_credit_writes_are_batched_and_tail_is_flushed(tmp_path, monkeypatch
 
         asyncio.run(download())
         assert statements.count("COMMIT") == 3  # Cache attachment, full batch, final partial batch.
-        assert len(archive.cached("participations-v1", 0)) == count
+        assert len(archive.cached("participations-v2", 0)) == count
         assert not list(archive.detail_targets(run, 0))
         archive.seal(run)
         assert len(list(archive.items(run))) == count
@@ -240,6 +242,47 @@ def test_api_participations_pagination_preserves_crew_and_rejects_incomplete(mon
     broken = True
     with pytest.raises(ValueError, match="Incomplete"):
         asyncio.run(run())
+
+
+def test_profile_main_name_is_cached_once_and_attached_to_credits(tmp_path, monkeypatch):
+    requested = []
+
+    async def participations(_session, identity):
+        await asyncio.sleep(0)
+        return {
+            "production_id": identity,
+            "theapolis_detail_status": "parsed",
+            "theapolis_detail": {
+                "credits": [{"person_id": "profile:157005", "name": "Bernhard Niechotz", "role": "Spiel"}]
+            },
+        }
+
+    async def fetch(_session, url):
+        requested.append(url)
+        await asyncio.sleep(0)
+        return json.dumps({"success": True, "data": {"id": 157005, "name": "Bernhard Bruchhardt"}}).encode()
+
+    monkeypatch.setattr(theapolis, "_participations", participations)
+    monkeypatch.setattr(theapolis, "_fetch", fetch)
+    with open_archive(tmp_path / "archive.sqlite3", write=True) as archive:
+        write_run(archive, [production(1), production(2)])
+
+        async def download(run):
+            async with theapolis._session(2) as session:
+                await theapolis._download_participations(archive, session, run, 2)
+
+        run = archive.begin_details()
+        asyncio.run(download(run))
+        archive.seal(run)
+        for item in archive.items(run):
+            credit = item["theapolis_detail"]["credits"][0]
+            assert credit["name"] == "Bernhard Niechotz"
+            assert credit["profile_name"] == "Bernhard Bruchhardt"
+        archive.db.execute("delete from cache where kind = 'participations-v2'")
+        archive.db.commit()
+        run = archive.begin_details()
+        asyncio.run(download(run))
+        assert requested == ["https://www.theapolis.de/api/de/profiles/157005"]
 
 
 def test_archive_reuses_positive_and_negative_legacy_cache(tmp_path, monkeypatch):

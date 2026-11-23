@@ -5,7 +5,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from backend.ingestion.theapolis import _import_productions, _import_record, _prepare_import, validate_detail
 from backend.ingestion.theapolis_import import accept_records
-from backend.models import EntityType, ProductionMembership, Source, SourceRecord, TextContribution
+from backend.models import EntityType, Person, ProductionMembership, Source, SourceRecord, TextContribution
 
 
 @pytest.fixture
@@ -110,6 +110,68 @@ def test_profile_credit_name_variants_keep_one_person_and_source_names(db, caplo
     assert "retaining one identity and both source names" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ("Elisabeth Clarke", "Elisabeth Clarke-Hasters", "Elisabeth Clarke-Hasters"),
+        ("Martina Beate Mann", "Martina Mann", "Martina Mann"),
+        ("Hans H. Diehl", "Hans Herbert Diehl", "Hans Herbert Diehl"),
+        ("Muller", "Müller", "Müller"),
+        ("Rene", "René", "René"),
+    ],
+)
+def test_profile_name_fallback_is_order_independent(db, first, second, expected):
+    def item(identity, name):
+        return {"id": identity, "name": "Play", **_detail(_credit("profile:9", name=name))}
+
+    mapping = _import(db, 1, item(1, first), item(2, second))
+    person = db[0].get(Person, mapping["detail:profile:9"])
+    assert person is not None
+    assert person.name == expected
+    assert set(person.alt_names) == {first, second} - {expected}
+    _import(db, 2, item(2, second), item(1, first))
+    assert person.name == expected
+    assert set(person.alt_names) == {first, second} - {expected}
+
+
+def test_official_profile_name_wins_and_manual_main_name_is_preserved(db):
+    item = {"id": 1, "name": "Play", **_detail(_credit("profile:157005", name="Bernhard Niechotz"))}
+    mapping = _import(db, 1, item)
+    person = db[0].get(Person, mapping["detail:profile:157005"])
+    assert person is not None
+    updated = {
+        **item,
+        **_detail(_credit("profile:157005", name="Bernhard Niechotz", profile_name="Bernhard Bruchhardt")),
+    }
+    _import(db, 2, updated)
+    assert person.name == "Bernhard Bruchhardt"
+    assert person.alt_names == ["Bernhard Niechotz"]
+    person.name = "Manually reviewed name"
+    revised = {**item, **_detail(_credit("profile:157005", name="Bernhard N.", profile_name="Bernhard Bruchhardt"))}
+    _import(db, 3, revised)
+    assert person.name == "Manually reviewed name"
+    assert set(person.alt_names) == {"Bernhard Niechotz", "Bernhard Bruchhardt", "Bernhard N."}
+
+
+def test_official_name_updates_legacy_person_linked_by_profile_evidence(db):
+    url = "https://www.theapolis.de/de/profil/alex"
+    item = {"id": 1, "name": "Play", "directors": [{"id": 1, "name": "Alex", "profile": {"url": url}}]}
+    legacy_id = _import(db, 1, item)["directors:1"]
+    ids = _import(
+        db,
+        2,
+        {
+            **item,
+            **_detail(_credit("profile:9", role="Regie", profile_url=url, profile_name="Alex Example")),
+        },
+    )
+    person = db[0].get(Person, legacy_id)
+    assert person is not None
+    assert ids["detail:profile:9"] == legacy_id
+    assert person.name == "Alex Example"
+    assert person.alt_names == ["Alex"]
+
+
 def test_explicit_alias_links_to_existing_legacy_person_and_persists(db):
     item = {"id": 1, "name": "Play", "directors": [{"id": 1, "name": "Alex"}]}
     legacy_id = _import(db, 1, item)["directors:1"]
@@ -178,6 +240,8 @@ def test_alias_registered_before_legacy_listing_exists(db):
         _detail(_credit(legacy_ids={"actors": 9})),
         _detail(_credit(legacy_ids={"creators": "a\x00b"})),
         _detail(_credit(character=9)),
+        _detail(_credit(profile_name=9)),
+        _detail(_credit(profile_name="Alex\x00")),
         _detail(_credit(role=" ")),
     ],
 )

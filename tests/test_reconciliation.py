@@ -931,6 +931,29 @@ def test_bulk_people_merge_validates_selection_and_choices(db) -> None:
     assert count(db, ReconciliationCase) == 0
 
 
+def test_reviewed_person_merge_preserves_unselected_names_as_alternatives(db) -> None:
+    left, right = save(
+        db,
+        Person(name="Hans H. Diehl", alt_names=["H. Diehl"]),
+        Person(name="Hans Herbert Diehl", alt_names=["Hans H. Diehl"]),
+    )
+    ids = [left.id, right.id]
+    preview = preview_entity_merge(EntityType.PERSON, ids, target_id=left.id)
+    merge_entities(
+        EntityType.PERSON,
+        ids,
+        target_id=left.id,
+        revision=preview["revision"],
+        actor_id="test",
+        choices={"name": str(right.id)},
+    )
+    with Session(db) as session:
+        person = session.get(Person, left.id)
+        assert person is not None
+        assert person.name == "Hans Herbert Diehl"
+        assert set(person.alt_names) == {"Hans H. Diehl", "H. Diehl"}
+
+
 def _management_app(kind: str) -> AppTest:
     return AppTest.from_file(
         str(REVIEW_APP.parent / ("persons.py" if kind == "person" else "texts.py")), default_timeout=10

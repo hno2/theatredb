@@ -492,6 +492,7 @@ class Person(SourceMixin, DomainModel, table=True):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     name: str = Field(index=True)
+    alt_names: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     type: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     born: dt.datetime | None = Field(default=None, sa_type=DateTime)
     born_precision: DatePrecision | None = None

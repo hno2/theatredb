@@ -1646,6 +1646,12 @@ def merge_entity_fields(kind: EntityType, states: list[dict]) -> tuple[dict, lis
                 "conflict": len(values) > 1 and not isinstance(value, list),
             }
         )
+    if kind == EntityType.PERSON:
+        result["alt_names"] = [
+            name
+            for name in union_values(result.get("alt_names", []), [state["record"]["name"] for state in states])
+            if name != result["name"]
+        ]
     return result, fields
 
 
@@ -1705,6 +1711,12 @@ def _merge_choices(preview: dict, choices: dict[str, str] | None, *, require_cho
         result[field] = options[entity_id]["value"]
         if field in model.date_fields:
             result[f"{field}_precision"] = options[entity_id]["precision"]
+    if model is Person:
+        result["alt_names"] = [
+            name
+            for name in union_values(result["alt_names"], [state["record"]["name"] for state in preview["records"]])
+            if name != result["name"]
+        ]
     return result
 
 

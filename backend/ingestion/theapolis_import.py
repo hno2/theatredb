@@ -526,7 +526,7 @@ def _observe(
 
 
 def _fill_blanks(entity: SQLModel, payload: dict, previous: SourceRecord | None) -> bool:
-    changes = _enrich(entity, payload)
+    changes = _enrich(entity, payload, previous)
     if isinstance(entity, Organization):
         country, legacy_region = split_country(entity.country)
         if entity.country and country != payload.get("country"):
@@ -592,6 +592,11 @@ def accept_records(
     model = ENTITY_MODELS[kind]
     captured_at = _utc(captured_at) if captured_at else None
     by_key, by_external, resolved = _batch_identities(session, source_id, kind, records)
+    previous_names = {
+        (row.entity_id, row.payload.get("incoming", {}).get("name")): row
+        for row in by_key.values()
+        if kind == EntityType.PERSON
+    }
     ids = set(resolved.values())
     entities = {row.id: row for row in session.exec(select(model).where(col(model.id).in_(ids)).with_for_update())}
     detail_owners = _detail_owners(session, source_id, records, ids)
@@ -644,7 +649,8 @@ def accept_records(
         )
         if not unchanged and not older:
             changed.add(identity)
-            if _fill_blanks(entity, payload, record) and identity not in inserted:
+            previous = record or previous_names.get((identity, getattr(entity, "name", None)))
+            if _fill_blanks(entity, payload, previous) and identity not in inserted:
                 updated[identity] = entity
         _save_observation(source_id, kind, identity, incoming, captured_at, by_key, sources)
         _register_person_aliases(source_id, incoming, identity, by_key, by_external, detail_owners, older=older)
@@ -749,7 +755,7 @@ def _identity(
     return next(iter(resolved), None)
 
 
-def _enrich(entity: SQLModel, payload: dict) -> dict:
+def _enrich(entity: SQLModel, payload: dict, previous: SourceRecord | None = None) -> dict:
     changes = {}
     date_fields = getattr(type(entity), "date_fields", ())
     for field, value in payload.items():
@@ -762,6 +768,12 @@ def _enrich(entity: SQLModel, payload: dict) -> dict:
             changes[field] = value
             if field in date_fields:
                 changes[f"{field}_precision"] = payload[f"{field}_precision"]
+    if isinstance(entity, Person) and payload.get("name"):
+        main_name = entity.name
+        if previous is not None and previous.payload.get("incoming", {}).get("name") == main_name:
+            main_name = changes["name"] = payload["name"]
+        aliases = union_values(entity.alt_names, [entity.name, payload["name"], *payload.get("alt_names", [])])
+        changes["alt_names"] = [name for name in aliases if name != main_name]
     return changes
 
 
@@ -804,7 +816,8 @@ def accept_record(
         before = entity_snapshot(entity)
         changes = {}
         if not older:
-            changes = _enrich(entity, payload)
+            previous = next((record for record in observations if record.record_key == record_key), None)
+            changes = _enrich(entity, payload, previous)
             validated = revalidate(entity, changes)
             for field in changes:
                 setattr(entity, field, getattr(validated, field))

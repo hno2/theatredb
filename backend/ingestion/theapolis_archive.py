@@ -268,11 +268,19 @@ class Archive:
             )
         return run
 
+    def cache_profile_name(self, identity: str, name: str, captured_at: float) -> None:
+        """Stage the provider's main name separately from name-based profile lookups."""
+        self.db.execute(
+            """insert into cache values ('profile-name', ?, ?, ?)
+               on conflict(kind, key) do update set hash = excluded.hash, captured_at = excluded.captured_at""",
+            (identity, self._put(name), captured_at),
+        )
+
     def detail_targets(self, run: int, since: float) -> Iterator[str]:
         """Yield production IDs without fresh API participation evidence."""
         for (identity,) in self.db.execute(
             """select item.id from item left join cache on
-                   cache.kind = 'participations-v1' and cache.key = item.id and cache.captured_at >= ?
+                   cache.kind = 'participations-v2' and cache.key = item.id and cache.captured_at >= ?
                where item.run = ? and cache.key is null order by item.page, item.position""",
             (since, run),
         ):
@@ -283,7 +291,7 @@ class Archive:
         with self.db:
             values = [(identity, self._put(entry), captured_at) for identity, entry, captured_at in entries]
             self.db.executemany(
-                """insert into cache values ('participations-v1', ?, ?, ?)
+                """insert into cache values ('participations-v2', ?, ?, ?)
                    on conflict(kind, key) do update set hash = excluded.hash, captured_at = excluded.captured_at""",
                 values,
             )
@@ -297,7 +305,7 @@ class Archive:
         with self.db:
             self.db.execute(
                 """update item set detail = cache.hash from cache where item.run = ?
-                   and item.id = cache.key and cache.kind = 'participations-v1' and item.detail is null""",
+                   and item.id = cache.key and cache.kind = 'participations-v2' and item.detail is null""",
                 (run,),
             )
 

@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Generator, Iterable
 from contextlib import contextmanager
@@ -769,6 +770,7 @@ def _participation_credit(row: dict) -> dict:
         "role": role,
         "character": row.get("roleName") or None,
         **({"profile_url": canonical_url(profile["url"])} if profile.get("url") else {}),
+        **({"profile_name": _name(profile)} if profile.get("name") else {}),
     }
 
 
@@ -811,6 +813,13 @@ async def _participations(session: aiohttp.ClientSession, identity: str) -> dict
     return entry
 
 
+async def _profile_main_name(session: aiohttp.ClientSession, identity: str) -> str:
+    result = json.loads(await _fetch(session, f"{SITE}/api/de/profiles/{identity}"))
+    if result.get("success") is not True or str(result["data"].get("id")) != identity:
+        raise ValueError(f"Theapolis rejected profile identity {identity}")
+    return _name(result["data"])
+
+
 async def _download_participations(
     archive: Archive, session: aiohttp.ClientSession, run: int, concurrency: int
 ) -> None:
@@ -818,6 +827,26 @@ async def _download_participations(
     targets = list(archive.detail_targets(run, time() - PARTICIPATION_CACHE_AGE))
     LOG.info("Theapolis participations: %s productions need first capture or refresh", len(targets))
     pending: list[tuple[str, dict, float]] = []
+    names = archive.cached("profile-name", time() - PROFILE_CACHE_AGE)
+    lookups: dict[str, asyncio.Task[str]] = {}
+    profile_slots = asyncio.Semaphore(concurrency)
+
+    async def profile_name(identity: str) -> str:
+        async with profile_slots:
+            name = await _profile_main_name(session, identity)
+        archive.cache_profile_name(identity, name, time())
+        names[identity] = name
+        return name
+
+    async def enrich(entry: dict) -> None:
+        for credit in entry["theapolis_detail"]["credits"]:
+            if match := re.fullmatch(r"profile:(\d+)", str(credit["person_id"])):
+                identity = match[1]
+                if identity not in names:
+                    if identity not in lookups:
+                        lookups[identity] = asyncio.create_task(profile_name(identity))
+                    names[identity] = await lookups[identity]
+                credit["profile_name"] = names[identity]
 
     def checkpoint() -> None:
         if pending:
@@ -826,6 +855,8 @@ async def _download_participations(
 
     async def fetch(identity: str) -> None:
         entry = await _participations(session, identity)
+        await enrich(entry)
+        validate_detail(entry)
         pending.append((identity, entry, time()))
 
     with tqdm(total=len(targets), desc="Cast and crew API", unit="production") as progress:
@@ -1030,8 +1061,18 @@ def _detail_credit(row: object) -> tuple[str, str, str, str, str | None, list[st
     return key, name, raw_role, role, normalize_character(character), aliases
 
 
-def _detail_person(people: dict, key: str, name: str) -> dict:
-    person = people.setdefault(key, {"name": name, "type": [], "legacy_ids": set()})
+def _preferred_credit_name(names: list[str]) -> str:
+    def score(name: str) -> tuple[int, int, int, int]:
+        accents = sum(unicodedata.combining(char) != 0 for char in unicodedata.normalize("NFD", name))
+        words = name.split()
+        initials = sum(bool(re.fullmatch(r"[^\W\d_]\.", word)) for word in words)
+        return accents, name.count("-"), -initials, -len(words)
+
+    return max(names, key=score)
+
+
+def _detail_person(people: dict, key: str, name: str, profile_name: str | None = None) -> dict:
+    person = people.setdefault(key, {"name": name, "type": [], "legacy_ids": set(), "alt_names": []})
     if person["name"] != name:
         if not re.fullmatch(r"detail:profile:\d+", key):
             raise ValueError(f"Inconsistent name for person ID {key}")
@@ -1041,7 +1082,23 @@ def _detail_person(people: dict, key: str, name: str) -> dict:
             person["name"],
             name,
         )
+    names = list(dict.fromkeys([person["name"], *person["alt_names"], name]))
+    if profile_name:
+        if person.get("_profile_name") not in (None, profile_name):
+            raise ValueError(f"Conflicting Theapolis main names for profile {key}")
+        person["_profile_name"] = profile_name
+        names = list(dict.fromkeys([*names, profile_name]))
+    person["name"] = person.get("_profile_name") or _preferred_credit_name(names)
+    person["alt_names"] = [value for value in names if value != person["name"]]
     return person
+
+
+def _credit_profile_name(row: dict) -> str | None:
+    value = row.get("profile_name")
+    name = _name({"name": value}) if value is not None else None
+    if name is not None and "\x00" in name:
+        raise ValueError("NUL byte in Theapolis profile main name")
+    return name
 
 
 def _listed_profile_credits(item: dict) -> dict[tuple[str, str, str], set[str]]:
@@ -1091,7 +1148,7 @@ def _add_detail_people(
     for row in rows:
         credit = _detail_credit(row)
         key, name, raw_role, role, character, aliases = credit
-        person = _detail_person(people, key, name)
+        person = _detail_person(people, key, name, _credit_profile_name(row))
         if row.get("profile_url"):
             url = person["profile_url"] = canonical_url(row["profile_url"])
             if profile_matches is not None:
@@ -1229,7 +1286,7 @@ def _prepare_import(
             canonical_url(url) if url else None,
         )
     _set_profile_matches(people, profile_matches, alias_owners)
-    metadata = {"profile_url", "legacy_ids", "matched_legacy_ids"}
+    metadata = {"profile_url", "legacy_ids", "matched_legacy_ids", "_profile_name"}
     for key, payload in people.items():
         people[key] = validate_payload(
             EntityType.PERSON,

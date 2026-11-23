@@ -181,10 +181,19 @@ and crew. Normal archive `download` now also fetches the paginated JSON API
 credits. Cast, characters, music, crew and assistants are retained, along with
 the raw API evidence. Profile IDs are scoped separately from creator/director
 IDs; missing profiles use participation-scoped IDs, never guessed name matches.
-Different credit names for the same numeric profile ID retain one person;
-each observed name stays in the production's source context and raw evidence.
-The importer logs these variants rather than aborting. Existing nonempty
-canonical person names remain unchanged.
+Different credit names for the same numeric profile ID retain one person.
+The downloader fetches that profile's official `name` from
+`/api/de/profiles/{id}`, once per profile with a 30-day SQLite cache.
+That name takes precedence; other observed names are stored in `Person.alt_names`
+and stay unchanged in the production's source context and raw evidence.
+When the official name is unavailable in an older archive or supplied feed,
+fallback selection prefers accents and umlauts, hyphenated names and spelled-out
+initials; otherwise it prefers fewer name parts. Thus `Clarke-Hasters` wins over
+`Clarke`, `Hans Herbert Diehl` over `Hans H. Diehl`, and `Martina Mann` over
+`Martina Beate Mann`. These rules select names within an established identity,
+never merge separate people. Manual main-name edits are not overwritten;
+an imported main name can change only while it still matches its previous
+source observation. The importer logs name variants rather than aborting.
 Archive imports link a legacy director/creator ID to a numeric profile ID when
 both feeds agree on the production, credit name, role and Theapolis profile URL
 without ambiguity. Explicit feed aliases take precedence. Existing separate
@@ -199,6 +208,13 @@ repeating biography lookups:
 ```bash
 uv run python -m backend.ingestion.theapolis details
 ```
+
+After upgrading, run `uv run python -m backend.db migrate`, then `details` and
+`import` to populate official names and alternatives. The first updated detail
+capture refreshes older participation-cache entries once; no production-list
+redownload or database reset is needed. Older archives still import with fallback
+name selection. A normal unchanged import does not backfill previously skipped
+records.
 
 Detail downloads default to 32 concurrent requests with connection reuse and
 existing HTTP retry/backoff. Use `details --concurrency N` or
