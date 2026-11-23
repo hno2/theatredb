@@ -19,7 +19,7 @@
 - [ ] Better colour schema
 - [ ] Production Page Tag styling
 - [ ] Production Sort SChauspiel/Crew
-- [ ] Handle/Understand Alt names Theatre/Person 
+- [ ] Handle/Understand Alt names Theatre/Person
 - [ ] Fix Favicon
 - [ ] Understand Wikidata mapping
 - [ ] Page top level nav (go back to theatre, page before)

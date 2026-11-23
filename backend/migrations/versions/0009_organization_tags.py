@@ -12,7 +12,8 @@ depends_on = None
 def upgrade() -> None:
     """Initialize existing organizations with empty tags, without inventing labels."""
     op.add_column("organization", sa.Column("tags", sa.JSON(), nullable=False, server_default=sa.text("'[]'")))
-    op.alter_column("organization", "tags", server_default=None)
+    with op.batch_alter_table("organization") as batch:
+        batch.alter_column("tags", existing_type=sa.JSON(), server_default=None)
 
 
 def downgrade() -> None:
