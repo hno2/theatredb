@@ -17,7 +17,9 @@ are the full design target; the first release deliberately simplifies:
   and is refused with `THEATERDB_ENV=production`. No separate dev-admin flag.
 - Admin gating is navigation-level (management pages are not registered for
   non-admins); backend service functions are not individually guarded.
-- Not built yet: data export, account deletion, inactive-account handling,
+- On catalogue merge, conflicting ratings keep the survivor's rating; different
+  reviews are concatenated.
+- Not built yet: data export, account deletion, active-state checks on callbacks,
   token `exp` rechecks, optimistic concurrency, confirmed performance dates.
 
 ## 1. Recommendation

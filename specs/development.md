@@ -37,10 +37,12 @@ client_secret = "REPLACE_WITH_CLIENT_SECRET"
 server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
 ```
 
-New sign-ins are readers. The **Verwaltung** pages are shown only to admins:
+New sign-ins are readers. The **Verwaltung** pages are shown only to admins.
+Verify the account's issuer and subject, then promote its unique user ID;
+never select an account by display name or email:
 
 ```sql
-UPDATE "user" SET is_admin = true WHERE display_name = 'Jane Doe';
+UPDATE "user" SET is_admin = true WHERE id = 'REPLACE_WITH_VERIFIED_USER_UUID';
 ```
 
 For local work without a provider, add `THEATERDB_DEV_AUTH=1` to `.env`. Every
