@@ -100,6 +100,36 @@ def test_migrations_match_models(postgres) -> None:
     assert db.main(["status"]) == 0
 
 
+def test_library_migration_keeps_passwords_and_allows_sso(postgres) -> None:
+    legacy_id, sso_id = uuid.uuid4(), uuid.uuid4()
+    with postgres.begin() as connection:
+        config = user_management.alembic_config(connection)
+        command.upgrade(config, "0010")
+        connection.execute(
+            text(
+                'INSERT INTO "user" (id, username, password_hash, is_active, is_admin) '
+                "VALUES (:id, 'legacy', 'old-hash', true, false)"
+            ),
+            {"id": legacy_id},
+        )
+        command.upgrade(config, "head")
+        connection.execute(
+            text(
+                'INSERT INTO "user" (id, username, password_hash, is_active, is_admin) '
+                "VALUES (:id, 'oidc:issuer|subject', NULL, true, false)"
+            ),
+            {"id": sso_id},
+        )
+        assert (
+            connection.execute(text('SELECT password_hash FROM "user" WHERE id = :id'), {"id": legacy_id}).scalar_one()
+            == "old-hash"
+        )
+        assert (
+            connection.execute(text('SELECT password_hash FROM "user" WHERE id = :id'), {"id": sso_id}).scalar_one()
+            is None
+        )
+
+
 def test_baseline_upgrade_preserves_data_and_indexes_round_trip(postgres) -> None:
     with postgres.begin() as connection:
         command.upgrade(user_management.alembic_config(connection), "0001")
