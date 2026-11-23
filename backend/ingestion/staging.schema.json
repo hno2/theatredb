@@ -726,6 +726,18 @@
             }
           ],
           "default": null
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
         }
       },
       "required": [

@@ -373,6 +373,8 @@ def resolve_staged_text(
     if isinstance(result, Text):
         if data.get("genre") and result.genre is None:
             result.genre = data["genre"]
+        if data.get("description") and not result.description:
+            result.description = data["description"]
         if data.get("published") and result.published is None:
             validated = Text.model_validate(
                 {

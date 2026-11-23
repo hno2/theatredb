@@ -536,6 +536,7 @@ class Text(SourceMixin, DomainModel, table=True):
     genre: str | None = None
     published: dt.datetime | None = Field(default=None, sa_type=DateTime)
     published_precision: DatePrecision | None = None
+    description: str | None = None
     contributions: list[TextContribution] = Relationship(back_populates="text")
     productions: list[Production] = Relationship(back_populates="text")
     titles: list[TextTitle] = Relationship(back_populates="text")
@@ -667,6 +668,69 @@ class Production(SourceMixin, DomainModel, table=True):
     critics: list[str] = Field(default_factory=list, sa_column=Column(JSON))
 
 
+def _value_enum_column(enum: type[StrEnum]) -> Column:
+    return Column(
+        SAEnum(enum, values_callable=lambda members: [m.value for m in members], native_enum=False, length=None),
+        nullable=False,
+    )
+
+
+class TagLayer(StrEnum):
+    """Profil describes what a production is; Inhalt what it concerns."""
+
+    PROFILE = "profile"
+    CONTENT = "content"
+
+
+class Tag(SQLModel, table=True):
+    """Editor-owned controlled vocabulary entry, grouped into a layer and facet."""
+
+    code: str = Field(primary_key=True)  # e.g. "form.tanz"; stable, never reused
+    label: str
+    layer: TagLayer = Field(sa_column=_value_enum_column(TagLayer))
+    facet: str = Field(index=True)
+    definition: str | None = None
+    aliases: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    position: int = 0
+    active: bool = True
+
+
+class TagStatus(StrEnum):
+    """Only published assignments are public; rejections suppress repeated suggestions."""
+
+    SUGGESTED = "suggested"
+    PUBLISHED = "published"
+    REJECTED = "rejected"
+
+
+class TagOrigin(StrEnum):
+    """Who asserted the assignment; manual decisions win over source and model."""
+
+    MANUAL = "manual"
+    SOURCE = "source"
+    MODEL = "model"
+
+
+class ProductionTag(SQLModel, table=True):
+    """One controlled tag decision for one production, with its evidence."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    production_id: uuid.UUID = Field(
+        sa_column=Column(Uuid, ForeignKey("production.id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+    tag_code: str = Field(foreign_key="tag.code", index=True)
+    status: TagStatus = Field(sa_column=_value_enum_column(TagStatus))
+    origin: TagOrigin = Field(sa_column=_value_enum_column(TagOrigin))
+    evidence: str | None = None
+    score: float | None = None  # raw model similarity, not a probability
+    description_hash: str | None = None
+    pipeline: str | None = None
+    decided_by: str | None = None
+    decided_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
+
+    __table_args__ = (UniqueConstraint("production_id", "tag_code"),)
+
+
 class ProductionMembership(SQLModel, table=True):
     """Represents the involvement of a person in a production with a specific role."""
 
@@ -752,6 +816,10 @@ def _validate_text_changes(session: SASession, _context: object, _instances: obj
             lineage.append(row)
     if texts:
         _sync_display_titles(session, texts)
+    if any(isinstance(row, Production) for row in changed):
+        from backend.taxonomy import on_before_flush  # ruff: ignore[import-outside-top-level]
+
+        on_before_flush(session)
     if lineage:
         _validate_lineage_graph(session, lineage)
 

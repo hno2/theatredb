@@ -19,6 +19,8 @@ from backend.entity_management import (
     verified_organization_filter,
 )
 from backend.models import Organization, Person, Production, Text
+from backend.taxonomy import FACETS, LAYER_LABELS, facet_options
+from backend.user_management import get_session
 from frontend.management.filters import SqlFilter, render_filter_section
 from frontend.management.uifactory import _FieldUI
 from frontend.views.helpers import entity_anchor, render_tags, theatre_city, theatre_label
@@ -94,6 +96,30 @@ def _summary(kind: str, query: str, filter_key: str, _filters: list[SqlFilter]) 
 def _tag_options(kind: str) -> list[str]:
     model = Organization if kind == "organization" else Production
     return get_unique_field_values(model, "tags")
+
+
+@st.cache_data(ttl=300, max_entries=1, show_spinner=False)
+def _facet_fields() -> list[_FieldUI]:
+    with get_session() as session:
+        options = facet_options(session)
+    return [
+        _FieldUI(
+            f"tag_{facet}",
+            f"{LAYER_LABELS[FACETS[facet][0]]}: {FACETS[facet][1]}",
+            "facet",
+            True,
+            options=[code for code, _ in values],
+            option_labels=dict(values),
+        )
+        for facet, values in options.items()
+    ]
+
+
+def _extra_filter_fields(kind: str) -> list[_FieldUI]:
+    if kind not in {"organization", "production"}:
+        return []
+    tags = _FieldUI("tags", "Schlagworte", "tags", True, options=_tag_options(kind))
+    return [tags, *_facet_fields()] if kind == "production" else [tags]
 
 
 def _render_entry(kind: str, entry: dict) -> None:
@@ -247,8 +273,7 @@ def render_catalog(kind: str) -> None:
     with results:
         heading = st.empty()
         sort_by, descending = _render_sort() if kind == "production" else ("premiere", True)
-        if kind in {"organization", "production"}:
-            fields = [*fields, _FieldUI("tags", "Schlagworte", "tags", True, options=_tag_options(kind))]
+        fields = [*fields, *_extra_filter_fields(kind)]
         filters, values = render_filter_section(model, fields, key=kind, shareable=True)
     only_verified = kind == "organization" and verified_only()
     if only_verified:

@@ -6,6 +6,8 @@ import streamlit as st
 
 from backend.config import canonical_role
 from backend.entity_management import get_people_productions
+from backend.models import TagLayer, TagStatus
+from backend.taxonomy import FACETS, LAYER_LABELS, ORIGIN_LABELS
 from frontend.views.helpers import entity_anchor, render_tags, role_label, theatre_label
 from frontend.views.organization import (
     domain_date_interval,
@@ -277,7 +279,26 @@ def _render_heading(data: dict, organization: dict, memberships: list[dict]) -> 
         st.markdown(" · ".join(filter(None, facts)), help="Die Premiere ist kein aktueller Aufführungstermin.")
     if data.get("premiere") and premiere == "Nicht hinterlegt":
         st.warning(f"Ungültiges Premierendatum: {data['premiere']}")
-    render_tags(data.get("tags") or [])
+    _render_taxonomy(data)
+
+
+def _render_taxonomy(data: dict) -> None:
+    rows = [row for row in data.get("taxonomy") or [] if row["status"] == TagStatus.PUBLISHED]
+    if not rows:
+        # Before the legacy backfill ran, keep showing the source's free-text tags.
+        render_tags(data.get("tags") or [])
+        return
+    for layer, label in LAYER_LABELS.items():
+        if layer_rows := [row for row in rows if row["layer"] == layer]:
+            with st.container(horizontal=True, gap="xsmall", vertical_alignment="center"):
+                st.caption(label)
+                for row in layer_rows:
+                    st.badge(
+                        row["label"],
+                        color="blue" if layer == TagLayer.PROFILE else "violet",
+                        help=f"{FACETS[row['facet']][1]} · {ORIGIN_LABELS[row['origin']]}"
+                        + (f" · {row['evidence']}" if row["evidence"] else ""),
+                    )
 
 
 def _render_overview(data: dict, memberships: list[dict]) -> None:

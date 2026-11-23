@@ -3,7 +3,7 @@ from urllib.parse import urlencode
 import streamlit as st
 
 from backend.config import DISCOVERY_KINDS, TEXT_GENRES
-from backend.entity_management import get_entity_graph
+from backend.entity_management import get_entity_graph, get_production_taxonomy
 from backend.models import Text
 from frontend.views.catalog import CATALOG_ROUTES, CATALOGS
 from frontend.views.discovery import render_discovery
@@ -45,6 +45,9 @@ if params.get("id"):
         ]
         if metadata := " · ".join(filter(None, details)):
             st.text(metadata)
+        if text.get("description"):
+            st.subheader("Beschreibung")
+            st.markdown(text["description"])
         if variants := sorted({row["title"] for row in text["titles"] if row["title"] != text["title"]}):
             st.subheader("Weitere Titel")
             for variant in variants:
@@ -71,7 +74,7 @@ if params.get("id"):
             if kind == "production":
                 if not (data.get("organization") or {}).get("id"):
                     _render_directory_link(kind)
-                render_production(data)
+                render_production({**data, "taxonomy": get_production_taxonomy(str(data["id"]))})
             elif kind == "organization":
                 render_organization(data)
             else:

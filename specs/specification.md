@@ -90,6 +90,23 @@ administrative tools for imports, review, and data maintenance.
   production adaptations remain credits unless published as their own text.
 - Text management shows credits, related works, versions, and productions.
   Ambiguous imported matches wait for review.
+- A text may have a `description` (blurb/synopsis). Imports fill it only when
+  empty; it shows on the text detail page.
+
+## Production taxonomy
+
+- Controlled vocabulary in `backend/taxonomy.py`, synced into `Tag` on every
+  migrate. Two layers: **Profil** (form, premiere, practice, audience, context)
+  and **Inhalt** (theme, period, setting, reference). Inactive codes stay for
+  history.
+- `ProductionTag` stores one row per production and code with status
+  (`published`, `suggested`, `rejected`), origin (`manual`, `source`, `model`),
+  evidence, and audit fields. Legacy `Production.tags` are mapped through
+  vocabulary aliases on flush; unmapped strings stay legacy-only.
+- Precedence: manual decisions are never overwritten or deleted by source
+  mapping; source rows follow the legacy tags; model rows are suggestions until
+  reviewed. Merges keep the manual row when both productions have the code.
+- Public filters and badges only use `published` rows.
 
 ## Optional integrations
 

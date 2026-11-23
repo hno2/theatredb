@@ -42,6 +42,9 @@ _FIELD_ALIASES = {
     "übersetzung": "translators",
     "ubersetzung": "translators",
     "sprache": "language",
+    "beschreibung": "description",
+    "inhalt": "description",
+    "klappentext": "description",
     "ua": "world_premiere",
     "uraufführung": "world_premiere",
     "urauffuhrung": "world_premiere",
@@ -238,7 +241,7 @@ def _replay(
 
 def _fill_known_text(session: Session, text: Text, metadata: dict, people: CreditPeople) -> None:
     updates = {}
-    for key in ("genre", "published", "published_precision"):
+    for key in ("genre", "published", "published_precision", "description"):
         if getattr(text, key) is None and metadata.get(key) is not None:
             updates[key] = metadata[key]
     if not text.languages and metadata.get("language"):

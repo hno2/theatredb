@@ -16,6 +16,7 @@ from backend.data_quality import QUALITY_FIELDS
 from backend.date_precision import DatePrecision
 from backend.reconciliation import resolve_id
 from backend.scd2 import add_scd2_event
+from backend.taxonomy import production_tags
 from backend.user_management import get_session
 
 from .models import (
@@ -296,6 +297,12 @@ def get_entity_graph[ModelT: SQLModel](
         if entity is None:
             raise ValueError(f"{model_cls.__name__} not found")
         return _serialize_entity_graph(entity, max_depth=max_depth)
+
+
+def get_production_taxonomy(production_id: str) -> list[dict[str, Any]]:
+    """Controlled tag assignments of one production for display."""
+    with get_session() as session:
+        return production_tags(session, UUID(production_id))
 
 
 def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
