@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:18.4
+    image: pgvector/pgvector:0.8.7-pg18  # PostgreSQL 18 + pgvector for description search
     restart: always
     # set shared memory limit when using docker compose
     shm_size: 128mb

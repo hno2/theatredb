@@ -7,6 +7,7 @@ from graphlib import CycleError, TopologicalSorter
 from itertools import batched
 from typing import Any, ClassVar, Protocol, cast
 
+from pgvector.sqlalchemy import Vector
 from pydantic import model_validator
 from sqlalchemy import JSON, CheckConstraint, Column, DateTime, ForeignKey, Index, Uuid, event, select, text
 from sqlalchemy import Enum as SAEnum
@@ -775,13 +776,37 @@ class ProductionTag(SQLModel, table=True):
     status: TagStatus = Field(sa_column=_value_enum_column(TagStatus))
     origin: TagOrigin = Field(sa_column=_value_enum_column(TagOrigin))
     evidence: str | None = None
-    score: float | None = None  # raw model similarity, not a probability
+    score: float | None = None  # model similarity margin, not a probability
     description_hash: str | None = None
     pipeline: str | None = None
     decided_by: str | None = None
     decided_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
 
     __table_args__ = (UniqueConstraint("production_id", "tag_code"),)
+
+
+EMBEDDING_DIMENSIONS = 640
+
+
+class DescriptionChunk(SQLModel, table=True):
+    """One embedded passage of a production or text description; stale when its hash or pipeline differs."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    production_id: uuid.UUID | None = Field(
+        default=None, sa_column=Column(Uuid, ForeignKey("production.id", ondelete="CASCADE"), index=True)
+    )
+    text_id: uuid.UUID | None = Field(
+        default=None, sa_column=Column(Uuid, ForeignKey("text.id", ondelete="CASCADE"), index=True)
+    )
+    chunk_no: int
+    content: str
+    description_hash: str
+    pipeline: str
+    embedding: list[float] = Field(sa_column=Column(Vector(EMBEDDING_DIMENSIONS), nullable=False))
+
+    __table_args__ = (
+        CheckConstraint("(production_id IS NULL) <> (text_id IS NULL)", name="ck_descriptionchunk_one_owner"),
+    )
 
 
 class ProductionMembership(SQLModel, table=True):
