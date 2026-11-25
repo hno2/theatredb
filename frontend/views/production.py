@@ -224,7 +224,7 @@ def _render_connections(data: dict) -> None:
     if not cards and not related_texts:
         return
     st.header("Weitere Produktionen und Texte" if related_texts else "Weitere Produktionen")
-    with st.grid(min(3, len(cards) + bool(related_texts)), min_column_width=224):
+    with st.grid(min(3, len(cards) + bool(related_texts)), min_column_width=320):
         for title, rows, context_field, footer in cards:
             _render_related_card(title, rows, context_field, footer, data)
         if related_texts:
@@ -286,7 +286,8 @@ def _render_heading(data: dict, organization: dict, memberships: list[dict]) -> 
 def _render_overview(data: dict, memberships: list[dict]) -> None:
     description = data.get("description")
     if description and memberships:
-        overview, cast = st.columns([3, 2], gap="medium")
+        layout = st.grid(2, min_column_width=320, gap="medium")
+        overview, cast = layout.cell(), layout.cell()
     else:
         overview = cast = st.container()
     with overview:

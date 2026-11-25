@@ -116,6 +116,18 @@ def test_catalog_loads_url_filters_and_applies_suggestions(catalog_db):
     assert "year_from" not in app.query_params
 
 
+@pytest.mark.parametrize(
+    "file", ["catalog_theater.py", "catalog_productions.py", "catalog_people.py", "catalog_texts.py"]
+)
+def test_catalog_filters_precede_search(catalog_db, file):
+    app = AppTest.from_file(VIEWS / file).run()
+    assert not app.exception
+    elements = list(app.main.children.values())
+    filters = next(index for index, element in enumerate(elements) if element.type == "expander")
+    search = next(index for index, element in enumerate(elements) if element.type == "text_input")
+    assert filters < search
+
+
 def test_catalog_search_resets_pagination(catalog_db, monkeypatch):
     monkeypatch.setattr(catalog, "PAGE_SIZE", 1)
     app = AppTest.from_file(VIEWS / "catalog_productions.py")

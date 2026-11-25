@@ -435,10 +435,10 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         return
     page_key = f"theatre_page_{organization_id}_{search}_{person}_{ages}_{premiere_range}_{tags}_{order}"
     page = st.pagination((len(ordered) + 11) // 12, key=page_key) if len(ordered) > 12 else 1
-    for index, production in enumerate(ordered[(page - 1) * 12 : page * 12]):
-        if index:
-            st.divider()
-        render_theatre_production(production)
+    with st.container(gap="medium"):
+        for production in ordered[(page - 1) * 12 : page * 12]:
+            with st.container(gap="xsmall"):
+                render_theatre_production(production)
 
 
 def _render_compact_source(source: dict, name: str, url: str | None, metadata: list[str]) -> None:

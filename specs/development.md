@@ -75,6 +75,12 @@ uv run --all-groups pytest
 uv run --all-groups prek run
 ```
 
+For responsive UI checks, use viewport widths of 390, 640, 768 and 1280 pixels.
+Catalog filters sit above search; catalog and production content grids reflow
+based on available width. Personal actions on text and production pages stack
+at full width on viewports up to 640 pixels. Check theatre production previews
+for compact spacing between tags and the next entry.
+
 ## Production deployments
 
 The **Deploy production** workflow runs on every push to `main` and can also be
