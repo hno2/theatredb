@@ -23,8 +23,7 @@ Back up before migrations. In Docker, run database commands with
 
 Browsing is public. Personal lists, ratings and visits need sign-in via
 Streamlit's native OIDC (`st.login`). Configure a provider in the ignored
-`.streamlit/secrets.toml` (production: mount it read-only at
-`/app/.streamlit/secrets.toml` in the app container):
+`.streamlit/secrets.toml`:
 
 ```toml
 [auth]
@@ -36,6 +35,25 @@ client_id = "REPLACE_WITH_CLIENT_ID"
 client_secret = "REPLACE_WITH_CLIENT_SECRET"
 server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
 ```
+
+For production, use a separate OIDC client, cookie secret and HTTPS redirect URI.
+The production Compose override mounts `data/streamlit` from the production
+checkout read-only at `/home/nonroot/.streamlit` in the app container, where
+Streamlit reads its global secrets. Without a secrets file, browsing remains
+available but sign-in is not configured. On the server, from the production
+checkout, install a prepared secrets file readable only by the container user
+(UID 999):
+
+```bash
+sudo install -d -m 700 -o 999 -g 999 data/streamlit
+sudo install -m 600 -o 999 -g 999 /path/to/production-secrets.toml data/streamlit/secrets.toml
+```
+
+Keep both copies out of Git and restrict access to the source file too. Register
+the exact production `redirect_uri` with the provider. Reinstall the updated
+production Compose override on the server as described below, then redeploy to
+apply the mount or changes to the secrets file. The crawler worker does not
+receive the secrets.
 
 New sign-ins are readers. The **Verwaltung** pages are shown only to admins.
 Verify the account's issuer and subject, then promote its unique user ID;
@@ -59,16 +77,16 @@ uv run --all-groups prek run
 
 ## Production deployments
 
-The **Deploy production** workflow runs manually on `main`. It tests the
-selected commit, publishes an amd64/arm64 image to GHCR, and deploys its digest
-to the existing Compose project. The GitHub `production` environment records
-the result and links to the live site.
+The **Deploy production** workflow runs on every push to `main` and can also be
+started manually. It tests the selected commit, publishes an amd64/arm64 image
+to GHCR, and deploys its digest to the existing Compose project. The GitHub
+`production` environment records the result and links to the live site.
 
 ### One-time setup
 
-After merging the workflow, run these commands on your workstation to create
-a key dedicated to GitHub Actions. Keep the private key out of the repository
-and off the server.
+Configure production before enabling automatic deployment on `main`. Run these
+commands on your workstation to create a key dedicated to GitHub Actions. Keep
+the private key out of the repository and off the server.
 
 ```bash
 ssh-keygen -t ed25519 -N '' -C theatredb-production -f ~/.ssh/theatredb-production
@@ -149,17 +167,19 @@ the workflow as a workaround.
 
 ### Release and rollback
 
-1. In GitHub **Actions → Deploy production → Run workflow**, select `main`.
-   For the first run only, check **Publish image without deploying**. After
-   it succeeds, make the `theatredb` package public in its GHCR package
-   settings so the vserver can pull without a registry credential. The
+1. A push to `main` starts a deployment automatically. To rerun it manually,
+   select `main` in **Actions → Deploy production → Run workflow** and leave
+   **Publish image without deploying** unchecked. To publish only, check that
+   option on a manual run. Before the server's first pull, make the `theatredb`
+   package public in GHCR so it can pull without a registry credential. The
    image contains public source, not the server's `.env` or database.
-2. Run the workflow again, this time with **Publish image without deploying**
-   unchecked. Each run pulls the same digest for `app` and `crawl-worker`,
+2. Each deployment pulls the same digest for `app` and `crawl-worker`,
    backs up PostgreSQL, and replaces only those two containers. The app
    applies migrations at startup. Expect a short interruption, and avoid
    deploying during active crawls. A successful deployment checks the
    public Streamlit endpoint and worker process, not crawler job execution.
+   The public check retries transient HTTP errors while the proxy catches up;
+   persistent failures still fail the deployment.
 3. Keep the digest from the last successful Actions run. To roll back a
    compatible release, substitute the actual production directory, Compose
    project and prior digest in this command on the vserver:

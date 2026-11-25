@@ -1,4 +1,5 @@
 import datetime as dt
+import importlib
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -20,6 +21,10 @@ from frontend import auth
 from frontend.views import personal
 
 TODAY = dt.date(2026, 11, 21)
+
+
+def test_oidc_server_dependencies_are_available():
+    assert callable(importlib.import_module("authlib.integrations.starlette_client").OAuth)
 
 
 @pytest.fixture
