@@ -18,6 +18,7 @@ from backend.models import (
 )
 from frontend import auth
 from frontend.views import personal
+from frontend.views import text as text_view
 
 TODAY = dt.date(2026, 11, 21)
 
@@ -243,6 +244,20 @@ def test_anonymous_actions_nudge_and_write_nothing(app_db):
     assert any("Anmelden, damit" in caption.value for caption in app.caption)
     with Session(app_db) as session:
         assert session.exec(select(LibraryEntry)).all() == []
+
+
+def test_text_page_shows_description_and_library_actions(monkeypatch):
+    monkeypatch.setattr(text_view, "stagings", lambda _: [])
+    actions = []
+    monkeypatch.setattr(text_view, "render_actions", lambda *args: actions.append(args))
+    app = AppTest.from_string(
+        "from frontend.views.text import render_text_page\n"
+        'render_text_page({"id": "text-id", "title": "Text", "description": "Eine Geschichte"})'
+    ).run()
+    assert not app.exception
+    assert any(item.value == "Beschreibung" for item in app.subheader)
+    assert any(item.value == "Eine Geschichte" for item in app.markdown)
+    assert actions == [("text", "text-id", {})]
 
 
 def test_signed_in_actions_save_wish_and_stars(app_db):
