@@ -728,7 +728,7 @@ def test_people_merge_table_limits_queries_and_parameters_for_large_pages(db, li
     with Session(db) as session:
         session.execute(
             insert(Person),
-            [{"id": uuid.UUID(int=index), "name": f"Middle {index:05}"} for index in range(1, 32767)],
+            [{"id": uuid.UUID(int=index), "name": f"Middle {index:05}", "alt_names": []} for index in range(1, 32767)],
         )
         session.commit()
     parameter_counts = []

@@ -102,6 +102,21 @@ administrative tools for imports, review, and data maintenance.
 - Publisher extraction accepts supplied HTML and CSS rules. Site-specific
   crawling rules need verified fixtures.
 
+## Personal library and authentication
+
+Signed-in users keep a private library: **Merken** (wish list), **Gelesen**
+(texts), **Gesehen** (visits, optionally with production and date), 1–5 stars
+with a private Rezension, and named lists such as **Must see**. Actions sit as
+an icon row on text and production pages; **Meine Sammlung** shows Merkliste,
+Tagebuch, Bewertungen and Listen. Anonymous visitors browse freely and get a
+gentle login nudge. Sign-in uses native Streamlit OIDC; `THEATERDB_DEV_AUTH=1`
+gives local admin access. Catalogue management is admin-only.
+
+A wanted text lists productions of its work family (translations/adaptations)
+grouped as upcoming, recent or past premieres. These are premiere dates, not
+confirmed performances; real show discovery needs a source-backed performance
+extension. Full design and deviations: [personal-library specification](user-library.md).
+
 ## Data-quality assessments
 
 The [data-quality specification](data-quality.md) defines editorial

@@ -2,15 +2,16 @@ from urllib.parse import urlencode
 
 import streamlit as st
 
-from backend.config import DISCOVERY_KINDS, TEXT_GENRES
+from backend.config import DISCOVERY_KINDS
 from backend.entity_management import get_entity_graph
 from backend.models import Text
 from frontend.views.catalog import CATALOG_ROUTES, CATALOGS
 from frontend.views.discovery import render_discovery
-from frontend.views.organization import domain_date_label, load_organization_profile, render_organization
+from frontend.views.organization import load_organization_profile, render_organization
 from frontend.views.person import render_person
 from frontend.views.production import render_production
 from frontend.views.settings import theatre_filter_link_params, verified_only
+from frontend.views.text import render_text_page
 
 params = st.query_params
 
@@ -32,23 +33,11 @@ if params.get("id"):
         _render_directory_link(kind)
     if kind == "text":
         try:
-            text = get_entity_graph(Text, params["id"], max_depth=1)
+            text = get_entity_graph(Text, params["id"], max_depth=2)
         except ValueError:
             st.error("Text nicht gefunden.")
             st.stop()
-        st.title(text["title"])
-        genre = text.get("genre") or ""
-        details = [
-            TEXT_GENRES.get(genre, genre),
-            ", ".join(text.get("languages") or []),
-            domain_date_label(text, "published") if text.get("published") else None,
-        ]
-        if metadata := " · ".join(filter(None, details)):
-            st.text(metadata)
-        if variants := sorted({row["title"] for row in text["titles"] if row["title"] != text["title"]}):
-            st.subheader("Weitere Titel")
-            for variant in variants:
-                st.text(variant)
+        render_text_page(text)
     elif kind not in DISCOVERY_KINDS:
         st.error("Unknown entity type.")
     else:

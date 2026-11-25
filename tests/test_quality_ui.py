@@ -1,5 +1,5 @@
 import datetime as dt
-from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -10,9 +10,11 @@ from backend.data_quality import apply_quality_action
 from backend.models import Organization, OrganizationSeasonCheck, ReconciliationCase
 from backend.reconciliation import queue_duplicate
 from backend.scd2 import SCD2History
+from frontend.auth import Principal
 from frontend.management import quality
 from frontend.views.organization import load_organization_profile
 
+EDITOR = UUID(int=7)
 EDITOR_SCRIPT = """
 import streamlit as st
 from frontend.management.quality import render_quality_editor
@@ -36,7 +38,7 @@ def editor(tmp_path, monkeypatch: pytest.MonkeyPatch):
         organization_id = organization.id
     app = AppTest.from_string(EDITOR_SCRIPT)
     app.session_state.organization_id = str(organization_id)
-    app.session_state.mock_user = SimpleNamespace(email="editor@local")
+    app.session_state["_principal"] = Principal(EDITOR, "Editor", is_admin=True)
     yield app, engine, organization_id
     load_organization_profile.clear()
     engine.dispose()
@@ -57,12 +59,11 @@ def test_current_season_is_one_deliberate_confirmation_with_reused_source_and_au
     with Session(engine) as session:
         check = session.exec(select(OrganizationSeasonCheck)).one()
         assert check.organization_id == organization_id
-        assert check.checked_by == "editor@local"
+        assert check.checked_by == str(EDITOR)
         assert check.evidence == "https://theater.example/spielplan"
-        assert (
-            session.exec(select(SCD2History).where(SCD2History.entity_name == "organizationseasoncheck")).one().actor_id
-            == "editor@local"
-        )
+        assert session.exec(
+            select(SCD2History).where(SCD2History.entity_name == "organizationseasoncheck")
+        ).one().actor_id == str(EDITOR)
     assert any("Aktuelle Spielzeit geprüft" in text.value for text in app.text)
 
 
@@ -92,7 +93,7 @@ def test_validation_error_preserves_input_and_undo_requires_confirmation(editor)
 
 def test_editor_without_actor_is_read_only(editor) -> None:
     app, engine, _ = editor
-    del app.session_state["mock_user"]
+    del app.session_state["_principal"]
     app.run()
     assert not app.exception
     assert not app.button
@@ -169,7 +170,7 @@ else:
     st.success("Merged")
 """)
     app.session_state.case_id = str(case.id)
-    app.session_state.mock_user = SimpleNamespace(email="editor@local")
+    app.session_state["_principal"] = Principal(EDITOR, "Editor", is_admin=True)
     app.run()
     assert not app.exception
     app.checkbox[0].check().run()
