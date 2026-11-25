@@ -3,6 +3,8 @@ services:
     image: ${THEATREDB_IMAGE:?Set THEATREDB_IMAGE to the release image digest}
     environment:
       THEATERDB_ENV: production
+    volumes:
+      - ./data/streamlit:/home/nonroot/.streamlit:ro
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3).close()"]
       interval: 5s
