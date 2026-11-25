@@ -13,7 +13,7 @@ from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlmodel import SQLModel, col, select
-from streamlit import session_state, user
+from streamlit import session_state
 
 from backend.config import ENTITY_LABELS, FORM_FIELD_KINDS, canonical_role
 from backend.data_quality import QUALITY_FIELDS
@@ -32,6 +32,7 @@ from backend.entity_management import (
 from backend.models import Organization, Person, Production, Source, Text, TextContribution, TextLineage
 from backend.reconciliation import count_people_for_merge, search_people_for_merge, stable_digest
 from backend.user_management import get_session
+from frontend.auth import principal
 from frontend.management.filters import SqlFilter, render_filter_section
 from frontend.management.merge import render_merge_action
 from frontend.views.organization import web_url
@@ -111,12 +112,9 @@ def _order_expr(model_cls: type[SQLModel], field_name: str) -> InstrumentedAttri
 
 
 def _actor_id() -> str | None:
-    """Get the actor ID for auditing purposes, based on the current user or mock user."""
-    src = user if getattr(user, "is_logged_in", False) else session_state.get("mock_user")
-    if src is None:
-        return None
-    actor_id = getattr(src, "email", None) or getattr(src, "sub", None)
-    return str(actor_id) if actor_id else None
+    """Internal user ID of the signed-in editor for auditing."""
+    editor = principal()
+    return str(editor.id) if editor else None
 
 
 def _unwrap_optional(annotation: object) -> tuple[object, bool]:

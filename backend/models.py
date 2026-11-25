@@ -39,9 +39,62 @@ class User(SQLModel, table=True):
     username: str = Field(index=True, sa_column_kwargs={"unique": True})
     display_name: str | None = None
     email: str | None = Field(default=None, index=True, sa_column_kwargs={"unique": True})
-    password_hash: str
+    password_hash: str | None = None
     is_active: bool = True
     is_admin: bool = False
+
+
+class LibraryEntry(SQLModel, table=True):
+    """One user's private wish, stars and review for exactly one text or production."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    user_id: uuid.UUID = Field(foreign_key="user.id", index=True)
+    text_id: uuid.UUID | None = Field(default=None, foreign_key="text.id", index=True)
+    production_id: uuid.UUID | None = Field(default=None, foreign_key="production.id", index=True)
+    want_to_see: bool = False
+    rating: int | None = None
+    review: str | None = Field(default=None, sa_type=SQLText)
+    updated_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC), sa_type=DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "text_id"),
+        UniqueConstraint("user_id", "production_id"),
+        CheckConstraint("(text_id IS NULL) != (production_id IS NULL)", name="ck_libraryentry_one_target"),
+        CheckConstraint("rating IS NULL OR rating BETWEEN 1 AND 5", name="ck_libraryentry_rating"),
+    )
+
+
+class LibraryVisit(SQLModel, table=True):
+    """A reading or theatre visit; repeat visits are separate rows."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    entry_id: uuid.UUID = Field(foreign_key="libraryentry.id", index=True)
+    kind: str
+    visited_on: dt.date | None = None
+    created_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC), sa_type=DateTime(timezone=True))
+
+    __table_args__ = (CheckConstraint("kind IN ('read', 'watched')", name="ck_libraryvisit_kind"),)
+
+
+class Playlist(SQLModel, table=True):
+    """A named private list such as "Must see"."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    user_id: uuid.UUID = Field(foreign_key="user.id", index=True)
+    name: str
+
+    __table_args__ = (UniqueConstraint("user_id", "name"),)
+
+
+class PlaylistItem(SQLModel, table=True):
+    """A library entry on a playlist, in insertion order."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    playlist_id: uuid.UUID = Field(foreign_key="playlist.id", index=True)
+    entry_id: uuid.UUID = Field(foreign_key="libraryentry.id", index=True)
+    position: int = 0
+
+    __table_args__ = (UniqueConstraint("playlist_id", "entry_id"),)
 
 
 class Source(SQLModel, table=True):

@@ -12,7 +12,8 @@ depends_on = None
 def upgrade() -> None:
     """Initialize existing people without inventing alternative names."""
     op.add_column("person", sa.Column("alt_names", sa.JSON(), nullable=False, server_default=sa.text("'[]'")))
-    op.alter_column("person", "alt_names", server_default=None)
+    with op.batch_alter_table("person") as batch:
+        batch.alter_column("alt_names", existing_type=sa.JSON(), server_default=None)
 
 
 def downgrade() -> None:
