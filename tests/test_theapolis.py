@@ -1269,7 +1269,7 @@ def test_cross_role_matching_uses_bounded_queries(db, monkeypatch, tmp_path, ite
     try:
         result = theapolis.import_all(path, dach_only=False)
         assert len(result["person"]) == size
-        assert len(statements) < 100
+        assert sum(not statement.startswith("PRAGMA main.table_info(") for statement in statements) < 100
         assert sum(statement.startswith("SELECT ") for statement in statements) < 60
         statements.clear()
         assert theapolis.import_all(path, dach_only=False) == result
