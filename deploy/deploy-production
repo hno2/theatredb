@@ -22,7 +22,7 @@ flock -n 9 || fail "Another deployment is already running for $project"
 
 db=$("${compose[@]}" ps --status running -q db)
 [[ -n $db ]] || fail "No running database for Compose project $project; check the project name and directory"
-"${compose[@]}" pull --policy always app crawl-worker
+"${compose[@]}" pull --policy always app api crawl-worker
 backup=$(mktemp "$state_dir/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
 trap 'rm -f -- "$backup"' EXIT
 "${compose[@]}" exec -T db sh -ec '
@@ -35,9 +35,12 @@ mv -- "$backup" "$backup.dump"
 trap - EXIT
 printf 'Database backup: %s\nDeploying: %s\n' "$backup.dump" "$image"
 
-"${compose[@]}" up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 app crawl-worker
+"${compose[@]}" up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 app
+"${compose[@]}" up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 api crawl-worker
 curl -fsS --max-time 10 --retry 5 --retry-connrefused --retry-all-errors \
   https://theater.simonklug.de/_stcore/health
+curl -fsS --max-time 10 --retry 5 --retry-connrefused --retry-all-errors \
+  'https://theater.simonklug.de/api/organizations?limit=1' > /dev/null
 worker=$("${compose[@]}" ps -q crawl-worker)
 [[ -n $worker && $(docker inspect --format '{{.State.Running}} {{.RestartCount}}' "$worker") == 'true 0' ]] ||
   fail "Crawler worker is not running cleanly; inspect its Compose logs"

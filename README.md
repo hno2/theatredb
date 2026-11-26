@@ -43,6 +43,8 @@ uv run uvicorn backend.api:app --reload
 ```
 
 Open <http://localhost:8000/docs> for the interactive API documentation.
+The deployed API is available at <https://theater.simonklug.de/api/organizations>,
+with documentation at <https://theater.simonklug.de/docs>.
 The API uses the same database settings as the app; it does not create databases
 or run migrations on startup.
 
@@ -52,6 +54,11 @@ or run migrations on startup.
 - `GET /api/{resource}/{uuid}`: get a public entity graph with relationships
   and source links. Merged IDs resolve to the surviving entity. Missing records
   return 404; invalid UUIDs or pagination parameters return 422.
+- `GET /api/organizations/{uuid}/orif`, `/api/productions/{uuid}/orif`,
+  `/api/people/{uuid}/orif`: export as
+  [Open Repertoire](https://buehnenverein.github.io/open-repertoire/) v2
+  (`application/ld+json`). People return one document per theatre. See
+  [specs/open-repertoire.md](specs/open-repertoire.md).
 
 Search and ranking reuse the public catalog helpers, including theatre context
 for productions and alternative titles for texts. Production lists include

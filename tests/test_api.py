@@ -27,7 +27,7 @@ def api_db(monkeypatch, tmp_path):
     monkeypatch.setattr("backend.user_management._get_engine", lambda: engine)
     theatre = Organization(
         name="Test Theatre",
-        city="Berlin",
+        address_locality="Berlin",
         general_verified_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
         general_verified_by="internal-reviewer",
         general_verification_evidence="https://example.org",
@@ -56,7 +56,7 @@ def api_db(monkeypatch, tmp_path):
                 TextTitle(text_id=text.id, title="Alternative"),
                 production,
                 Production(name="Other Production"),
-                ProductionMembership(person_id=person.id, production_id=production.id, role="director"),
+                ProductionMembership(person_id=person.id, production_id=production.id, role_name="director"),
                 source,
                 EntitySource(source_id=source.id, entity_type=EntityType.PRODUCTION, entity_id=production.id),
                 EntityRedirect(entity_type=EntityType.PERSON, old_id=old_id, target_id=person.id),
@@ -115,6 +115,23 @@ def test_details_preserve_relationships_redaction_and_merged_ids(client, api_db)
     assert client.get(f"/api/people/{api_db['old_person']}").json()["id"] == str(api_db["people"])
 
 
+def test_open_repertoire_exports_use_orif_documents(client, api_db):
+    organization = client.get(f"/api/organizations/{api_db['organizations']}/orif")
+    assert organization.headers["content-type"] == "application/ld+json"
+    document = organization.json()
+    assert (document["version"], document["organization"]["name"]) == ("v2", "Test Theatre")
+    [production] = document["productions"]
+    assert (production["identifier"], production["name"]) == (str(api_db["productions"]), "Test Production")
+    assert production["creator"][0]["creator"][0]["name"] == "Test Director"
+    assert production["isBasedOn"] == [{"@type": "CreativeWork", "name": "Test Play"}]
+    assert client.get(f"/api/productions/{api_db['productions']}/orif").json() == document
+    assert client.get(f"/api/people/{api_db['old_person']}/orif").json() == [document]
+    other = client.get("/api/productions", params={"q": "Other"}).json()["items"][0]["id"]
+    assert client.get(f"/api/productions/{other}/orif").status_code == 404
+    for resource in ("organizations", "productions", "people"):
+        assert client.get(f"/api/{resource}/{uuid4()}/orif").status_code == 404
+
+
 @pytest.mark.parametrize(
     ("params", "status"),
     [({"limit": 100}, 200), ({"limit": 0}, 422), ({"limit": 101}, 422), ({"limit": "bad"}, 422), ({"offset": -1}, 422)],
@@ -135,7 +152,7 @@ def test_unexpected_errors_are_not_reported_as_missing_entities(client, api_db, 
 def test_openapi_exposes_only_get_routes_and_parameter_bounds():
     with TestClient(app) as client:
         schema = client.get("/openapi.json").json()
-    assert len(schema["paths"]) == 8
+    assert len(schema["paths"]) == 11
     assert all(set(operations) == {"get"} for operations in schema["paths"].values())
     parameters = {parameter["name"]: parameter for parameter in schema["paths"]["/api/texts"]["get"]["parameters"]}
     assert parameters["limit"]["schema"]["minimum"] == 1

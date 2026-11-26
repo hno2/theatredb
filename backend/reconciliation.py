@@ -177,11 +177,11 @@ def search_people_for_merge(
             .subquery()
         )
         credits = session.exec(
-            select(involvement.c.person_id, Production.name, Organization.name, Organization.city)
+            select(involvement.c.person_id, Production.name, Organization.name, Organization.address_locality)
             .join(Production, col(Production.id) == involvement.c.production_id)
             .outerjoin(Organization, col(Organization.id) == col(Production.organization_id))
             .distinct()
-            .order_by(Production.name, Organization.name, col(Organization.city))
+            .order_by(Production.name, Organization.name, col(Organization.address_locality))
         ).all()
         for person_id, production, theatre, city in credits:
             location = f"{theatre} ({city})" if theatre and city else theatre or "Theater nicht hinterlegt"
@@ -227,7 +227,7 @@ def _source_matches(session: Session, kind: EntityType, source_id: uuid.UUID, co
 
 def _person_names(session: Session, production_id: uuid.UUID, role: str | None) -> set[str]:
     rows = session.exec(
-        select(Person.name, ProductionMembership.role)
+        select(Person.name, ProductionMembership.role_name)
         .join(ProductionMembership, col(ProductionMembership.person_id) == col(Person.id))
         .where(ProductionMembership.production_id == production_id)
     ).all()
@@ -284,7 +284,7 @@ def _candidate_evidence(
     elif isinstance(row, Organization):
         conflicts.extend(
             f"Abweichend: {field}"
-            for field in ("city", "country")
+            for field in ("address_locality", "address_country")
             if incoming.get(field)
             and getattr(row, field)
             and normalize(incoming[field]) != normalize(getattr(row, field))
@@ -586,7 +586,7 @@ def _discovery_related_names(
         return None
     names: dict[uuid.UUID, dict[str | None, set[str]]] = {}
     rows = session.exec(
-        select(ProductionMembership.production_id, Person.name, ProductionMembership.role)
+        select(ProductionMembership.production_id, Person.name, ProductionMembership.role_name)
         .join(Person, col(Person.id) == col(ProductionMembership.person_id))
         .where(col(ProductionMembership.production_id).in_(entity_ids))
     ).all()
@@ -903,24 +903,10 @@ def _credit_comparison(session: Session, case: ReconciliationCase, target: Entit
             if not isinstance(person, Person):
                 raise TypeError("Credit must resolve to a person")
             name, status = person.name, "Neu hinzufügen"
-            if isinstance(target, (Production, Text)):
-                model, endpoint = (
-                    (ProductionMembership, "production_id")
-                    if isinstance(target, Production)
-                    else (TextContribution, "text_id")
-                )
-                rows = session.exec(
-                    select(model).where(
-                        getattr(model, endpoint) == target.id,
-                        model.person_id == person.id,
-                    )
-                ).all()
-                if any(
-                    credit_role(row.role) == role
-                    and (not isinstance(row, ProductionMembership) or row.character == character)
-                    for row in rows
-                ):
-                    status = "Bereits vorhanden"
+            if isinstance(target, (Production, Text)) and any(
+                _same_credit(row, role, character) for row in _credit_rows(session, target, person.id)
+            ):
+                status = "Bereits vorhanden"
         result.append({"Person": name, "Funktion": role, "Figur": character, "Aktion": status})
     return result
 
@@ -1482,7 +1468,9 @@ def _deduplicate_links(session: Session, actor_id: str | None, touched: set[tupl
             matches = session.exec(stmt.order_by(col(model.id))).all()
             seen = set()
             for match in matches:
-                key = tuple(credit_role(getattr(match, f)) if f == "role" else getattr(match, f) for f in fields)
+                key = tuple(
+                    credit_role(getattr(match, f)) if f in {"role", "role_name"} else getattr(match, f) for f in fields
+                )
                 if key in seen or (isinstance(match, TextLineage) and match.source_text_id == match.derived_text_id):
                     audit_event(session, match, "delete", actor_id)
                     session.delete(match)
@@ -1860,6 +1848,32 @@ def merge_people(
     )
 
 
+def _credit_rows(
+    session: Session, entity: Production | Text, person_id: uuid.UUID
+) -> list[ProductionMembership] | list[TextContribution]:
+    if isinstance(entity, Production):
+        return list(
+            session.exec(
+                select(ProductionMembership).where(
+                    ProductionMembership.production_id == entity.id, ProductionMembership.person_id == person_id
+                )
+            ).all()
+        )
+    return list(
+        session.exec(
+            select(TextContribution).where(
+                TextContribution.text_id == entity.id, TextContribution.person_id == person_id
+            )
+        ).all()
+    )
+
+
+def _same_credit(row: ProductionMembership | TextContribution, role: str | None, character: str | None) -> bool:
+    if isinstance(row, ProductionMembership):
+        return credit_role(row.role_name) == role and row.character_name == character
+    return credit_role(row.role) == role
+
+
 def ensure_credit(
     session: Session,
     entity: Production | Text,
@@ -1870,38 +1884,28 @@ def ensure_credit(
 ) -> bool:
     """Add a production membership or text contribution unless an equivalent credit exists."""
     role = credit_role(role)
-    model, endpoint = (
-        (ProductionMembership, "production_id") if isinstance(entity, Production) else (TextContribution, "text_id")
-    )
-    rows = session.exec(
-        select(model).where(
-            getattr(model, endpoint) == entity.id,
-            model.person_id == person_id,
-        )
-    ).all()
+    rows = _credit_rows(session, entity, person_id)
     if role == "actor" and character:
         legacy = next(
             (
                 row
                 for row in rows
-                if isinstance(row, ProductionMembership) and row.role == character and not row.character
+                if isinstance(row, ProductionMembership) and row.role_name == character and not row.character_name
             ),
             None,
         )
         if legacy:
-            legacy.role, legacy.character = "actor", character
+            legacy.role_name, legacy.character_name = "actor", character
             session.add(legacy)
             audit_event(session, legacy, "update", actor_id)
             return True
-    if any(
-        credit_role(row.role) == role and (not isinstance(row, ProductionMembership) or row.character == character)
-        for row in rows
-    ):
+    if any(_same_credit(row, role, character) for row in rows):
         return False
-    payload = {endpoint: entity.id, "person_id": person_id, "role": role}
-    if model == ProductionMembership:
-        payload["character"] = character
-    row = model.model_validate(payload)
+    row = (
+        ProductionMembership(production_id=entity.id, person_id=person_id, role_name=role, character_name=character)
+        if isinstance(entity, Production)
+        else TextContribution(text_id=entity.id, person_id=person_id, role=role)
+    )
     session.add(row)
     audit_event(session, row, "insert", actor_id)
     return True

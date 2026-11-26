@@ -31,12 +31,12 @@ def main() -> None:
                 "model": ProductionMembership,
                 "fk_field": "production_id",
                 "title": "Cast & Crew",
-                "order_by": "role",
+                "order_by": "role_name",
                 "editable_table": True,
                 "fk_autocreate": {
                     "person_id": {
                         "payload_field": "name",
-                        "infer_type_from": "role",
+                        "infer_type_from": "role_name",
                         "rename_existing": True,
                     }
                 },
@@ -47,7 +47,7 @@ def main() -> None:
                         "fk_display": "name",
                         "label": "Person",
                     },
-                    "role": {"label": "Role (e.g. director, actor)"},
+                    "role_name": {"label": "Role (e.g. director, actor)"},
                 },
             }
         ],

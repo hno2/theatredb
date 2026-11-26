@@ -57,9 +57,7 @@ def _public_snapshot(entity: SQLModel) -> dict[str, Any]:
     elif isinstance(entity, Person):
         data["type"] = list(
             dict.fromkeys(
-                canonical_role(value)
-                if value.strip().casefold() in RECLASSIFIED_ROLE_ALIASES
-                else value
+                canonical_role(value) if value.strip().casefold() in RECLASSIFIED_ROLE_ALIASES else value
                 for value in (data.get("type") or [])
             )
         )
@@ -174,10 +172,14 @@ def _matching_entities[ModelT: SQLModel](
             entity_id = UUID(search)
         except ValueError:
             fields = (
-                [label, col(Organization.city), col(Organization.country)] if model_cls is Organization else [label]
+                [label, col(Organization.address_locality), col(Organization.address_country)]
+                if model_cls is Organization
+                else [label]
             )
             if model_cls is Production and production_context:
-                fields.extend((col(Organization.name), col(Organization.city), col(Organization.country)))
+                fields.extend(
+                    (col(Organization.name), col(Organization.address_locality), col(Organization.address_country))
+                )
             conditions = [field.icontains(search, autoescape=True) for field in fields]
             if model_cls is Text:
                 conditions.append(
@@ -241,9 +243,9 @@ def linked_sources(session: Session, kind: EntityType, entity_id: UUID) -> list[
 
 def organization_coverage(*, verified_only: bool = False) -> tuple[int, int, int, list[tuple[str, str, int]]]:
     """Aggregate directory and map coverage without loading organization records."""
-    city = func.trim(func.coalesce(Organization.city, ""))
-    country = func.trim(func.coalesce(Organization.country, ""))
-    mapped = col(Organization.lat).between(-90, 90) & col(Organization.lon).between(-180, 180)
+    city = func.trim(func.coalesce(Organization.address_locality, ""))
+    country = func.trim(func.coalesce(Organization.address_country, ""))
+    mapped = col(Organization.latitude).between(-90, 90) & col(Organization.longitude).between(-180, 180)
     filters = (verified_organization_filter(),) if verified_only else ()
     locations = (
         select(city.label("city"), country.label("country"), func.count().label("entries"))
@@ -312,6 +314,15 @@ def get_entity_graph[ModelT: SQLModel](
         return _serialize_entity_graph(entity, max_depth=max_depth)
 
 
+def _text_snapshot(text: Text | None) -> dict[str, Any] | None:
+    if text is None:
+        return None
+    contributions = [
+        {**_snapshot(contribution), "person": _snapshot(contribution.person)} for contribution in text.contributions
+    ]
+    return {**_snapshot(text), "contributions": contributions}
+
+
 def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
     """Fetch distinct productions and credits for people, without recursive graphs."""
     if not person_ids:
@@ -327,6 +338,9 @@ def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
                 selectinload(cast(InstrumentedAttribute, Production.memberships)).selectinload(
                     cast(InstrumentedAttribute, ProductionMembership.person)
                 ),
+                selectinload(cast(InstrumentedAttribute, Production.text))
+                .selectinload(cast(InstrumentedAttribute, Text.contributions))
+                .selectinload(cast(InstrumentedAttribute, TextContribution.person)),
             )
             .order_by(col(Production.name), col(Production.id))
         ).all()
@@ -338,6 +352,7 @@ def get_people_productions(person_ids: list[str]) -> list[dict[str, Any]]:
                     {**_snapshot(membership), "person": _snapshot(membership.person)}
                     for membership in production.memberships
                 ],
+                "text": _text_snapshot(production.text),
             }
             for production in productions
         ]
@@ -366,33 +381,23 @@ def get_organization_profile(entity_id: str, *, verified_only: bool = False) -> 
             )
         ).one_or_none()
         if organization is None:
-            raise ValueError("Organization not found")
+            raise EntityNotFoundError("Organization not found")
         quality_checks = session.exec(
             select(OrganizationSeasonCheck)
             .where(OrganizationSeasonCheck.organization_id == resolved_id)
             .order_by(col(OrganizationSeasonCheck.season_start_year))
         ).all()
-        entries = []
-        for production in organization.productions:
-            text = production.text
-            entries.append(
-                {
-                    **_snapshot(production),
-                    "memberships": [
-                        {**_snapshot(membership), "person": _snapshot(membership.person)}
-                        for membership in production.memberships
-                    ],
-                    "text": {
-                        **_snapshot(text),
-                        "contributions": [
-                            {**_snapshot(contribution), "person": _snapshot(contribution.person)}
-                            for contribution in text.contributions
-                        ],
-                    }
-                    if text
-                    else None,
-                }
-            )
+        entries = [
+            {
+                **_snapshot(production),
+                "memberships": [
+                    {**_snapshot(membership), "person": _snapshot(membership.person)}
+                    for membership in production.memberships
+                ],
+                "text": _text_snapshot(production.text),
+            }
+            for production in organization.productions
+        ]
         return {
             **_public_snapshot(organization),
             "season_checks": [
@@ -433,12 +438,17 @@ def browse_entities(
         filters = [col(model_cls.name).icontains(query, autoescape=True)]
         if model_cls is Organization:
             filters.extend(
-                field.icontains(query, autoescape=True) for field in (col(Organization.city), col(Organization.country))
+                field.icontains(query, autoescape=True)
+                for field in (col(Organization.address_locality), col(Organization.address_country))
             )
         elif model_cls is Production:
             filters.extend(
                 field.icontains(query, autoescape=True)
-                for field in (col(Organization.name), col(Organization.city), col(Organization.country))
+                for field in (
+                    col(Organization.name),
+                    col(Organization.address_locality),
+                    col(Organization.address_country),
+                )
             )
         stmt = stmt.where(or_(*filters))
     with get_session() as session:
@@ -536,7 +546,7 @@ def catalog_summary(model: CatalogModel, search: str, filters: Sequence[ColumnEl
         bucket = extract("year", matches.c.premiere)
         stmt = select(bucket, func.count()).where(matches.c.premiere.is_not(None)).group_by(bucket).order_by(bucket)
     else:
-        fields: dict[CatalogModel, str] = {Organization: "country", Person: "nationality", Text: "genre"}
+        fields: dict[CatalogModel, str] = {Organization: "address_country", Person: "nationality", Text: "genre"}
         field = fields[model]
         bucket = matches.c[field]
         count = func.count()

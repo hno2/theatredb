@@ -162,7 +162,7 @@ FORM_FIELD_KINDS: dict[object, str] = {
     uuid.UUID: "uuid",
 }
 LINK_IDENTITY_FIELDS: dict[type, tuple[str, ...]] = {
-    ProductionMembership: ("production_id", "person_id", "role", "character"),
+    ProductionMembership: ("production_id", "person_id", "role_name", "character_name"),
     TextContribution: ("text_id", "person_id", "role"),
     OrganizationMembership: (
         "organization_id",
@@ -183,7 +183,7 @@ PRODUCTION_FIELD_LABELS = {
     "premiere": "Premiere",
     "description": "Beschreibung",
     "duration": "Dauer (Min.)",
-    "age_rating": "Altersempfehlung",
+    "suggested_min_age": "Altersempfehlung",
     "url": "Website",
     "tags": "Schlagworte",
     "critics": "Kritiken",
@@ -243,3 +243,10 @@ def credit_role(value: str | None) -> str | None:
     if value and (normalized := value.strip().casefold()) in PRESERVED_CREDIT_LABELS:
         return normalized
     return canonical_role(value)
+
+
+def role_label(role: str | None) -> str:
+    """Translate known canonical roles while retaining source-specific labels."""
+    if role and (label := PRESERVED_CREDIT_LABELS.get(role.strip().casefold())):
+        return label
+    return ROLE_LABELS.get(canonical_role(role) or "", role or "")

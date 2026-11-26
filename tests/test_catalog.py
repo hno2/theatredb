@@ -20,7 +20,7 @@ def catalog_db(monkeypatch, tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'catalog.db'}")
     SQLModel.metadata.create_all(engine)
     monkeypatch.setattr("backend.user_management._get_engine", lambda: engine)
-    theatre = Organization(name="Z Bühne", city="Wien", country="Österreich", tags=["Oper"])
+    theatre = Organization(name="Z Bühne", address_locality="Wien", address_country="Österreich", tags=["Oper"])
     person = Person(name="Z Person")
     text = Text(title="Z Text", genre="play")
     past = Production(name="Hamlet", premiere="2011-06-01", organization_id=theatre.id, text_id=text.id, tags=["Drama"])
@@ -47,8 +47,8 @@ def catalog_db(monkeypatch, tmp_path):
                 later,
                 Production(name="Ungefähr", premiere="2027"),
                 Production(name="Ohne Datum"),
-                ProductionMembership(person_id=person.id, production_id=past.id, role="director"),
-                ProductionMembership(person_id=person.id, production_id=past.id, role="actor"),
+                ProductionMembership(person_id=person.id, production_id=past.id, role_name="director"),
+                ProductionMembership(person_id=person.id, production_id=past.id, role_name="actor"),
             ]
         )
         session.commit()
@@ -156,7 +156,7 @@ def test_theatre_label_only_adds_missing_city(name, city, label):
 @pytest.mark.parametrize("kind", ["organization", "production"])
 def test_catalog_does_not_repeat_city_in_results(monkeypatch, kind):
     def entry(name: str, city: str) -> dict:
-        theatre = {"name": name, "city": city, "country": "Deutschland"}
+        theatre = {"name": name, "address_locality": city, "address_country": "Deutschland"}
         if kind == "production":
             return {"id": name, "name": "Hamlet", "premiere": "2022-01-01", "organization": theatre}
         return {"id": name, "production_count": 1, **theatre}

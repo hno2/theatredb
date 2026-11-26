@@ -77,7 +77,11 @@ def render_discovery(initial_kind: str = "organization") -> None:
         with st.container(border=True):
             entity_link(entry["name"], kind, entry["id"])
             if kind == "organization":
-                context = [theatre_city(entry["name"], entry.get("city")), entry.get("country"), entry.get("type")]
+                context = [
+                    theatre_city(entry["name"], entry.get("address_locality")),
+                    entry.get("address_country"),
+                    entry.get("type"),
+                ]
             else:
                 context = [*(entry.get("type") or []), entry.get("nationality")]
             if any(context):

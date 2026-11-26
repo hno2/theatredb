@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 from backend.date_precision import DatePrecision, normalize_dates, parse_date
+from backend.orif import as_staged
 
 type NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, pattern=r"\S")]
 
@@ -67,14 +68,23 @@ type DomainDate = Annotated[
 
 
 class StagedDomainModel(BaseModel):
-    """Validate staged date/precision pairs."""
+    """Validate staged date/precision pairs and accept pre-ORIF field names."""
 
     date_fields: ClassVar[tuple[str, ...]] = ()
+    legacy_fields: ClassVar[dict[str, str]] = {}
 
     @model_validator(mode="before")
     @classmethod
     def normalize_domain_dates(cls, value: object) -> object:
-        """Store normalized interval starts with their precision."""
+        """Rename legacy keys, then store normalized interval starts with their precision."""
+        if isinstance(value, dict) and cls.legacy_fields.keys() & value.keys():
+            value = dict(value)
+            for old, new in cls.legacy_fields.items():
+                if old in value:
+                    legacy = value.pop(old)
+                    if value.get(new, legacy) != legacy:
+                        raise ValueError(f"Conflicting {old!r} and {new!r}")
+                    value[new] = legacy
         return normalize_dates(value, cls.date_fields)
 
 
@@ -88,6 +98,7 @@ class StagedMembership(StagedDomainModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     date_fields: ClassVar[tuple[str, ...]] = ("born", "died")
+    legacy_fields: ClassVar[dict[str, str]] = {"role": "role_name", "character": "character_name"}
 
     name: NonEmptyText
     external_id: NonEmptyText | None = None
@@ -100,8 +111,8 @@ class StagedMembership(StagedDomainModel):
     died: DomainDate = None
     died_precision: DatePrecision | None = None
     nationality: str | None = None
-    role: str | None = None
-    character: str | None = None
+    role_name: str | None = None
+    character_name: str | None = None
 
 
 class StagedText(StagedDomainModel):
@@ -129,6 +140,7 @@ class StagedProduction(StagedDomainModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     date_fields: ClassVar[tuple[str, ...]] = ("premiere",)
+    legacy_fields: ClassVar[dict[str, str]] = {"age_rating": "suggested_min_age"}
 
     title: NonEmptyText
     url: HttpURL
@@ -137,7 +149,7 @@ class StagedProduction(StagedDomainModel):
     premiere_precision: DatePrecision | None = None
     premiere_year: Annotated[StrictInt, Field(ge=1, le=9999)] | None = Field(default=None, exclude=True)
     duration: NonNegativeInt | None = None
-    age_rating: NonNegativeInt | None = None
+    suggested_min_age: NonNegativeInt | None = None
     tags: list[NonEmptyText] = Field(default_factory=list)
     critics: list[NonEmptyText] = Field(default_factory=list)
     author: str | None = None
@@ -169,8 +181,8 @@ class StagedProductions(RootModel[list[StagedProduction]]):
 
 
 def validate_records(records: object) -> list[dict]:
-    """Validate the entire snapshot before any source or review cases are written."""
-    return StagedProductions.model_validate(records).model_dump(mode="json")
+    """Validate the entire snapshot (staged list or ORIF document) before any source or review cases are written."""
+    return StagedProductions.model_validate(as_staged(records)).model_dump(mode="json")
 
 
 def staging_schema() -> dict:

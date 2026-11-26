@@ -18,7 +18,7 @@ DETAIL_PAGE = Path(__file__).resolve().parents[1] / "frontend" / "views" / "deta
 def directory(monkeypatch) -> Mock:
     browse = Mock(
         return_value=(
-            [{"id": "theatre", "name": "Bühne", "city": "Wien", "country": "Österreich"}],
+            [{"id": "theatre", "name": "Bühne", "address_locality": "Wien", "address_country": "Österreich"}],
             1,
         )
     )
@@ -54,7 +54,7 @@ def test_production_directory_has_direct_links_and_theatre_context(directory) ->
                 "id": "production",
                 "name": "Hamlet",
                 "premiere": "2026-03-04",
-                "organization": {"id": "theatre", "name": "Bühne", "city": "Wien"},
+                "organization": {"id": "theatre", "name": "Bühne", "address_locality": "Wien"},
             },
         ],
         1,
@@ -168,8 +168,8 @@ def test_browse_query_is_bounded_searchable_literal_and_detached(monkeypatch) ->
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
-        theatre = Organization(name="Bühne", city="Wien", country="Österreich")
-        other = Organization(name="Other", city="Berlin")
+        theatre = Organization(name="Bühne", address_locality="Wien", address_country="Österreich")
+        other = Organization(name="Other", address_locality="Berlin")
         productions = [
             Production(name="Old", organization=theatre, premiere=datetime(2020, 1, 1, tzinfo=UTC)),
             Production(name="New", organization=theatre, premiere=datetime(2026, 1, 1, tzinfo=UTC)),
@@ -183,7 +183,7 @@ def test_browse_query_is_bounded_searchable_literal_and_detached(monkeypatch) ->
     rows, total = entity_management.browse_entities(Production, "wien", limit=1)
     assert total == 2
     assert [row["id"] for row in rows] == [newest_id]
-    assert rows[0]["organization"]["city"] == "Wien"
+    assert rows[0]["organization"]["address_locality"] == "Wien"
     rows, total = entity_management.browse_entities(Production, "Bühne", limit=1, offset=1)
     assert total == 2
     assert [row["name"] for row in rows] == ["Old"]

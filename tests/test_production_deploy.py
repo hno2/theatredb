@@ -11,7 +11,30 @@ import yaml
 
 SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "deploy-production"
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy-production.yaml"
+ROOT = SCRIPT.parents[1]
 IMAGE = "ghcr.io/hno2/theatredb@sha256:" + "a" * 64
+
+
+def test_api_compose_routes_and_uses_release_image() -> None:
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    production = yaml.safe_load((ROOT / "deploy" / "compose.production.yml").read_text())
+    api = compose["services"]["api"]
+    labels = api["labels"]
+    assert api["command"] == [
+        "uvicorn",
+        "backend.api:app",
+        "--host",
+        "0.0.0.0",  # ruff: ignore[hardcoded-bind-all-interfaces] - Container must accept proxy traffic.
+        "--port",
+        "8000",
+    ]
+    assert "web" in api["networks"]
+    assert api["depends_on"]["app"]["condition"] == "service_healthy"
+    assert "healthcheck" in compose["services"]["app"]
+    assert any("PathPrefix(`/api/`)" in label and "Host(`theater.simonklug.de`)" in label for label in labels)
+    assert "traefik.http.routers.theater-api.priority=100" in labels
+    assert production["services"]["api"]["image"] == production["services"]["app"]["image"]
+    assert "healthcheck" in production["services"]["api"]
 
 
 def test_production_workflow_deploys_pushes_to_main() -> None:
@@ -82,15 +105,27 @@ def test_deploy_workflow_reports_ssh_status(tmp_path: Path, ssh_status: int) -> 
 
 
 @pytest.mark.parametrize(
-    "command,backup_status,health_status",
-    [(IMAGE, "0", "0"), (IMAGE, "1", "0"), (IMAGE + " extra", "0", "0"), (IMAGE, "0", "22")],
+    "command,backup_status,health_status,api_health_status",
+    [
+        (IMAGE, "0", "0", "0"),
+        (IMAGE, "1", "0", "0"),
+        (IMAGE + " extra", "0", "0", "0"),
+        (IMAGE, "0", "22", "0"),
+        (IMAGE, "0", "0", "22"),
+    ],
 )
-def test_production_deploy(tmp_path: Path, command: str, backup_status: str, health_status: str) -> None:
+def test_production_deploy(
+    tmp_path: Path, command: str, backup_status: str, health_status: str, api_health_status: str
+) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     stubs = {
         "flock": "exit 0",
-        "curl": 'echo "public-health $*" >> "$CALLS"; exit "$HEALTH_STATUS"',
+        "curl": """
+echo "public-health $*" >> "$CALLS"
+case "$*" in *"/api/organizations"*) exit "$API_HEALTH_STATUS" ;; esac
+exit "$HEALTH_STATUS"
+""",
         "docker": """
 echo "$*" >> "$CALLS"
 case " $* " in
@@ -116,6 +151,7 @@ esac
             "SSH_ORIGINAL_COMMAND": command,
             "BACKUP_STATUS": backup_status,
             "HEALTH_STATUS": health_status,
+            "API_HEALTH_STATUS": api_health_status,
         },
         capture_output=True,
         text=True,
@@ -136,8 +172,8 @@ esac
         return
 
     assert "--retry 5 --retry-connrefused --retry-all-errors" in calls_text
-    if health_status != "0":
-        assert result.returncode == int(health_status)
+    if health_status != "0" or api_health_status != "0":
+        assert result.returncode == int(health_status if health_status != "0" else api_health_status)
         assert " ps -q crawl-worker " not in calls_text
         assert len(backups) == 1
         return
@@ -146,4 +182,6 @@ esac
     assert len(backups) == 1
     assert backups[0].read_text() == "database-backup\n"
     assert calls_text.index(" exec -T db ") < calls_text.index(" up -d --no-deps ") < calls_text.index("public-health")
-    assert "--wait-timeout 180 app crawl-worker" in calls_text
+    assert "pull --policy always app api crawl-worker" in calls_text
+    assert calls_text.index("--wait-timeout 180 app\n") < calls_text.index("--wait-timeout 180 api crawl-worker\n")
+    assert "https://theater.simonklug.de/api/organizations?limit=1" in calls_text

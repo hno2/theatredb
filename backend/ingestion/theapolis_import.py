@@ -161,7 +161,7 @@ def _deduplicate_person_links(session: Session, model: type[SQLModel], rows: lis
     for row in sorted(rows, key=lambda row: row.id):
         if tuple(getattr(row, name) for name in fields[:2]) not in affected:
             continue
-        key = tuple(credit_role(getattr(row, f)) if f == "role" else getattr(row, f) for f in fields)
+        key = tuple(credit_role(getattr(row, f)) if f in ("role", "role_name") else getattr(row, f) for f in fields)
         if key in seen:
             deleted.append(row)
             touched.pop((model, row.id), None)
@@ -528,17 +528,17 @@ def _observe(
 def _fill_blanks(entity: SQLModel, payload: dict, previous: SourceRecord | None) -> bool:
     changes = _enrich(entity, payload, previous)
     if isinstance(entity, Organization):
-        country, legacy_region = split_country(entity.country)
-        if entity.country and country != payload.get("country"):
+        country, legacy_region = split_country(entity.address_country)
+        if entity.address_country and country != payload.get("address_country"):
             changes.pop("region", None)
         elif (
             legacy_region
             and previous is not None
             and previous.entity_id == entity.id
-            and previous.payload.get("incoming", {}).get("country") == entity.country
+            and previous.payload.get("incoming", {}).get("address_country") == entity.address_country
         ):
             # Repair only a region still stored verbatim from the previous Theapolis observation.
-            changes["country"] = country
+            changes["address_country"] = country
             if entity.region in EMPTY:
                 changes["region"] = payload.get("region") or legacy_region
     if not any(getattr(entity, field) != value for field, value in changes.items()):
@@ -677,16 +677,18 @@ def add_credits_batch(
     """Add Theapolis credits with one endpoint query and bulk inserts."""
     if not credits:
         return
-    model, endpoint = (
-        (ProductionMembership, "production_id") if kind == EntityType.PRODUCTION else (TextContribution, "text_id")
+    model, endpoint, role_field = (
+        (ProductionMembership, "production_id", "role_name")
+        if kind == EntityType.PRODUCTION
+        else (TextContribution, "text_id", "role")
     )
     rows = session.exec(select(model).where(getattr(model, endpoint).in_(credits)).with_for_update()).all()
     existing = {
         (
             getattr(row, endpoint),
             row.person_id,
-            credit_role(row.role),
-            normalize_character(getattr(row, "character", None)),
+            credit_role(getattr(row, role_field)),
+            normalize_character(getattr(row, "character_name", None)),
         )
         for row in rows
     }
@@ -698,9 +700,9 @@ def add_credits_batch(
             key = (entity_id, person_id, role, character)
             if key in existing:
                 continue
-            payload = {endpoint: entity_id, "person_id": person_id, "role": role}
+            payload = {endpoint: entity_id, "person_id": person_id, role_field: role}
             if character is not None:
-                payload["character"] = character
+                payload["character_name"] = character
             inserted.append(model.model_validate(payload))
             existing.add(key)
     if inserted:

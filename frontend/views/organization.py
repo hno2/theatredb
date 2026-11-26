@@ -13,13 +13,14 @@ from uuid import UUID
 import pandas as pd
 import streamlit as st
 
-from backend.config import PERFORMER_ROLES, canonical_role
+from backend.config import PERFORMER_ROLES, canonical_role, role_label
 from backend.data_quality import public_summary
 from backend.date_precision import DatePrecision, date_interval, format_date, intervals_overlap
 from backend.date_precision import parse_date as parse_domain_date
 from backend.entity_management import entities_by_ids, get_organization_profile
 from backend.models import Source
-from frontend.views.helpers import entity_link, has_coordinates, render_tags, role_label, theatre_city
+from backend.orif import orif_document
+from frontend.views.helpers import entity_link, has_coordinates, render_orif_download, render_tags, theatre_city
 
 LOG = logging.getLogger(__name__)
 
@@ -197,22 +198,30 @@ def render_location(data: dict) -> None:
     st.subheader("Standort")
     address_column, map_column = st.columns([1, 2], gap="large")
     with address_column:
-        if data.get("street"):
-            st.text(data["street"])
-        locality = " ".join(str(data[field]) for field in ("zip_code", "city") if data.get(field))
+        if data.get("street_address"):
+            st.text(data["street_address"])
+        locality = " ".join(str(data[field]) for field in ("postal_code", "address_locality") if data.get(field))
         if locality:
             st.text(locality)
-        if data.get("region") and data["region"] != data.get("city"):
+        if data.get("region") and data["region"] != data.get("address_locality"):
             st.text(data["region"])
-        if data.get("country"):
-            st.text(data["country"])
-        if not any(data.get(field) for field in ("street", "zip_code", "city", "region", "country")):
+        if data.get("address_country"):
+            st.text(data["address_country"])
+        if not any(
+            data.get(field)
+            for field in ("street_address", "postal_code", "address_locality", "region", "address_country")
+        ):
             st.caption("Noch keine Adresse hinterlegt.")
         render_web_link("Website", data.get("url"), official=True)
         render_web_link("Spielplan", data.get("url_plays"), official=True)
     with map_column:
-        if has_coordinates(data.get("lat"), data.get("lon")):
-            st.map(pd.DataFrame([{"lat": data["lat"], "lon": data["lon"]}]), zoom=12, height=300, color="#8b3a32")
+        if has_coordinates(data.get("latitude"), data.get("longitude")):
+            st.map(
+                pd.DataFrame([{"lat": data["latitude"], "lon": data["longitude"]}]),
+                zoom=12,
+                height=300,
+                color="#8b3a32",
+            )
         else:
             st.info("Für dieses Theater sind noch keine gültigen Standortkoordinaten hinterlegt.")
     if data.get("description"):
@@ -227,7 +236,7 @@ def render_production_card(production: dict, *, compact: bool = False, show_orga
         organization = production.get("organization") or {}
         if organization and show_organization:
             entity_link(organization["name"], "organization", organization["id"])
-            if city := theatre_city(organization["name"], organization.get("city")):
+            if city := theatre_city(organization["name"], organization.get("address_locality")):
                 st.caption(city)
         render_production_summary(production)
         if production.get("description"):
@@ -254,8 +263,8 @@ def render_production_summary(production: dict) -> None:
     details = []
     if production.get("duration") is not None:
         details.append(f"{production['duration']} Minuten")
-    if production.get("age_rating") is not None:
-        details.append(f"Ab {production['age_rating']} Jahren")
+    if production.get("suggested_min_age") is not None:
+        details.append(f"Ab {production['suggested_min_age']} Jahren")
     if details:
         st.caption(" · ".join(details))
     render_tags(production.get("tags") or [])
@@ -263,9 +272,9 @@ def render_production_summary(production: dict) -> None:
     if text.get("title"):
         st.caption(f"Textgrundlage: {text['title']}")
     credits = dict.fromkeys(
-        (role_label(membership.get("role")), membership["person"]["name"])
+        (role_label(membership.get("role_name")), membership["person"]["name"])
         for membership in production.get("memberships") or []
-        if (membership.get("person") or {}).get("name") and membership.get("role")
+        if (membership.get("person") or {}).get("name") and membership.get("role_name")
     )
     if credits:
         st.caption(" · ".join(f"{role}: {name}" for role, name in credits))
@@ -275,7 +284,7 @@ def production_credit_line(production: dict) -> str:
     """Group distinct directors first, followed by performers, preserving source order."""
     groups: dict[str, dict[str, str]] = {"director": {}, "actor": {}}
     for membership in production.get("memberships") or []:
-        role = canonical_role(membership.get("role"))
+        role = canonical_role(membership.get("role_name"))
         if role in PERFORMER_ROLES:
             role = "actor"
         person = membership.get("person") or {}
@@ -301,8 +310,8 @@ def render_theatre_production(production: dict) -> None:
         if premiere or production.get("premiere_year")
         else ":material/event: Premiere unbekannt"
     ]
-    if production.get("age_rating") is not None:
-        facts.append(f":material/family_restroom: Ab {production['age_rating']} Jahren")
+    if production.get("suggested_min_age") is not None:
+        facts.append(f":material/family_restroom: Ab {production['suggested_min_age']} Jahren")
     if production.get("duration") is not None:
         facts.append(f":material/schedule: {production['duration']} Minuten")
     st.caption(" · ".join(facts))
@@ -319,7 +328,7 @@ def render_theatre_production(production: dict) -> None:
 
 def age_label(production: dict) -> str:
     """Label missing age guidance distinctly from an age-zero recommendation."""
-    age = production.get("age_rating")
+    age = production.get("suggested_min_age")
     return f"Ab {age} Jahren" if age is not None else "Nicht hinterlegt"
 
 
@@ -387,9 +396,9 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         live="500ms",
     ).strip()
     with st.expander("Filter", expanded=False):
-        ratings = sorted({row["age_rating"] for row in productions if row.get("age_rating") is not None})
+        ratings = sorted({row["suggested_min_age"] for row in productions if row.get("suggested_min_age") is not None})
         age_options = [f"Ab {age} Jahren" for age in ratings]
-        if any(row.get("age_rating") is None for row in productions):
+        if any(row.get("suggested_min_age") is None for row in productions):
             age_options.append("Nicht hinterlegt")
         ages = st.multiselect("Altersempfehlung", age_options, key=f"production_ages_{organization_id}")
         tags = st.multiselect(
@@ -540,7 +549,12 @@ def render_organization(data: dict) -> None:
     """Render a German theatre profile with location, premiere timeline and citations."""
     st.caption("THEATERDB / THEATERPORTRÄT")
     st.title(data["name"])
-    context = list(filter(None, (theatre_city(data["name"], data.get("city")), data.get("country"), data.get("type"))))
+    context = list(
+        filter(
+            None,
+            (theatre_city(data["name"], data.get("address_locality")), data.get("address_country"), data.get("type")),
+        )
+    )
     if context:
         st.text(" · ".join(context))
     render_tags(data.get("tags") or [])
@@ -578,6 +592,7 @@ def render_organization(data: dict) -> None:
     with st.expander("Technische Angaben"):
         st.caption("Interne Kennung dieses Eintrags")
         st.code(str(data["id"]), language=None)
+        render_orif_download(orif_document(data, productions), data["name"], str(data["id"]))
 
 
 def render_quality_summary(data: dict) -> None:

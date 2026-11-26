@@ -381,13 +381,13 @@ class Organization(SourceMixin, DomainModel, table=True):
     tags: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     url: str | None = None
     url_plays: str | None = None
-    street: str | None = None
-    zip_code: str | None = None
-    city: str | None = None
-    country: str | None = None
+    street_address: str | None = None
+    postal_code: str | None = None
+    address_locality: str | None = None
+    address_country: str | None = None
     region: str | None = None
-    lat: float | None = None
-    lon: float | None = None
+    latitude: float | None = None
+    longitude: float | None = None
     description: str | None = None
     productions: list[Production] = Relationship(back_populates="organization")
     memberships: list[OrganizationMembership] = Relationship(back_populates="organization")
@@ -712,7 +712,7 @@ class Production(SourceMixin, DomainModel, table=True):
 
     memberships: list[ProductionMembership] = Relationship(back_populates="production")
     duration: int | None = None
-    age_rating: int | None = None
+    suggested_min_age: int | None = None
     text_id: uuid.UUID | None = Field(default=None, foreign_key="text.id")
     text: Text | None = Relationship(back_populates="productions")
     url: str | None = None
@@ -727,8 +727,8 @@ class ProductionMembership(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     production_id: uuid.UUID = Field(foreign_key="production.id", index=True)
     person_id: uuid.UUID = Field(foreign_key="person.id", index=True)
-    role: str | None = None  # e.g. "Regie", "Schauspieler", "Dramaturgie", etc. # TODO: define somewhere else
-    character: str | None = None  # for actors
+    role_name: str | None = None  # e.g. "Regie", "Schauspieler", "Dramaturgie", etc. # TODO: define somewhere else
+    character_name: str | None = None  # for actors
 
     production: Production = Relationship(back_populates="memberships")
     person: Person = Relationship(back_populates="production_memberships")
