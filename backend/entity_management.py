@@ -36,6 +36,10 @@ from .models import (
 ModelT = TypeVar("ModelT", bound=SQLModel)
 
 
+class EntityNotFoundError(ValueError):
+    """The requested entity does not exist after resolving merged IDs."""
+
+
 def _snapshot[ModelT: SQLModel](entity: ModelT) -> dict[str, Any]:
     """Create a JSON-serializable snapshot of the entity's current state."""
     return entity.model_dump(mode="json")
@@ -294,7 +298,7 @@ def get_entity_graph[ModelT: SQLModel](
             resolved_id = resolve_id(session, model_cls._entity_type, resolved_id)
         entity = session.get(model_cls, resolved_id)
         if entity is None:
-            raise ValueError(f"{model_cls.__name__} not found")
+            raise EntityNotFoundError(f"{model_cls.__name__} not found")
         return _serialize_entity_graph(entity, max_depth=max_depth)
 
 

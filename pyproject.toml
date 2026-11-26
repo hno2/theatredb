@@ -20,6 +20,8 @@ dependencies = [
 	"jsonschema>=4.26.0",
 	"referencing>=0.37.0",
 	"pycountry>=26.2.16",
+	"fastapi>=0.165.0",
+	"uvicorn>=0.48.0",
 ]
 
 [dependency-groups]
@@ -32,6 +34,7 @@ dev = [
     "types-pyyaml>=6.0.12.20261111",
     "types-jsonschema>=4.26.0.20261006",
     "types-tqdm>=4.70.0.20261106",
+    "httpx>=0.28.1",
 ]
 ingest=[
 	"babel>=2.17",
