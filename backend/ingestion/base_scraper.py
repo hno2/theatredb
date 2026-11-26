@@ -35,7 +35,7 @@ from selectolax.lexbor import LexborHTMLParser as HTMLParser
 from selectolax.lexbor import LexborNode as Node
 from tqdm.asyncio import tqdm
 
-from backend.config import CREDIT_ROLES, ROLE_TYPE_PATTERNS, canonical_role
+from backend.config import CREDIT_ROLES, ROLE_TYPE_PATTERNS, UNMAPPED_CREDIT_TITLES, canonical_role
 
 DATE = dt.datetime.now(dt.UTC).strftime("%Y%m%d")
 EMPTY = (None, "", [], {})
@@ -111,7 +111,11 @@ _NAME_NOISE = re.compile(
 def infer_person_type(role: str) -> str:
     """Map a role label to a person type string; defaults to 'actor'."""
     canonical = canonical_role(role)
+    if canonical in UNMAPPED_CREDIT_TITLES:
+        return canonical
     if canonical is not None and canonical in CREDIT_ROLES:
+        return canonical
+    if canonical and canonical.startswith(("assistenz ", "leitung ")):
         return canonical
     for pattern, kind in ROLE_TYPE_PATTERNS:
         if pattern.search(role):

@@ -96,6 +96,55 @@ def test_detail_roles_characters_and_work_credit_scope(db):
     assert production.payload["context"]["theapolis_detail"]["credits"][4]["role"] == "Puppenbau"
 
 
+def test_singing_and_music_theatre_direction_keep_credit_identity(db):
+    session, _ = db
+    item = {
+        "id": 1,
+        "name": "Opera",
+        **_detail(
+            _credit(role="Regie"),
+            _credit(role="Musiktheaterregie"),
+            _credit(role="Gesang (weibliche Solopartien)", character="Sophie"),
+        ),
+    }
+    ids = _import(db, 2, item)
+    _import(db, 3, item)
+    person = session.get(Person, ids["detail:9"])
+    assert set(person.type) == {"director", "singer"}
+    assert {(row.role, row.character) for row in session.exec(select(ProductionMembership))} == {
+        ("director", None),
+        ("musiktheaterregie", None),
+        ("singer", "Sophie"),
+    }
+
+
+def test_preserved_titles_are_distinct_from_their_categories(db):
+    session, _ = db
+    item = {
+        "id": 1,
+        "name": "Opera",
+        **_detail(
+            _credit(role="Gesang", character="Sophie"),
+            _credit(role="Sopran", character="Sophie"),
+            _credit(role="Choreografie"),
+            _credit(role="Choreografie / Direktion"),
+            _credit(role="Assistenz Schauspielregie"),
+            _credit(role="Assistenz Musiktheaterregie"),
+        ),
+    }
+    ids = _import(db, 2, item)
+    _import(db, 3, item)
+    assert set(session.get(Person, ids["detail:9"]).type) == {"singer", "choreographer", "assistant_director"}
+    assert {row.role for row in session.exec(select(ProductionMembership))} == {
+        "singer",
+        "sopran",
+        "choreographer",
+        "choreografie / direktion",
+        "assistenz schauspielregie",
+        "assistenz musiktheaterregie",
+    }
+
+
 def test_profile_credit_name_variants_keep_one_person_and_source_names(db, caplog):
     first = {"id": 1, "name": "Play", **_detail(_credit("profile:89612", name="Alex Example"))}
     second = {"id": 2, "name": "Other", **_detail(_credit("profile:89612", name="A. Example"))}

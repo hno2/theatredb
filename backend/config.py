@@ -24,12 +24,20 @@ CURRENT_SEASON_START_YEAR = 2026
 
 # Canonical role: display label, exact aliases, pattern for descriptive source credits.
 ROLE_CONFIG: dict[str, tuple[str, tuple[str, ...], str | None]] = {
-    "director": ("Regie", ("regie", "inszenierung", "schauspielregie", "opernregie"), r"Regie|Inszenierung"),
+    "director": (
+        "Regie",
+        ("regie", "inszenierung", "schauspielregie", "opernregie", "musiktheaterregie"),
+        r"Regie|Inszenierung",
+    ),
     "set_designer": ("Bühnenbild", ("bühne", "bühnenbild", "ausstattung", "stage design"), r"Bühne|Ausstattung"),
     "costume_designer": ("Kostüme", ("kostüm", "kostüme", "kostümbild", "costume design"), r"Kostüm"),
     "composer": ("Musik", ("musik", "komposition", "bühnenmusik"), r"Musik|Komposition"),
     "lyricist": ("Liedtexte/Gesangstexte", ("liedtexte", "gesangstexte", "lyrics"), r"Liedtext|Gesangstext|Lyrics"),
-    "choreographer": ("Choreografie", ("choreografie", "choreographie", "coreographer"), r"Choreograph|Tanz"),
+    "choreographer": (
+        "Choreografie",
+        ("choreografie", "choreographie", "coreographer", "choreografie / direktion"),
+        r"Choreograph|Tanz",
+    ),
     "dramaturg": ("Dramaturgie", ("dramaturgie",), r"Dramaturgi"),
     "light_designer": ("Licht", ("licht", "lichtdesign", "lichtgestaltung", "lighting_designer"), r"Licht"),
     "video_designer": ("Video", ("video", "videodesign", "medien"), r"Video|Medien"),
@@ -38,7 +46,7 @@ ROLE_CONFIG: dict[str, tuple[str, tuple[str, ...], str | None]] = {
         ("vermittlung", "theaterpädagoge", "theaterpädagogin", "theaterpädagogik"),
         r"Vermittlung|Theaterpädagog",
     ),
-    "author": ("Text", ("autor", "creator", "text", "buch"), r"Text|Buch"),
+    "author": ("Text", ("autor", "autor*in", "creator", "text", "buch"), r"Text|Buch"),
     "translator": ("Übersetzung", ("übersetzung",), r"Übersetz"),
     "adapter": ("Bearbeitung", ("bearbeitung", "fassung"), r"Bearb|Fassung"),
     "actor": (
@@ -50,15 +58,69 @@ ROLE_CONFIG: dict[str, tuple[str, tuple[str, ...], str | None]] = {
             "schauspielerin",
             "schauspiel (männliche rollen)",
             "schauspiel (weibliche rollen)",
+            "schauspiel (diverse rollen)",
+            "sonstige schauspiel",
             "darsteller",
             "darstellerin",
             "cast",
         ),
         None,
     ),
+    "singer": (
+        "Gesang",
+        (
+            "gesang",
+            "gesang (männliche solopartien)",
+            "gesang (weibliche solopartien)",
+            "gesang (diverse solopartien)",
+            "sopran",
+        ),
+        None,
+    ),
+    "dancer": ("Tanz", ("tanz (weibliche rollen)", "tanz (männliche rollen)"), None),
+    "puppeteer": ("Puppenspiel / Figurentheater", ("puppenspiel / figurentheater",), None),
+    "conductor": ("Dirigat / Musikalische Leitung", ("dirigat / musikalische leitung",), None),
+    "choir_director": ("Chorleitung", ("chorleitung",), None),
+    "sound_designer": ("Sounddesign", ("sounddesign",), None),
+    "assistant_director": (
+        "Regieassistenz",
+        ("assistenz schauspielregie", "assistenz musiktheaterregie"),
+        None,
+    ),
+    "directing_leadership": ("Leitung Schauspielregie", ("leitung schauspielregie",), None),
     "other": ("Weitere Mitwirkung", (), None),
 }
 ROLE_LABELS = {role: label for role, (label, _, _) in ROLE_CONFIG.items()}
+PRESERVED_CREDIT_LABELS = {
+    "musiktheaterregie": "Musiktheaterregie",
+    "choreografie / direktion": "Choreografie / Direktion",
+    "sopran": "Sopran",
+    "assistenz schauspielregie": "Assistenz Schauspielregie",
+    "assistenz musiktheaterregie": "Assistenz Musiktheaterregie",
+    "leitung schauspielregie": "Leitung Schauspielregie",
+}
+PERFORMER_ROLES = frozenset({"actor", "singer", "dancer", "puppeteer"})
+UNMAPPED_CREDIT_TITLES = frozenset({"performance", "sonstige musiktheater"})
+RECLASSIFIED_ROLE_ALIASES = frozenset(
+    alias
+    for role in (
+        "singer",
+        "dancer",
+        "puppeteer",
+        "conductor",
+        "choir_director",
+        "sound_designer",
+        "assistant_director",
+        "directing_leadership",
+    )
+    for alias in (role, *ROLE_CONFIG[role][1])
+) | {
+    "musiktheaterregie",
+    "choreografie / direktion",
+    "schauspiel (diverse rollen)",
+    "sonstige schauspiel",
+    "autor*in",
+}
 LINEAGE_LABELS = {"translation": "Übersetzung", "adaptation": "Bearbeitung", "based_on": "Vorlage / nach"}
 TEXT_GENRES = {
     "play": "Schauspiel",
@@ -174,3 +236,10 @@ def canonical_role(value: str | None) -> str | None:
         return None
     value = value.strip().casefold()
     return ROLE_ALIASES.get(value, value)
+
+
+def credit_role(value: str | None) -> str | None:
+    """Normalize credit identity while retaining meaningful source-specific titles."""
+    if value and (normalized := value.strip().casefold()) in PRESERVED_CREDIT_LABELS:
+        return normalized
+    return canonical_role(value)

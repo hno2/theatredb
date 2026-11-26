@@ -5,12 +5,14 @@ from urllib.parse import urlencode
 
 import streamlit as st
 
-from backend.config import ROLE_LABELS, canonical_role
+from backend.config import PRESERVED_CREDIT_LABELS, ROLE_LABELS, canonical_role
 from frontend.views.settings import theatre_filter_link_params
 
 
 def role_label(role: str | None) -> str:
     """Translate known canonical roles while retaining source-specific labels."""
+    if role and (label := PRESERVED_CREDIT_LABELS.get(role.strip().casefold())):
+        return label
     return ROLE_LABELS.get(canonical_role(role) or "", role or "")
 
 

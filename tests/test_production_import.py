@@ -446,6 +446,75 @@ def test_vermittlung_imports_as_educator_even_from_legacy_actor_snapshot(db, the
     assert membership.character is None
 
 
+@pytest.mark.parametrize(
+    ("role", "expected_role", "expected_type"),
+    [
+        ("Gesang (weibliche Solopartien)", "singer", "singer"),
+        ("Sopran", "sopran", "singer"),
+        ("sonstige Schauspiel", "actor", "actor"),
+        ("Schauspiel (diverse Rollen)", "actor", "actor"),
+        ("Tanz (weibliche Rollen)", "dancer", "dancer"),
+        ("Puppenspiel / Figurentheater", "puppeteer", "puppeteer"),
+        ("Choreografie / Direktion", "choreografie / direktion", "choreographer"),
+        ("Autor*in", "author", "author"),
+        ("Assistenz Musiktheaterregie", "assistenz musiktheaterregie", "assistant_director"),
+        ("Musiktheaterregie", "musiktheaterregie", "director"),
+    ],
+)
+def test_singing_and_music_theatre_credits_in_theatre_uploads(db, theatre, role, expected_role, expected_type) -> None:
+    upload(
+        theatre,
+        {
+            "title": "Opera",
+            "url": "https://theatre.example/p/opera",
+            "memberships": [{"name": "Example", "type": "actor", "role": role}],
+        },
+    )
+    person = rows(db, Person, Person.name == "Example")[0]
+    membership = rows(db, ProductionMembership, ProductionMembership.person_id == person.id)[0]
+    assert person.type == [expected_type]
+    assert membership.role == expected_role
+    assert membership.character is None
+
+
+def test_singer_character_is_preserved_in_upload_and_cast_coverage(db, theatre) -> None:
+    upload(
+        theatre,
+        {
+            "title": "Opera",
+            "url": "https://theatre.example/p/opera",
+            "memberships": [{"name": "Singer", "role": "Sopran", "character": "Sophie"}],
+        },
+    )
+    membership = rows(db, ProductionMembership)[0]
+    assert (membership.role, membership.character) == ("sopran", "Sophie")
+    assert theatre_status(theatre.id)["fields"]["cast"] == 1
+
+
+@pytest.mark.parametrize(
+    ("title", "previous_type"),
+    [
+        ("Performance", "actor"),
+        ("sonstige Musiktheater", "composer"),
+        ("Assistenz Dramaturgie", "dramaturg"),
+        ("Leitung Musiktheaterregie", "director"),
+    ],
+)
+def test_unmapped_titles_survive_uploads(db, theatre, title, previous_type) -> None:
+    upload(
+        theatre,
+        {
+            "title": "Production",
+            "url": "https://theatre.example/p/production",
+            "memberships": [{"name": "Example", "type": previous_type, "role": title}],
+        },
+    )
+    person = rows(db, Person, Person.name == "Example")[0]
+    membership = rows(db, ProductionMembership, ProductionMembership.person_id == person.id)[0]
+    assert person.type == [previous_type]
+    assert membership.role == title.casefold()
+
+
 def test_person_and_production_fields_survive_import(db, theatre) -> None:
     upload(
         theatre,

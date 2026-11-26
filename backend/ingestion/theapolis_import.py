@@ -9,7 +9,7 @@ from sqlalchemy import delete, insert, update
 from sqlalchemy import inspect as sa_inspect
 from sqlmodel import Session, SQLModel, col, func, or_, select
 
-from backend.config import ENTITY_MODELS, LINK_IDENTITY_FIELDS, canonical_role
+from backend.config import ENTITY_MODELS, LINK_IDENTITY_FIELDS, credit_role
 from backend.locations import split_country
 from backend.models import (
     EntityRedirect,
@@ -161,7 +161,7 @@ def _deduplicate_person_links(session: Session, model: type[SQLModel], rows: lis
     for row in sorted(rows, key=lambda row: row.id):
         if tuple(getattr(row, name) for name in fields[:2]) not in affected:
             continue
-        key = tuple(canonical_role(getattr(row, f)) if f == "role" else getattr(row, f) for f in fields)
+        key = tuple(credit_role(getattr(row, f)) if f == "role" else getattr(row, f) for f in fields)
         if key in seen:
             deleted.append(row)
             touched.pop((model, row.id), None)
@@ -685,7 +685,7 @@ def add_credits_batch(
         (
             getattr(row, endpoint),
             row.person_id,
-            canonical_role(row.role),
+            credit_role(row.role),
             normalize_character(getattr(row, "character", None)),
         )
         for row in rows
@@ -693,7 +693,7 @@ def add_credits_batch(
     inserted: list[SQLModel] = []
     for entity_id, members in credits.items():
         for credit in members:
-            person_id, role = uuid.UUID(credit["person_id"]), canonical_role(credit["role"])
+            person_id, role = uuid.UUID(credit["person_id"]), credit_role(credit["role"])
             character = normalize_character(credit.get("character")) if kind == EntityType.PRODUCTION else None
             key = (entity_id, person_id, role, character)
             if key in existing:

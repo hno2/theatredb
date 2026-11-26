@@ -247,6 +247,25 @@ supported scope. Use `confirmed_empty` with `credits: []` for a verified empty
 detail; omit unobserved productions. Missing and empty data do not delete any
 accepted memberships. Raw observations stay in the archive.
 
+Export the current PostgreSQL Theapolis source-credit titles and their frequencies:
+
+```bash
+uv run python -m backend.ingestion.role_titles role-titles.csv
+```
+
+The export counts exact recorded credit labels, including assistant and leadership
+prefixes, in the latest approved production source observations. It excludes
+legacy director/creator-only observations without detail credits. Gesang and
+Sopran classify as singer, separate from actor; dancers and puppeteers also have
+their own types. Conducting, choir direction, sound design, directing assistance
+and directing leadership have distinct categories. Musiktheaterregie, Sopran,
+Choreografie / Direktion and the mapped directing assistant/leadership titles
+remain distinct credits. Performance and sonstige Musiktheater stay unmapped.
+Existing records are not rewritten: public person types and production credits
+are classified on read, but filters on stored person types still search the
+original values. Already-canonicalized actor credits cannot be distinguished
+from acting without consulting their source observations.
+
 Default import uses the DACH filter. Use `import --all` for the full export.
 `import` logs total wall time on completion or failure.
 Theapolis sends country and sometimes a state or canton in `organization.location.country`.
