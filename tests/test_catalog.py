@@ -3,11 +3,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 from streamlit.testing.v1 import AppTest
 
 from backend.entity_management import catalog_page, catalog_suggestions, catalog_summary, tag_filter
-from backend.models import Organization, Person, Production, ProductionMembership, Text, TextTitle
+from backend.models import Organization, Person, Production, ProductionMembership, Text, TextContribution, TextTitle
 from backend.user_management import get_session
 from frontend.views import catalog
 from frontend.views.helpers import theatre_label
@@ -68,6 +68,25 @@ def test_catalog_ranks_before_pagination_and_counts_each_production_once(catalog
     assert catalog_suggestions(Text, "Vari", []) == ["Variante", "Z Text"]
 
 
+def test_text_detail_keeps_catalog_metadata_and_personal_actions(catalog_db):
+    with get_session() as session:
+        text = session.exec(select(Text).where(Text.title == "Z Text")).one()
+        person = session.exec(select(Person).where(Person.name == "Z Person")).one()
+        session.add(TextContribution(text_id=text.id, person_id=person.id, role="author"))
+        session.commit()
+        text_id, person_id = str(text.id), str(person.id)
+
+    app = AppTest.from_file(VIEWS / "detail.py")
+    app.query_params.update(kind="text", id=text_id)
+    app.run()
+    assert not app.exception
+    assert app.title[0].value == "Z Text"
+    assert "Schauspiel" in [element.value for element in app.text]
+    assert "Variante" in [element.value for element in app.text]
+    assert any("Anmelden, damit" in element.value for element in app.caption)
+    assert any(f"detail?kind=person&amp;id={person_id}" in element.value for element in app.markdown)
+
+
 def test_upcoming_is_nearest_first_and_excludes_imprecise_dates(catalog_db):
     rows, _ = catalog_page(Production, "", [], limit=12, upcoming_from=datetime(2026, 11, 20))
     assert [row["name"] for row in rows] == ["Hamlet morgen", "Hamlet später"]
@@ -95,6 +114,18 @@ def test_catalog_loads_url_filters_and_applies_suggestions(catalog_db):
     app.button(key="filter_production__reset").click().run()
     assert not app.exception
     assert "year_from" not in app.query_params
+
+
+@pytest.mark.parametrize(
+    "file", ["catalog_theater.py", "catalog_productions.py", "catalog_people.py", "catalog_texts.py"]
+)
+def test_catalog_filters_precede_search(catalog_db, file):
+    app = AppTest.from_file(VIEWS / file).run()
+    assert not app.exception
+    elements = list(app.main.children.values())
+    filters = next(index for index, element in enumerate(elements) if element.type == "expander")
+    search = next(index for index, element in enumerate(elements) if element.type == "text_input")
+    assert filters < search
 
 
 def test_catalog_search_resets_pagination(catalog_db, monkeypatch):

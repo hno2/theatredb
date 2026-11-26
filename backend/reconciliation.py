@@ -31,6 +31,7 @@ from backend.models import (
     EntityRedirect,
     EntitySource,
     EntityType,
+    LibraryEntry,
     Organization,
     OrganizationSeasonCheck,
     Person,
@@ -799,6 +800,8 @@ def _references(session: Session, kind: EntityType, entity_id: uuid.UUID) -> lis
     # Inspect all registered domain FKs, including nominations, memberships and text lineage.
     for mapper in sa_inspect(Organization, raiseerr=True).registry.mappers:
         model = mapper.class_
+        if model is LibraryEntry:  # private; moved by backend.library.merge_target, never snapshotted
+            continue
         for column in mapper.columns:
             if any(fk.column.table is target_table for fk in column.foreign_keys):
                 rows = session.exec(select(model).where(getattr(model, column.key) == entity_id)).all()
@@ -1521,6 +1524,10 @@ def _merge(
     _prepare_organization_merge(session, case, target, duplicate, actor_id, assessment_choices, target_changed)
     if case.entity_type == EntityType.TEXT:
         _prepare_text_merge(session, target.id, duplicate.id, actor_id)
+    # Local import: backend.library imports texts, which imports this module.
+    from backend.library import merge_target  # ruff: ignore[import-outside-top-level]
+
+    merge_target(session, case.entity_type.value, duplicate.id, target.id)
     touched = set()
     for model, field, rows in _references(session, case.entity_type, duplicate.id):
         for row in rows:

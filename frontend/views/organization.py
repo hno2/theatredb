@@ -105,9 +105,19 @@ def favicon_url(value: str | None) -> str | None:
     return f"{parsed.scheme}://{authority}/favicon.ico"
 
 
-@st.cache_data(persist="disk", max_entries=256)
+@st.cache_data(ttl=3600, max_entries=256)
 def load_favicon(url: str) -> bytes | None:
-    """Fetch a public favicon once and persist its bytes in Streamlit's local disk cache."""
+    """Cache failures temporarily while keeping successful downloads on disk."""
+    try:
+        return _download_favicon(url)
+    except OSError as error:
+        LOG.warning("%s", error)
+        return None
+
+
+@st.cache_data(persist="disk", max_entries=256)
+def _download_favicon(url: str) -> bytes | None:
+    """Fetch a public favicon and persist successful downloads in Streamlit's disk cache."""
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path != "/favicon.ico":
         return None
@@ -122,24 +132,23 @@ def load_favicon(url: str) -> bytes | None:
     except (OSError, TypeError, ValueError) as error:
         raise OSError(f"Cannot resolve favicon host {parsed.hostname}") from error
     if not addresses or any(not address.is_global for address in addresses):
-        LOG.warning("Skipping favicon from non-public host %s", parsed.hostname)
-        return None
+        raise OSError(f"Skipping favicon from non-public host {parsed.hostname}")
     opener = build_opener(_NoRedirectHandler(), ProxyHandler({}))
     try:
-        with opener.open(url, timeout=5) as response:
+        # ruff: ignore[suspicious-url-open-usage] - scheme validated above
+        request = Request(url, headers={"User-Agent": "TheatreDB/0.1"})
+        with opener.open(request, timeout=5) as response:
             return _favicon_image(response, parsed.hostname)
     except OSError as error:
-        raise OSError(f"Cannot load favicon from {parsed.hostname}") from error
+        raise OSError(f"Cannot load favicon from {parsed.hostname}: {error}") from error
 
 
-def _favicon_image(response: addinfourl, host: str) -> bytes | None:
+def _favicon_image(response: addinfourl, host: str) -> bytes:
     if not response.headers.get_content_type().startswith("image/"):
-        LOG.warning("Ignoring non-image favicon response from %s", host)
-        return None
+        raise OSError(f"Ignoring non-image favicon response from {host}")
     image = response.read(64 * 1024 + 1)
     if len(image) > 64 * 1024:
-        LOG.warning("Ignoring oversized favicon response from %s", host)
-        return None
+        raise OSError(f"Ignoring oversized favicon response from {host}")
     return image
 
 
@@ -435,10 +444,10 @@ def render_production_list(productions: list[dict], organization_id: str) -> Non
         return
     page_key = f"theatre_page_{organization_id}_{search}_{person}_{ages}_{premiere_range}_{tags}_{order}"
     page = st.pagination((len(ordered) + 11) // 12, key=page_key) if len(ordered) > 12 else 1
-    for index, production in enumerate(ordered[(page - 1) * 12 : page * 12]):
-        if index:
-            st.divider()
-        render_theatre_production(production)
+    with st.container(gap="medium"):
+        for production in ordered[(page - 1) * 12 : page * 12]:
+            with st.container(gap="xsmall"):
+                render_theatre_production(production)
 
 
 def _render_compact_source(source: dict, name: str, url: str | None, metadata: list[str]) -> None:
@@ -464,13 +473,9 @@ def _render_source_with_icon(
         icon_column, content_column = st.columns([1, 20], vertical_alignment="center")
         with icon_column:
             if icon:
-                try:
-                    image = load_favicon(icon)
-                except OSError as error:
-                    LOG.warning("%s", error)
-                else:
-                    if image:
-                        st.image(image, width=24, alt=f"Favicon {name}")
+                image = load_favicon(icon)
+                if image:
+                    st.image(image, width=24, alt=f"Favicon {name}")
         with content_column:
             st.text(name)
             if source.get("title") and source["title"] != name:

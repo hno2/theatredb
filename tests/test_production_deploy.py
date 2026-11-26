@@ -1,13 +1,55 @@
 import os
+import shlex
 import subprocess  # ruff: ignore[suspicious-subprocess-import] - Run the deploy script with fake tools.
 import textwrap
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 import pytest
+import yaml
 
 SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "deploy-production"
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy-production.yaml"
 IMAGE = "ghcr.io/hno2/theatredb@sha256:" + "a" * 64
+
+
+def test_production_workflow_deploys_pushes_to_main() -> None:
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    assert workflow["on"]["push"]["branches"] == ["main"]
+    assert "workflow_dispatch" in workflow["on"]
+    assert "github.event_name != 'workflow_dispatch' || !inputs.publish_only" in workflow["jobs"]["deploy"]["if"]
+
+
+def test_public_health_retries_transient_404() -> None:
+    class HealthHandler(BaseHTTPRequestHandler):
+        requests = 0
+
+        def do_GET(self) -> None:
+            type(self).requests += 1
+            self.send_response(404 if self.requests == 1 else 200)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), HealthHandler) as server:
+        thread = Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            curl_line = next(line for line in SCRIPT.read_text().splitlines() if line.startswith("curl "))
+            args = shlex.split(curl_line.removesuffix(" \\"))
+            result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] - Local test server only.
+                [*args, f"http://127.0.0.1:{server.server_port}/_stcore/health"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        finally:
+            server.shutdown()
+            thread.join()
+    assert result.returncode == 0, result.stderr
+    assert HealthHandler.requests == 2
 
 
 @pytest.mark.parametrize("ssh_status", [0, 1, 127, 255])
@@ -39,13 +81,16 @@ def test_deploy_workflow_reports_ssh_status(tmp_path: Path, ssh_status: int) -> 
     assert ("Check the production deploy key's forced command" in result.stderr) == (ssh_status == 127)
 
 
-@pytest.mark.parametrize("command,backup_status", [(IMAGE, "0"), (IMAGE, "1"), (IMAGE + " extra", "0")])
-def test_production_deploy(tmp_path: Path, command: str, backup_status: str) -> None:
+@pytest.mark.parametrize(
+    "command,backup_status,health_status",
+    [(IMAGE, "0", "0"), (IMAGE, "1", "0"), (IMAGE + " extra", "0", "0"), (IMAGE, "0", "22")],
+)
+def test_production_deploy(tmp_path: Path, command: str, backup_status: str, health_status: str) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     stubs = {
         "flock": "exit 0",
-        "curl": 'echo public-health >> "$CALLS"',
+        "curl": 'echo "public-health $*" >> "$CALLS"; exit "$HEALTH_STATUS"',
         "docker": """
 echo "$*" >> "$CALLS"
 case " $* " in
@@ -70,6 +115,7 @@ esac
             "CALLS": str(calls),
             "SSH_ORIGINAL_COMMAND": command,
             "BACKUP_STATUS": backup_status,
+            "HEALTH_STATUS": health_status,
         },
         capture_output=True,
         text=True,
@@ -87,6 +133,13 @@ esac
         assert result.returncode != 0
         assert " up -d " not in calls_text
         assert not backups
+        return
+
+    assert "--retry 5 --retry-connrefused --retry-all-errors" in calls_text
+    if health_status != "0":
+        assert result.returncode == int(health_status)
+        assert " ps -q crawl-worker " not in calls_text
+        assert len(backups) == 1
         return
 
     assert result.returncode == 0, result.stderr

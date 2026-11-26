@@ -226,6 +226,9 @@ def render_catalog(kind: str) -> None:
     st.caption("THEATERDB / ENTDECKEN")
     st.title(title)
     st.caption(intro)
+    if kind in {"organization", "production"}:
+        fields = [*fields, _FieldUI("tags", "Schlagworte", "tags", True, options=_tag_options(kind))]
+    filters, values = render_filter_section(model, fields, key=kind, shareable=True)
     search_label = {
         "organization": "Name, Ort oder Land",
         "production": "Titel, Theater oder Ort",
@@ -243,13 +246,11 @@ def render_catalog(kind: str) -> None:
     ).strip()
     suggestion_slot = st.container()
     upcoming_slot = st.container()
-    results, insights = st.columns([3, 2], gap="large")
+    layout = st.grid(2, min_column_width=360, gap="large")
+    results, insights = layout.cell(), layout.cell()
     with results:
         heading = st.empty()
         sort_by, descending = _render_sort() if kind == "production" else ("premiere", True)
-        if kind in {"organization", "production"}:
-            fields = [*fields, _FieldUI("tags", "Schlagworte", "tags", True, options=_tag_options(kind))]
-        filters, values = render_filter_section(model, fields, key=kind, shareable=True)
     only_verified = kind == "organization" and verified_only()
     if only_verified:
         filters.append(verified_organization_filter())

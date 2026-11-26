@@ -2,6 +2,8 @@ name: Deploy production
 run-name: ${{ inputs.publish_only && 'Publish production image' || 'Deploy production' }} (${{ github.sha }})
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       publish_only:
@@ -59,7 +61,7 @@ jobs:
           echo "image=$image@$digest" | tee -a "$GITHUB_OUTPUT"
 
   deploy:
-    if: github.ref == 'refs/heads/main' && !inputs.publish_only
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || !inputs.publish_only)
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30

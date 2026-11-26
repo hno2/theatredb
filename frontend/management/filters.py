@@ -170,12 +170,12 @@ def render_filter_section(
     values: dict[str, Any] = {}
     defaults: dict[str, Any] = {}
     with st.expander(label, expanded=False, icon=":material/filter_list:", key=f"{prefix}__section"):
-        grid = st.columns(max(1, min(len(fields), 3)) if shareable else 3)
-        for index, field in enumerate(fields):
+        grid = st.grid(max(1, min(len(fields), 3)), min_column_width=240)
+        for field in fields:
             field_key = f"{prefix}_{field.name}"
             if shareable:
                 field_key = "year" if field.kind in {"domain_date", "datetime"} else field.name
-            with grid[index % len(grid)]:
+            with grid.cell():
                 field_clauses, value = _render_field_filter(model_cls, field, field_key, shareable=shareable)
             clauses.extend(field_clauses)
             if value is not None:

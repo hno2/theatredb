@@ -1487,6 +1487,12 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/58/c4/59f60e52e8f679488bf0caecbe3a8469af1d3d72c352bb0f306915a3e667/streamlit-1.67.0-py3-none-any.whl", hash = "sha256:f29da87c443bfbdfc52738616e3d65745d438e718da8faf69e2be0da1e52ce64", size = 11235773, upload-time = "2026-11-05T19:53:51.688Z" },
 ]
 
+[package.optional-dependencies]
+auth = [
+    { name = "authlib" },
+    { name = "httpx" },
+]
+
 [[package]]
 name = "theaterdb"
 version = "0.1.0"
@@ -1503,8 +1509,8 @@ dependencies = [
     { name = "referencing" },
     { name = "sqlalchemy" },
     { name = "sqlmodel" },
-    { name = "streamlit" },
     { name = "uvicorn" },
+    { name = "streamlit", extra = ["auth"] },
 ]
 
 [package.dev-dependencies]
@@ -1541,8 +1547,8 @@ requires-dist = [
     { name = "referencing", specifier = ">=0.37.0" },
     { name = "sqlalchemy", specifier = ">=2.0.51" },
     { name = "sqlmodel", specifier = ">=0.0.24" },
-    { name = "streamlit", specifier = ">=1.66.1" },
     { name = "uvicorn", specifier = ">=0.48.0" },
+    { name = "streamlit", extras = ["auth"], specifier = ">=1.66.1" },
 ]
 
 [package.metadata.requires-dev]

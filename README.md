@@ -10,6 +10,8 @@ Add database settings to a root-level `.env` file:
 POSTGRES_USER=theaterdb
 POSTGRES_PASSWORD=replace-this
 POSTGRES_DB=theaterdb
+# Local only: act as admin without SSO (see specs/development.md)
+THEATERDB_DEV_AUTH=1
 ```
 
 Install project dependencies, start PostgreSQL, then start the app:
@@ -84,7 +86,9 @@ independent of production tags and can be edited in organization management.
 ## Docs
 
 - [Production deployments](specs/development.md#production-deployments)
+- [Sign-in and development access](specs/development.md#sign-in-and-development-access)
 - [Product specification](specs/specification.md)
+- [Personal library and sign-in](specs/user-library.md)
 - [Design decisions](specs/design-decisions.md)
 - [Development commands](specs/development.md)
 - [Ingestion guide](backend/ingestion/README.md)
