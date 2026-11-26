@@ -131,8 +131,8 @@ def _import_tab() -> None:
     inferred_date = dt.datetime.strptime(match[1], "%Y%m%d").replace(tzinfo=dt.UTC).date() if match else None
     known_date = st.checkbox("Erfassungsdatum bekannt", value=bool(inferred_date))
     capture = st.date_input("Stand der Quelldaten (nicht Importdatum)", value=inferred_date) if known_date else None
-    ready = records is not None and theatre is not None and bool(source.strip())
-    if st.button("Importieren", type="primary", disabled=not ready) and ready:
+    ready = isinstance(records, list) and theatre is not None and bool(source.strip())
+    if st.button("Importieren", type="primary", disabled=not ready) and ready and isinstance(records, list):
         with st.spinner(f"{len(records)} Produktionen werden geprüft und mit dem Bestand abgeglichen …"):
             result = ingest_records(
                 records,

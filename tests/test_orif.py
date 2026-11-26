@@ -67,7 +67,7 @@ def test_export_maps_renamed_fields_credits_and_premiere_event() -> None:
     ]
     [event] = production["events"]
     assert event["startDate"] == "2026-03-01T19:30:00+01:00"
-    assert event["location"][0]["latitude"] == 52.5
+    assert event["location"][0]["latitude"] == pytest.approx(52.5)
     assert event["performer"] == [
         {
             "@type": "PerformanceRole",
@@ -86,7 +86,10 @@ def test_imprecise_premiere_has_no_event_and_keeps_cast_as_creators() -> None:
 def test_people_export_groups_by_theatre_and_skips_productions_without_one() -> None:
     other = {**TOSCA, "id": "other", "organization": {"id": "other", "name": "Andere"}}
     documents = orif_documents([{**TOSCA, "organization": THEATRE}, other, {**TOSCA, "id": "loose"}])
-    assert [(doc["organization"]["name"], len(doc["productions"])) for doc in documents] == [("Bühne", 1), ("Andere", 1)]
+    assert [(doc["organization"]["name"], len(doc["productions"])) for doc in documents] == [
+        ("Bühne", 1),
+        ("Andere", 1),
+    ]
 
 
 def test_orif_round_trip_is_accepted_by_staging() -> None:
@@ -108,7 +111,8 @@ def test_orif_round_trip_is_accepted_by_staging() -> None:
 def test_orif_import_converts_offsets_and_rejects_unusable_documents() -> None:
     document = orif_document(THEATRE, [TOSCA])
     document["productions"][0]["events"][0]["startDate"] = "2026-07-01T18:00:00Z"
-    assert as_staged(document)[0]["premiere"] == "2026-07-01T20:00"
+    staged = as_staged(document)
+    assert isinstance(staged, list) and staged[0]["premiere"] == "2026-07-01T20:00"
     with pytest.raises(ValueError, match="version"):
         as_staged({**document, "version": "v1"})
     del document["productions"][0]["events"][0]["url"]
@@ -122,6 +126,9 @@ def test_staging_accepts_legacy_field_names_and_rejects_conflicts() -> None:
     member = {"name": "Alex", "role": "Schauspiel", "character": "Hamlet"}
     [staged] = validate_records([{**record, "memberships": [member]}])
     assert staged["suggested_min_age"] == 12
-    assert (staged["memberships"][0]["role_name"], staged["memberships"][0]["character_name"]) == ("Schauspiel", "Hamlet")
+    assert (staged["memberships"][0]["role_name"], staged["memberships"][0]["character_name"]) == (
+        "Schauspiel",
+        "Hamlet",
+    )
     with pytest.raises(ValidationError):
         validate_records([{**record, "suggested_min_age": 6}])

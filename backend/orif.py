@@ -8,6 +8,7 @@ ORIF document into staged production records for ``backend.production_import``.
 
 import datetime as dt
 from collections.abc import Iterable
+from itertools import starmap
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -165,7 +166,9 @@ def production_to_orif(production: dict, organization: dict | None = None) -> di
         ]
     tag_list = production.get("tags") or []
     tags = {tag.casefold() for tag in tag_list}
-    genres = sorted(tags & ORIF_GENRES | ({TEXT_GENRE_TO_ORIF[text["genre"]]} if text.get("genre") in TEXT_GENRE_TO_ORIF else set()))
+    genres = sorted(
+        tags & ORIF_GENRES | ({TEXT_GENRE_TO_ORIF[text["genre"]]} if text.get("genre") in TEXT_GENRE_TO_ORIF else set())
+    )
     age = production.get("suggested_min_age")
     return _compact(
         {
@@ -176,7 +179,8 @@ def production_to_orif(production: dict, organization: dict | None = None) -> di
             "isBasedOn": [work] if (work := _work(text)) else None,
             "genre": genres,
             "productionType": next(
-                (PRODUCTION_TYPE_TAGS[tag.casefold()] for tag in tag_list if tag.casefold() in PRODUCTION_TYPE_TAGS), None
+                (PRODUCTION_TYPE_TAGS[tag.casefold()] for tag in tag_list if tag.casefold() in PRODUCTION_TYPE_TAGS),
+                None,
             ),
             "inLanguage": [language for language in text.get("languages") or [] if language != "mul"],
             "audience": {"@type": "PeopleAudience", "suggestedMinAge": age} if age is not None else None,
@@ -201,7 +205,7 @@ def orif_documents(productions: Iterable[dict]) -> list[dict]:
     for production in productions:
         if organization := production.get("organization"):
             grouped.setdefault(str(organization["id"]), (organization, []))[1].append(production)
-    return [orif_document(organization, rows) for organization, rows in grouped.values()]
+    return list(starmap(orif_document, grouped.values()))
 
 
 def _plain(value: object) -> str | None:
@@ -219,8 +223,10 @@ def _wall_time(value: str) -> str:
     return start.isoformat(timespec="minutes")
 
 
-def _names(agents: Any) -> list[str]:
-    return [agent["name"] for agent in agents or [] if isinstance(agent, dict) and agent.get("name")]
+def _names(agents: object) -> list[str]:
+    if not isinstance(agents, list):
+        return []
+    return [agent["name"] for agent in agents if isinstance(agent, dict) and agent.get("name")]
 
 
 def _member(agent: dict, role: str | None, character: str | None = None) -> dict:
@@ -290,7 +296,7 @@ def _staged_production(production: dict) -> dict:
     )
 
 
-def as_staged(data: Any) -> Any:
+def as_staged(data: object) -> object:
     """Convert an ORIF document to staged production records; any other payload is returned unchanged."""
     if not isinstance(data, dict) or data.get("@context") != ORIF_CONTEXT or "productions" not in data:
         return data
