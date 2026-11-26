@@ -126,7 +126,9 @@ fields; known identities only fill missing fields and credits automatically.
 
 The same text resolver handles publisher and theatre metadata. German labels
 `Titel`, `Originaltitel`, `Originalsprache`, `Autor`/`Autoren`, `Übersetzung`,
-`Sprache`, and `UA`/`Uraufführung` are accepted. `UA` is retained verbatim as
+`Sprache`, `Beschreibung`/`Inhalt`/`Klappentext` (→ `description`), and
+`UA`/`Uraufführung` are accepted. `StagedText.description` fills an empty text
+description only. `UA` is retained verbatim as
 `world_premiere`, not mistaken for a text publication date. Names may be lists
 or a single unsplit string; dates and language codes must use the staging format.
 

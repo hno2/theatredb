@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 
 from backend.entity_management import catalog_page, catalog_suggestions, catalog_summary, tag_filter
 from backend.models import Organization, Person, Production, ProductionMembership, Text, TextContribution, TextTitle
+from backend.taxonomy import set_production_tags, sync_vocabulary
 from backend.user_management import get_session
 from frontend.views import catalog
 from frontend.views.helpers import theatre_label
@@ -114,6 +115,32 @@ def test_catalog_loads_url_filters_and_applies_suggestions(catalog_db):
     app.button(key="filter_production__reset").click().run()
     assert not app.exception
     assert "year_from" not in app.query_params
+
+
+def test_catalog_combines_url_taxonomy_facets(catalog_db):
+    with get_session() as session:
+        sync_vocabulary(session)
+        first = session.exec(select(Production).where(Production.name == "Hamlet")).one()
+        second = session.exec(select(Production).where(Production.name == "Hamlet später")).one()
+        set_production_tags(session, first.id, {"form.tanz", "premiere.ua"}, "editor")
+        set_production_tags(session, second.id, {"form.tanz"}, "editor")
+        session.commit()
+    catalog._facet_fields.clear()
+    try:
+        app = AppTest.from_file(VIEWS / "catalog_productions.py")
+        app.query_params.update(tag_form=["Tanz"], tag_premiere=["Uraufführung"], exclude_planned="false")
+        app.run()
+        assert not app.exception
+        assert app.multiselect(key="tag_form").value == ["form.tanz"]
+        assert app.multiselect(key="tag_premiere").value == ["premiere.ua"]
+        results = [element.value for element in app.markdown if "detail?kind=production" in element.value]
+        assert len(results) == 1
+        assert "Hamlet" in results[0] and "Hamlet später" not in results[0]
+        app.button(key="filter_production__reset").click().run()
+        assert not app.exception
+        assert "tag_form" not in app.query_params and "tag_premiere" not in app.query_params
+    finally:
+        catalog._facet_fields.clear()
 
 
 @pytest.mark.parametrize(

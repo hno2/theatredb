@@ -46,6 +46,7 @@ from backend.models import (
     TextTitle,
 )
 from backend.scd2 import add_scd2_event
+from backend.taxonomy import prepare_production_merge
 from backend.user_management import get_session
 
 type Entity = Organization | Person | Production | Text | Award
@@ -1510,8 +1511,7 @@ def _merge(
 ) -> None:
     duplicate = _get(session, case.entity_type, duplicate_id)
     _prepare_organization_merge(session, case, target, duplicate, actor_id, assessment_choices, target_changed)
-    if case.entity_type == EntityType.TEXT:
-        _prepare_text_merge(session, target.id, duplicate.id, actor_id)
+    _prepare_link_merge(session, case.entity_type, target.id, duplicate.id, actor_id)
     # Local import: backend.library imports texts, which imports this module.
     from backend.library import merge_target  # ruff: ignore[import-outside-top-level]
 
@@ -1563,6 +1563,16 @@ def _merge(
     audit_event(session, duplicate, "delete", actor_id)
     session.delete(duplicate)
     session.flush()
+
+
+def _prepare_link_merge(
+    session: Session, kind: EntityType, target_id: uuid.UUID, duplicate_id: uuid.UUID, actor_id: str | None
+) -> None:
+    """Resolve uniquely keyed child rows before foreign keys move to the target."""
+    if kind == EntityType.TEXT:
+        _prepare_text_merge(session, target_id, duplicate_id, actor_id)
+    elif kind == EntityType.PRODUCTION:
+        prepare_production_merge(session, target_id, duplicate_id)
 
 
 def _prepare_text_merge(session: Session, target_id: uuid.UUID, duplicate_id: uuid.UUID, actor_id: str | None) -> None:

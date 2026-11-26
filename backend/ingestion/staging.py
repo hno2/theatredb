@@ -133,6 +133,7 @@ class StagedText(StagedDomainModel):
     genre: Literal["play", "musical", "opera", "novel", "film", "other"] | None = None
     published: DomainDate = None
     published_precision: DatePrecision | None = None
+    description: str | None = None
 
 
 class StagedProduction(StagedDomainModel):

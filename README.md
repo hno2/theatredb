@@ -90,6 +90,20 @@ Organization and production tags appear as pills. Their filters offer all stored
 tags; selecting multiple tags matches any selected value. Organization tags are
 independent of production tags and can be edited in organization management.
 
+Productions also carry a two-layer taxonomy: **Profil** (what it is: Sparte,
+Premierenstatus, Arbeitsweise, Publikum, Kontext) and **Inhalt** (what it is
+about: Thema, Handlungszeit, Schauplatz, Vorlage & Bezug). Each facet is a
+filter (`tag_form=Tanz&tag_premiere=Uraufführung`); values within a facet match
+any, facets combine with AND. Legacy tags map onto the vocabulary automatically;
+after upgrading an existing database run once:
+
+```bash
+uv run python -m backend.taxonomy backfill
+```
+
+Production management edits assignments per facet. Manual choices always win
+over source-mapped tags and survive re-imports and merges.
+
 ## Docs
 
 - [Production deployments](specs/development.md#production-deployments)

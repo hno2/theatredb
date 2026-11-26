@@ -64,9 +64,14 @@ def alembic_config(connection: Connection | None = None) -> Config:
 
 def migrate(engine: Engine) -> None:
     """Upgrade PostgreSQL to the latest migration; unversioned pre-Alembic schemas are stamped as baseline."""
+    from backend.taxonomy import sync_vocabulary  # ruff: ignore[import-outside-top-level]
+
     if engine.dialect.name != "postgresql":
         # shortcut: migrations are PostgreSQL-only, SQLite (tests) gets the current models directly.
         SQLModel.metadata.create_all(engine)
+        with Session(engine) as session:
+            sync_vocabulary(session)
+            session.commit()
         return
     with engine.begin() as connection:
         connection.execute(
@@ -77,6 +82,9 @@ def migrate(engine: Engine) -> None:
         if unversioned and set(inspect(connection).get_table_names()) & set(SQLModel.metadata.tables):
             command.stamp(config, BASELINE_REVISION)
         command.upgrade(config, "head")
+        with Session(bind=connection) as session:
+            sync_vocabulary(session)
+            session.flush()
 
 
 def init_db() -> None:

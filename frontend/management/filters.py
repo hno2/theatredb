@@ -13,6 +13,7 @@ from sqlmodel import SQLModel, col, select
 
 from backend.entity_management import tag_filter
 from backend.models import Organization, Production
+from backend.taxonomy import facet_filters
 
 if TYPE_CHECKING:
     from frontend.management.uifactory import _FieldUI
@@ -75,13 +76,27 @@ def _render_range(field: _FieldUI, key: str, *, years: bool, shareable: bool) ->
     )
 
 
+def _render_facet_filter(field: _FieldUI, key: str, bind: Any) -> tuple[list[SqlFilter], Any]:  # ruff: ignore[any-type]
+    labels = field.option_labels or {}
+    selected = st.multiselect(
+        field.label,
+        field.options or [],
+        key=key,
+        bind=bind,
+        format_func=lambda code: labels.get(code, code),
+        placeholder="Auswählen",
+        help="Mindestens eines der gewählten Merkmale; mehrere Merkmalsgruppen müssen alle zutreffen.",
+    )
+    return facet_filters({field.name: selected}), [labels.get(code, code) for code in selected] or None
+
+
 def _render_field_filter(
     model_cls: type[SQLModel], field: _FieldUI, key: str, *, shareable: bool
 ) -> tuple[list[SqlFilter], Any]:
+    bind = "query-params" if shareable else None
     column = getattr(model_cls, field.name, None)
     if column is None or not hasattr(column, "type") or field.kind == "uuid":
         return [], None
-    bind = "query-params" if shareable else None
     if field.kind == "tags" and model_cls in (Organization, Production):
         selected = st.multiselect(
             field.label,
@@ -176,7 +191,11 @@ def render_filter_section(
             if shareable:
                 field_key = "year" if field.kind in {"domain_date", "datetime"} else field.name
             with grid.cell():
-                field_clauses, value = _render_field_filter(model_cls, field, field_key, shareable=shareable)
+                field_clauses, value = (
+                    _render_facet_filter(field, field_key, "query-params" if shareable else None)
+                    if field.kind == "facet" and model_cls is Production
+                    else _render_field_filter(model_cls, field, field_key, shareable=shareable)
+                )
             clauses.extend(field_clauses)
             if value is not None:
                 values[field.label] = value

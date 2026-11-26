@@ -9,7 +9,7 @@ from sqlalchemy import Engine, event, insert
 from sqlmodel import Session, SQLModel, create_engine, select
 from streamlit.testing.v1 import AppTest
 
-from backend import user_management
+from backend import library, user_management
 from backend.entity_management import get_entity_graph
 from backend.models import (
     Award,
@@ -18,11 +18,13 @@ from backend.models import (
     EntityRedirect,
     EntitySource,
     EntityType,
+    LibraryEntry,
     Organization,
     OrganizationMembership,
     Person,
     Production,
     ProductionMembership,
+    ProductionTag,
     ReconciliationCase,
     Source,
     SourceRecord,
@@ -51,6 +53,7 @@ from backend.reconciliation import (
     union_values,
 )
 from backend.scd2 import SCD2History
+from backend.taxonomy import set_production_tags, sync_vocabulary
 
 CAPTURE = dt.datetime(2026, 6, 7, tzinfo=dt.UTC)
 REVIEW_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "reconciliation.py"
@@ -255,6 +258,23 @@ def test_all_entity_kinds_merge_and_redirect(db, kind) -> None:
         assert resolve_id(session, kind, right.id) == left.id
     assert count(db, model) == 1
     assert get_entity_graph(model, str(right.id))["id"] == str(left.id)
+
+
+def test_production_merge_preserves_taxonomy_and_library_entries(db) -> None:
+    left, right = save(db, Production(name="Same", tags=["Tanz"]), Production(name="Same"))
+    with Session(db) as session:
+        sync_vocabulary(session)
+        set_production_tags(session, right.id, {"form.tanz"}, "editor")
+        user = library.find_or_create_user(session, "reader", "Reader")
+        library.set_want(session, user.id, "production", right.id, True)
+        session.commit()
+
+    approve(queue_duplicate("production", left.id, right.id, reason="Manual"))
+    with Session(db) as session:
+        tag = session.exec(select(ProductionTag)).one()
+        entry = session.exec(select(LibraryEntry)).one()
+        assert (tag.production_id, tag.origin.value) == (left.id, "manual")
+        assert (entry.production_id, entry.want_to_see) == (left.id, True)
 
 
 def test_person_merge_rewires_all_links_and_deduplicates_roles(db, source) -> None:

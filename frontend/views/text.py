@@ -61,6 +61,9 @@ def render_text_page(data: dict) -> None:
         data["id"],
         {str(row["id"]): " · ".join(filter(None, (row["name"], row["theatre"], row["premiere"]))) for row in rows},
     )
+    if data.get("description"):
+        st.subheader("Beschreibung")
+        st.markdown(data["description"])
     if variants := sorted({row["title"] for row in data.get("titles") or [] if row["title"] != data["title"]}):
         st.subheader("Weitere Titel")
         for variant in variants:
