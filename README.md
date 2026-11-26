@@ -34,6 +34,33 @@ docker compose up -d --build
 
 Open <http://localhost:8501>. Stop Docker services with `docker compose down`.
 
+### Read-only API
+
+After installing dependencies and applying database migrations as above, run:
+
+```bash
+uv run uvicorn backend.api:app --reload
+```
+
+Open <http://localhost:8000/docs> for the interactive API documentation.
+The API uses the same database settings as the app; it does not create databases
+or run migrations on startup.
+
+- `GET /api/organizations`, `/api/productions`, `/api/people`, `/api/texts`:
+  list or search with `q`, `limit` (default 12, maximum 100), and `offset`
+  (default 0). Responses contain `items` and `total` matching records.
+- `GET /api/{resource}/{uuid}`: get a public entity graph with relationships
+  and source links. Merged IDs resolve to the surviving entity. Missing records
+  return 404; invalid UUIDs or pagination parameters return 422.
+
+Search and ranking reuse the public catalog helpers, including theatre context
+for productions and alternative titles for texts. Production lists include
+future and undated premieres. No UI filters or upcoming-preview exclusions are
+applied. Internal reviewer identities are omitted from public organization data.
+
+Only GET routes are available. The API is unauthenticated and intended for
+public archive reads; it exposes no management, user, or crawler endpoints.
+
 ### Browse the archive
 
 The **Entdecken** menu has separate pages for theatres, productions, people, and
