@@ -35,7 +35,7 @@ def format_value(field: str, value: object, precision: str | None = None) -> str
         return ", ".join(map(str, value))
     if field == "duration":
         return f"{value} Min."
-    if field == "age_rating":
+    if field == "suggested_min_age":
         return f"ab {value} J."
     return str(value)
 

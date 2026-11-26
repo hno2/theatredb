@@ -26,10 +26,10 @@ def organization_data(organizations: list[Organization]) -> pd.DataFrame:
             {
                 "id": str(org.id),
                 "name": org.name,
-                "city": theatre_city(org.name, org.city),
-                "country": (org.country or "").strip(),
-                "lat": org.lat,
-                "lon": org.lon,
+                "city": theatre_city(org.name, org.address_locality),
+                "country": (org.address_country or "").strip(),
+                "lat": org.latitude,
+                "lon": org.longitude,
                 "detail": f"detail?{urlencode({'kind': 'organization', 'id': str(org.id), **filter_params})}",
             }
             for org in organizations

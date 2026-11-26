@@ -11,7 +11,7 @@ requires-python = ">=3.14"
 dependencies = [
 	"sqlmodel>=0.0.24",
 	"sqlalchemy>=2.0.51",
-	"streamlit>=1.66.1",
+	"streamlit[auth]>=1.66.1",
 	"authlib>=1.7.2",
 	"psycopg[binary]>=3.3.4",
 	"python-dotenv>=1.2.1",
@@ -20,6 +20,8 @@ dependencies = [
 	"jsonschema>=4.26.0",
 	"referencing>=0.37.0",
 	"pycountry>=26.2.16",
+	"fastapi>=0.165.0",
+	"uvicorn>=0.48.0",
 ]
 
 [dependency-groups]
@@ -32,6 +34,7 @@ dev = [
     "types-pyyaml>=6.0.12.20261111",
     "types-jsonschema>=4.26.0.20261006",
     "types-tqdm>=4.70.0.20261106",
+    "httpx>=0.28.1",
 ]
 ingest=[
 	"babel>=2.17",

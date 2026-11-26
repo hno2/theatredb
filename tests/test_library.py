@@ -1,4 +1,5 @@
 import datetime as dt
+import importlib
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -21,6 +22,10 @@ from frontend.views import personal
 from frontend.views import text as text_view
 
 TODAY = dt.date(2026, 11, 21)
+
+
+def test_oidc_server_dependencies_are_available():
+    assert callable(importlib.import_module("authlib.integrations.starlette_client").OAuth)
 
 
 @pytest.fixture
@@ -148,7 +153,7 @@ def test_stagings_cover_family_and_label_premieres(session):
     original = Text(title="Original")
     translation = Text(title="Übersetzung")
     based_on = Text(title="Nach Motiven")
-    theatre = Organization(name="Schauspiel", city="Köln")
+    theatre = Organization(name="Schauspiel", address_locality="Köln")
     session.add_all([original, translation, based_on, theatre])
     session.flush()
     session.add_all(

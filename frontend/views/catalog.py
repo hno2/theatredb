@@ -48,8 +48,8 @@ CATALOGS: dict[str, tuple[CatalogModel, str, str, str, list[_FieldUI]]] = {
         "Bühnen und Ensembles nach Ort und Profil entdecken.",
         "Theater nach Land",
         [
-            _FieldUI("city", "Ort", "str", True),
-            _FieldUI("country", "Land", "str", True),
+            _FieldUI("address_locality", "Ort", "str", True),
+            _FieldUI("address_country", "Land", "str", True),
             _FieldUI("founded", "Gründung", "domain_date", True),
         ],
     ),
@@ -130,13 +130,13 @@ def _render_entry(kind: str, entry: dict) -> None:
         org = entry.get("organization") or {}
         meta = [
             domain_date_label(entry, "premiere") if entry.get("premiere") else "Premiere nicht hinterlegt",
-            theatre_label(org.get("name") or "", org.get("city")),
+            theatre_label(org.get("name") or "", org.get("address_locality")),
         ]
     else:
         count = entry["production_count"]
         meta = [f"{count} {'Produktion' if count == 1 else 'Produktionen'}"]
         if kind == "organization":
-            meta.extend((theatre_city(title, entry.get("city")), entry.get("country")))
+            meta.extend((theatre_city(title, entry.get("address_locality")), entry.get("address_country")))
         elif kind == "person":
             meta.extend((entry.get("nationality"), ", ".join(entry.get("type") or [])))
         else:
@@ -252,6 +252,8 @@ def render_catalog(kind: str) -> None:
     st.caption("THEATERDB / ENTDECKEN")
     st.title(title)
     st.caption(intro)
+    fields = [*fields, *_extra_filter_fields(kind)]
+    filters, values = render_filter_section(model, fields, key=kind, shareable=True)
     search_label = {
         "organization": "Name, Ort oder Land",
         "production": "Titel, Theater oder Ort",
@@ -269,12 +271,11 @@ def render_catalog(kind: str) -> None:
     ).strip()
     suggestion_slot = st.container()
     upcoming_slot = st.container()
-    results, insights = st.columns([3, 2], gap="large")
+    layout = st.grid(2, min_column_width=360, gap="large")
+    results, insights = layout.cell(), layout.cell()
     with results:
         heading = st.empty()
         sort_by, descending = _render_sort() if kind == "production" else ("premiere", True)
-        fields = [*fields, *_extra_filter_fields(kind)]
-        filters, values = render_filter_section(model, fields, key=kind, shareable=True)
     only_verified = kind == "organization" and verified_only()
     if only_verified:
         filters.append(verified_organization_filter())

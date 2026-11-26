@@ -123,16 +123,17 @@ def _playlist_form(user: Principal, kind: str, target_id: uuid.UUID, state: dict
 def render_actions(kind: str, target_id: str | uuid.UUID, productions: dict[str, str] | None = None) -> None:
     """Merken / Gelesen / Gesehen / Bewerten / Liste; anonymous visitors get a gentle login nudge instead."""
     user = principal()
-    row = st.container(horizontal=True)
+    row = st.columns(5 if kind == "text" else 4)
     if user is None:
-        for label, icon in [
+        labels = [
             ("Merken", ":material/bookmark_border:"),
             *([("Gelesen", ":material/menu_book:")] if kind == "text" else []),
             ("Gesehen", ":material/visibility:"),
             ("Bewerten", ":material/star_border:"),
             ("Liste", ":material/playlist_add:"),
-        ]:
-            with row.popover(label, icon=icon, help=label):
+        ]
+        for column, (label, icon) in zip(row, labels, strict=True):
+            with column.popover(label, icon=icon, help=label, width="stretch"):
                 _nudge(f"nudge_{label}_{target_id}")
         return
     target_id = uuid.UUID(str(target_id))
@@ -140,7 +141,7 @@ def render_actions(kind: str, target_id: str | uuid.UUID, productions: dict[str,
         state = library.status(session, user.id, kind, target_id)
 
     want = state["want"]
-    row.button(
+    row[0].button(
         "Gemerkt" if want else "Merken",
         icon=":material/bookmark:" if want else ":material/bookmark_border:",
         type="primary" if want else "secondary",
@@ -149,42 +150,47 @@ def render_actions(kind: str, target_id: str | uuid.UUID, productions: dict[str,
         on_click=save,
         args=(library.set_want, user.id, kind, target_id, not want),
         kwargs={"done": "Merkliste aktualisiert"},
+        width="stretch",
     )
     if kind == "text":
         reads = state["reads"]
-        with row.popover(
+        with row[1].popover(
             f"Gelesen {len(reads)}" if reads else "Gelesen",
             icon=":material/menu_book:",
             type="primary" if reads else "secondary",
             help="Diese Fassung gelesen",
+            width="stretch",
         ):
             _visits(user, reads, "Gelesen")
             _visit_form(user, kind, target_id, "read", {})
     watches = state["watches"]
     seen = len(watches) + state["production_watches"]
-    with row.popover(
+    with row[-3].popover(
         f"Gesehen {seen}" if seen else "Gesehen",
         icon=":material/visibility:",
         type="primary" if seen else "secondary",
         help="Im Theater gesehen",
+        width="stretch",
     ):
         if state["production_watches"]:
             st.caption(f"{state['production_watches']} mal über eine Produktion dieses Textes")
         _visits(user, watches, "Gesehen")
         _visit_form(user, kind, target_id, "watched", productions or {})
     rating = state["rating"]
-    with row.popover(
+    with row[-2].popover(
         "★" * rating if rating else "Bewerten",
         icon=None if rating else ":material/star_border:",
         type="primary" if rating or state["review"] else "secondary",
         help=f"{rating} von 5 Sternen" if rating else "Sterne und Rezension",
+        width="stretch",
     ):
         _opinion_form(user, kind, target_id, state)
     lists = state["playlists"]
-    with row.popover(
+    with row[-1].popover(
         f"Liste {len(lists)}" if lists else "Liste",
         icon=":material/playlist_add_check:" if lists else ":material/playlist_add:",
         type="primary" if lists else "secondary",
         help="Zu einer eigenen Liste hinzufügen",
+        width="stretch",
     ):
         _playlist_form(user, kind, target_id, state)

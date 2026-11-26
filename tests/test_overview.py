@@ -38,7 +38,7 @@ def test_coordinate_validation(lat: float | None, lon: float | None, expected: b
 
 
 def test_directory_preserves_missing_coordinates_and_links() -> None:
-    org = Organization(name="Theater & Bühne", city=" Wien ", country=" Österreich ")
+    org = Organization(name="Theater & Bühne", address_locality=" Wien ", address_country=" Österreich ")
     data = overview.organization_data([org])
     assert len(data) == 1
     row = data.iloc[0]
@@ -52,7 +52,7 @@ def test_directory_preserves_missing_coordinates_and_links() -> None:
 @pytest.mark.parametrize("positions", [[(0, 0)], [(48, 16), (48, 16)], [(48, 16), (52, 13)]])
 def test_map_supports_single_shared_and_multiple_locations(positions: list[tuple[float, float]]) -> None:
     data = overview.organization_data(
-        [Organization(name=f"Theater {i}", lat=lat, lon=lon) for i, (lat, lon) in enumerate(positions)]
+        [Organization(name=f"Theater {i}", latitude=lat, longitude=lon) for i, (lat, lon) in enumerate(positions)]
     )
     deck = json.loads(overview.theater_map(data).to_json())
     assert math.isfinite(deck["initialViewState"]["zoom"])
@@ -67,9 +67,17 @@ def test_map_supports_single_shared_and_multiple_locations(positions: list[tuple
 @pytest.fixture
 def homepage(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Iterator[HomepageFixture]:
     organizations = [
-        Organization(name="Bühne [Mitte]", city="Berlin", country="Deutschland", lat=52.5, lon=13.4),
-        Organization(name="Burgtheater", city="Wien", country="Österreich", lat=48.2, lon=16.4),
-        Organization(name="Ohne Position", city="Berlin", country="Deutschland"),
+        Organization(
+            name="Bühne [Mitte]",
+            address_locality="Berlin",
+            address_country="Deutschland",
+            latitude=52.5,
+            longitude=13.4,
+        ),
+        Organization(
+            name="Burgtheater", address_locality="Wien", address_country="Österreich", latitude=48.2, longitude=16.4
+        ),
+        Organization(name="Ohne Position", address_locality="Berlin", address_country="Deutschland"),
     ]
 
     engine = create_engine(f"sqlite:///{tmp_path / 'homepage.db'}")
@@ -158,10 +166,13 @@ def test_homepage_map_and_directory_are_unpaginated(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(user_management, "_get_engine", lambda: engine)
     with Session(engine) as session:
         session.add_all(
-            [Organization(name=f"Alpha {i:03}", city="Berlin", lat=52.5, lon=13.4) for i in range(60)]
+            [
+                Organization(name=f"Alpha {i:03}", address_locality="Berlin", latitude=52.5, longitude=13.4)
+                for i in range(60)
+            ]
             + [
-                Organization(name="Ohne Position", city="Berlin"),
-                Organization(name="Zeta", city="Wien [AT]", lat=48.2, lon=16.4),
+                Organization(name="Ohne Position", address_locality="Berlin"),
+                Organization(name="Zeta", address_locality="Wien [AT]", latitude=48.2, longitude=16.4),
             ]
         )
         session.commit()
@@ -189,7 +200,7 @@ def test_shared_map_position_links_every_theater(homepage: HomepageFixture, monk
     with user_management.get_session() as session:
         theatre = session.get(Organization, organizations[1].id)
         assert theatre is not None
-        theatre.lat, theatre.lon = organizations[0].lat, organizations[0].lon
+        theatre.latitude, theatre.longitude = organizations[0].latitude, organizations[0].longitude
         session.commit()
     monkeypatch.setattr(
         overview.st,

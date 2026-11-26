@@ -77,7 +77,7 @@ def record() -> dict:
         "url": KARLSRUHE_URL,
         "duration": 90,
         "memberships": [
-            {"name": "First Actor", "role": "Hamlet", "url": "https://www.staatstheater-karlsruhe.de/people/1"}
+            {"name": "First Actor", "role_name": "Hamlet", "url": "https://www.staatstheater-karlsruhe.de/people/1"}
         ],
     }
 
@@ -91,7 +91,9 @@ def test_published_schema_matches_models_and_current_domain_fields(record: dict)
     assert set(StagedProduction.model_fields) - {"title", "author", "text", "memberships", "premiere_year"} <= set(
         Production.model_fields
     )
-    assert set(StagedMembership.model_fields) - {"url", "role", "character", "external_id"} <= set(Person.model_fields)
+    assert set(StagedMembership.model_fields) - {"url", "role_name", "character_name", "external_id"} <= set(
+        Person.model_fields
+    )
     for field in ("description",):
         assert StagedProduction.model_fields[field].annotation == Production.model_fields[field].annotation
     for field in ("description", "nationality"):
@@ -112,7 +114,7 @@ def test_reject_invalid_snapshot_shape(value: object) -> None:
         ("duration", -1),
         ("duration", True),
         ("duration", "90"),
-        ("age_rating", -1),
+        ("suggested_min_age", -1),
         ("premiere", "2026-02-31"),
         ("premiere", "123"),
         ("premiere", 123),
@@ -190,12 +192,12 @@ def test_karlsruhe_selectors_and_continuation_roles() -> None:
     assert record["premiere"] == "2026-10-03T00:00:00"
     assert record["premiere_precision"] == "day"
     assert record["duration"] == 90
-    assert record["age_rating"] == 15
+    assert record["suggested_min_age"] == 15
     assert record["author"] == "Example Author"
     assert "venue logistics" not in record["description"]
     members = record["memberships"]
     assert len(members) == 9
-    assert not members[0]["role"] and not members[1]["role"]
+    assert not members[0]["role_name"] and not members[1]["role_name"]
     assert members[2]["type"] == "director"
     assert members[3]["type"] == "set_designer"
     assert members[4]["type"] == "costume_designer"
@@ -228,7 +230,7 @@ def test_educator_credit_uses_shared_mapping_without_venue_overrides(role: str) 
     scraper = ConfigurableScraper(config)
     html = KARLSRUHE_HTML.replace("<th>Regie</th>", f"<th>{role}</th>")
     member = scraper.parse_page(html, KARLSRUHE_URL, "production")["memberships"][2]
-    assert member["role"] == role
+    assert member["role_name"] == role
     assert member["type"] == "theatre_educator"
 
 
@@ -259,7 +261,7 @@ def test_blank_credit_spacers_preserve_continuation_roles(spacer: str) -> None:
         spacer + "<tr><th></th><td>Example Designer</td></tr>",
     )
     members = scraper.parse_page(html, KARLSRUHE_URL, "production")["memberships"]
-    assert members[3]["role"] == "Regie"
+    assert members[3]["role_name"] == "Regie"
     assert members[3]["type"] == "director"
 
 
@@ -279,7 +281,7 @@ def test_stuttgart_selectors_short_dates_durations_and_multiple_people() -> None
     assert record["premiere"] == "2026-10-16T00:00:00"
     assert record["premiere_precision"] == "day"
     assert record["duration"] == 170
-    assert record["age_rating"] is None  # School grade is not an age.
+    assert record["suggested_min_age"] is None  # School grade is not an age.
     assert record["author"] == "Example Author"
     members = record["memberships"]
     assert [member["name"] for member in members] == [
@@ -290,7 +292,7 @@ def test_stuttgart_selectors_short_dates_durations_and_multiple_people() -> None
         "Designer One",
         "Designer Two",
     ]
-    assert members[0]["role"] == "Example Character"
+    assert members[0]["role_name"] == "Example Character"
     assert members[0]["type"] == "actor"
     assert members[1]["url"] is None
     assert members[3]["type"] == "director"
@@ -346,7 +348,7 @@ def test_badische_landesbuehne_production_and_listing(color: str) -> None:
     assert record["premiere"] == "2026-09-18T00:00:00"
     assert record["premiere_precision"] == "day"
     assert record["duration"] == 65
-    assert record["age_rating"] == 13
+    assert record["suggested_min_age"] == 13
     assert record["description"] == ("A synthetic **description** of this production.\n\nSecond paragraph.")
     members = record["memberships"]
     assert [member["name"] for member in members] == [
@@ -356,11 +358,11 @@ def test_badische_landesbuehne_production_and_listing(color: str) -> None:
         "Unlinked Actor",
     ]
     assert [member["type"] for member in members] == ["director", "set_designer", "actor", "actor"]
-    assert members[1]["role"] == "Bühne & Kostüm"
-    assert members[2]["role"] == "Spieler 1: Die Regisseurin"
+    assert members[1]["role_name"] == "Bühne & Kostüm"
+    assert members[2]["role_name"] == "Spieler 1: Die Regisseurin"
     assert members[2]["url"] == base + "personen/actor.html"
     assert members[3]["url"] is None
-    assert not members[3]["role"]
+    assert not members[3]["role_name"]
     assert scraper.parse_page(html.replace('alt="Premiere"', 'alt="Einführung"'), url, "production")["premiere"] is None
 
 
@@ -634,7 +636,7 @@ def test_scrape_diff_fields_people_and_order_independence(record: dict) -> None:
     assert "duration:" in report and "- 90" in report and "+ 100" in report
     assert "First Actor (Hamlet) > description" in report
     after = copy.deepcopy(before)
-    after[0]["memberships"].append({"name": "Another", "role": "Other", "url": None})
+    after[0]["memberships"].append({"name": "Another", "role_name": "Other", "url": None})
     normalized = validate_records(after)
     assert "~0 changed" in scrape_diff(
         normalized, [{**normalized[0], "memberships": normalized[0]["memberships"][::-1]}]
@@ -661,7 +663,7 @@ def test_snapshots_never_overwrite_and_scopes_do_not_mix(record: dict, tmp_path:
 
 
 def test_generated_json_omits_null_and_empty_array_fields(record: dict, tmp_path: Path) -> None:
-    record.update(description=None, age_rating=0, author="", tags=[])
+    record.update(description=None, suggested_min_age=0, author="", tags=[])
     record["memberships"][0].update(description=None, born=None)
     expected = without_null_fields(validate_records([record]))
     path, _ = save_scrape([record], load_config("karlsruhe"), tmp_path, limit=None, enrich_people=False)
@@ -669,7 +671,7 @@ def test_generated_json_omits_null_and_empty_array_fields(record: dict, tmp_path
     assert output == expected
     assert "description" not in output[0]
     assert "born" not in output[0]["memberships"][0]
-    assert output[0]["age_rating"] == 0
+    assert output[0]["suggested_min_age"] == 0
     assert "author" in output[0] and not output[0]["author"]
     assert "tags" not in output[0]
     assert "critics" not in output[0]
@@ -867,7 +869,7 @@ def test_cli_page_and_check_fetch_exactly_one_page(tmp_path: Path, capsys: pytes
                 == 0
             )
             person = json.loads(capsys.readouterr().out)
-            assert "born" not in person and "role" not in person
+            assert "born" not in person and "role_name" not in person
             assert "Biography" in person["description"]
             requests.clear()
             check_args = [

@@ -32,6 +32,12 @@ services:
       POSTGRES_PORT: "5432"
       THEATERDB_DATABASE_URL: ""
       DATABASE_URL: ""
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3).close()"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     networks:
       - default
       - web
@@ -40,9 +46,38 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
       - "traefik.http.routers.theater.rule=Host(`theater.simonklug.de`)"
+      - "traefik.http.routers.theater.priority=1"
       - "traefik.http.routers.theater.entrypoints=websecure"
       - "traefik.http.routers.theater.tls.certresolver=letsencrypt"
       - "traefik.http.services.theater.loadbalancer.server.port=8501"
+
+  api:
+    build: .
+    restart: always
+    command: ["uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      THEATERDB_DATABASE_URL: ""
+      DATABASE_URL: ""
+    networks:
+      - default
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.theater-api.rule=Host(`theater.simonklug.de`) && (Path(`/api`) || PathPrefix(`/api/`) || Path(`/docs`) || Path(`/redoc`) || Path(`/openapi.json`))"
+      - "traefik.http.routers.theater-api.priority=100"
+      - "traefik.http.routers.theater-api.entrypoints=websecure"
+      - "traefik.http.routers.theater-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.theater-api.loadbalancer.server.port=8000"
 
   crawl-worker:
     build: .

@@ -277,7 +277,7 @@ def stagings(session: Session, text_id: uuid.UUID, *, today: dt.date | None = No
     today = today or dt.datetime.now(dt.UTC).date()
     family = [text.id for text in work_family(session, text_id)]
     rows = session.exec(
-        select(Production, Organization.name, Organization.city)
+        select(Production, Organization.name, Organization.address_locality)
         .outerjoin(Organization, col(Organization.id) == Production.organization_id)
         .where(col(Production.text_id).in_(family))
     ).all()

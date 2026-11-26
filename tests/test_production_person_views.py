@@ -11,9 +11,10 @@ from sqlmodel import Session, SQLModel, create_engine
 from streamlit.testing.v1 import AppTest
 
 from backend import entity_management
+from backend.config import role_label
 from backend.models import Organization, Person, Production, ProductionMembership, Text, TextContribution
 from frontend.views import organization, person, production
-from frontend.views.helpers import entity_link, production_people, role_label
+from frontend.views.helpers import entity_link, production_people
 
 PRODUCTION_SCRIPT = """
 import streamlit as st
@@ -35,6 +36,29 @@ def test_educator_role_label(role: str) -> None:
 def test_unknown_role_label_preserves_source_text() -> None:
     assert role_label("Example character") == "Example character"
     assert not role_label(None)
+
+
+def test_music_theatre_direction_label_stays_distinct() -> None:
+    assert role_label("musiktheaterregie") == "Musiktheaterregie"
+    assert role_label("choreografie / direktion") == "Choreografie / Direktion"
+    assert role_label("sopran") == "Sopran"
+    assert role_label("assistenz musiktheaterregie") == "Assistenz Musiktheaterregie"
+
+
+def test_existing_singing_and_music_theatre_credits_are_grouped() -> None:
+    credits = [
+        {"role_name": "gesang (weibliche solopartien)", "person": {"name": "Singer", "id": "1"}},
+        {"role_name": "musiktheaterregie", "person": {"name": "Director", "id": "2"}},
+    ]
+    assert organization.production_credit_line({"memberships": credits}) == "Regie: **Director** · mit Singer"
+
+
+def test_existing_person_types_are_classified_without_changing_stored_values() -> None:
+    record = Person(
+        name="Example", type=["gesang (weibliche solopartien)", "musiktheaterregie", "director", "other role"]
+    )
+    assert entity_management._public_snapshot(record)["type"] == ["singer", "director", "other role"]
+    assert record.type == ["gesang (weibliche solopartien)", "musiktheaterregie", "director", "other role"]
 
 
 class LinkParser(HTMLParser):
@@ -73,12 +97,12 @@ def credits(monkeypatch) -> tuple[dict, dict, dict, Mock]:
         "organization": theatre,
         "premiere": "2026-01-03T22:00:00+02:00",
         "duration": 90,
-        "age_rating": 0,
+        "suggested_min_age": 0,
         "description": "Eine Produktion",
         "memberships": [
-            {"person": alice, "role": "Regie"},
-            {"person": alice, "role": "Schauspiel", "character": "Hamlet"},
-            {"person": bob, "role": "Musik"},
+            {"person": alice, "role_name": "Regie"},
+            {"person": alice, "role_name": "Schauspiel", "character_name": "Hamlet"},
+            {"person": bob, "role_name": "Musik"},
             {"person": None},
         ],
     }
@@ -87,14 +111,14 @@ def credits(monkeypatch) -> tuple[dict, dict, dict, Mock]:
         "name": "Gestern",
         "organization_id": "theatre",
         "organization": {"id": "theatre", "name": "Theater"},
-        "memberships": [{"person": alice, "role": "director"}, {"person": bob}, {"person": bob}],
+        "memberships": [{"person": alice, "role_name": "director"}, {"person": bob}, {"person": bob}],
     }
     away = {
         "id": "away",
         "name": "Anderswo",
         "organization": {"id": "away-theatre", "name": "Anderes Theater"},
         "organization_id": "away-theatre",
-        "memberships": [{"person": alice, "role": "Schauspiel"}],
+        "memberships": [{"person": alice, "role_name": "Schauspiel"}],
     }
     theatre["productions"] = [
         {"id": "current", "name": "Heute"},
@@ -110,7 +134,7 @@ def credits(monkeypatch) -> tuple[dict, dict, dict, Mock]:
 
 def test_production_profile_shows_theatre_navigation_facts_and_cast_without_tabs(credits) -> None:
     current, _, _, fetch = credits
-    current["organization"]["city"] = "Wien"
+    current["organization"]["address_locality"] = "Wien"
     app = AppTest.from_string(PRODUCTION_SCRIPT)
     app.session_state.profile = current
     app.run()
@@ -132,6 +156,7 @@ def test_production_profile_shows_theatre_navigation_facts_and_cast_without_tabs
     assert "?kind=production&amp;id=no-cast" in html
     assert "?kind=person&amp;id=alice" in html
     assert json.loads(app.json[0].value) == current
+    assert app.get("download_button")[0].proto.label == "Open Repertoire (ORIF) herunterladen"
 
 
 def test_empty_production_omits_empty_sections_but_flags_invalid_data(credits) -> None:
@@ -204,8 +229,8 @@ def test_related_production_previews_are_distinct_sorted_and_limited(credits) ->
             "name": f"Stück {year}",
             "premiere": str(year) if year % 2 else None,
             "premiere_year": year if year % 2 == 0 else None,
-            "organization": {"city": "Wien", "name": "Bühne am Fluss"},
-            "memberships": [{"person_id": "alice", "role": " Regie "}],
+            "organization": {"address_locality": "Wien", "name": "Bühne am Fluss"},
+            "memberships": [{"person_id": "alice", "role_name": " Regie "}],
         }
         for year in (2018, *range(2020, 2026))
     ]
@@ -345,8 +370,8 @@ def test_people_productions_query_is_scoped_distinct_and_detached(monkeypatch) -
         session.add_all([alice, bob, first, second, unrelated])
         session.add_all(
             [
-                ProductionMembership(person=alice, production=first, role="Regie"),
-                ProductionMembership(person=alice, production=first, role="Schauspiel"),
+                ProductionMembership(person=alice, production=first, role_name="Regie"),
+                ProductionMembership(person=alice, production=first, role_name="Schauspiel"),
                 ProductionMembership(person=bob, production=first),
                 ProductionMembership(person=bob, production=second),
             ]
@@ -385,7 +410,7 @@ def test_missing_detail_stops_before_render(monkeypatch) -> None:
 @pytest.mark.parametrize(("title", "lead"), [("Die Vorlage", "Nach „Die Vorlage“ von"), ("Heute", "Von")])
 def test_production_shows_text_credits_inline(credits, title: str, lead: str) -> None:
     current, *_ = credits
-    current["memberships"][0]["role"] = "director"
+    current["memberships"][0]["role_name"] = "director"
     current["text"] = {
         "title": title,
         "language": "de",
@@ -428,7 +453,7 @@ def test_production_text_credit_links_to_personal_text_page(credits) -> None:
 def test_production_combines_text_and_cast_credits_by_person(credits) -> None:
     current, *_ = credits
     alice = current["memberships"][0]["person"]
-    current["memberships"].append({"person": alice, "role": "Regie"})
+    current["memberships"].append({"person": alice, "role_name": "Regie"})
     current["text"] = {
         "title": "Die Vorlage",
         "contributions": [

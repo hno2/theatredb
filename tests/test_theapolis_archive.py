@@ -408,8 +408,8 @@ def test_archive_import_checkpoint_skips_unchanged_and_retains_manual_descriptio
     assert len(theapolis.import_archive(path)["production"]) == 1
     assert not any(theapolis.import_archive(path).values())
     with Session(engine) as session:
-        credit = session.exec(select(ProductionMembership).where(ProductionMembership.character == "Hamlet")).one()
-        assert credit.role == "actor"
+        credit = session.exec(select(ProductionMembership).where(ProductionMembership.character_name == "Hamlet")).one()
+        assert credit.role_name == "actor"
     with open_archive(path, write=True) as archive:
         refresh = archive.start("test", 1, len(rows), partial=False)
         archive.write_page(refresh, 1, {"items": rows}, ready=True)

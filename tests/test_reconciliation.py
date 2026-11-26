@@ -128,8 +128,8 @@ def test_production_matching_requires_org_and_directors(db) -> None:
     )
     save(
         db,
-        ProductionMembership(production_id=one.id, person_id=director.id, role="director"),
-        ProductionMembership(production_id=two.id, person_id=wrong_director.id, role="Regie"),
+        ProductionMembership(production_id=one.id, person_id=director.id, role_name="director"),
+        ProductionMembership(production_id=two.id, person_id=wrong_director.id, role_name="Regie"),
     )
     candidates = find_candidates(
         "production",
@@ -149,7 +149,7 @@ def test_premiere_conflict_and_missing_dates(db) -> None:
     prod = save(db, Production(name="Hamlet", organization_id=org.id, premiere=dt.datetime(2020, 1, 1, tzinfo=dt.UTC)))[
         0
     ]
-    save(db, ProductionMembership(production_id=prod.id, person_id=director.id, role="Regie"))
+    save(db, ProductionMembership(production_id=prod.id, person_id=director.id, role_name="Regie"))
     incoming = {"name": "Hamlet", "organization_id": str(org.id), "premiere": "2026-01-01"}
     candidate = find_candidates("production", incoming, context={"directors": ["Director"]})[0]
     assert "Abweichende Premiere" in candidate["conflicts"]
@@ -289,8 +289,8 @@ def test_person_merge_rewires_all_links_and_deduplicates_roles(db, source) -> No
     )
     save(
         db,
-        ProductionMembership(production_id=prod.id, person_id=left.id, role="director"),
-        ProductionMembership(production_id=prod.id, person_id=right.id, role="Regie"),
+        ProductionMembership(production_id=prod.id, person_id=left.id, role_name="director"),
+        ProductionMembership(production_id=prod.id, person_id=right.id, role_name="Regie"),
         TextContribution(text_id=text.id, person_id=right.id, role="author"),
         OrganizationMembership(organization_id=org.id, person_id=right.id, role="actor"),
         AwardNomination(
@@ -379,13 +379,15 @@ def test_person_and_text_title_only_matches_remain_review(db) -> None:
 
 
 def test_search_manual_pair_with_different_names_and_discovery(db) -> None:
-    left, right = save(db, Organization(name="Same", city="Berlin"), Organization(name="Same", city="Hamburg"))
+    left, right = save(
+        db, Organization(name="Same", address_locality="Berlin"), Organization(name="Same", address_locality="Hamburg")
+    )
     assert len(search_entities("organization", "Same")) == 2
     assert search_entities("organization", str(left.id))[0]["id"] == str(left.id)
     assert search_entities("organization", "%") == []
     pairs = discover_duplicates("organization", "Same")
     assert len(pairs) == 1
-    assert "Abweichend: city" in pairs[0]["right"]["conflicts"]
+    assert "Abweichend: address_locality" in pairs[0]["right"]["conflicts"]
     case = queue_duplicate("organization", left.id, right.id, reason="Manual investigation")
     assert case.status == "pending"
 
@@ -395,7 +397,10 @@ def test_duplicate_discovery_batches_candidates_and_keeps_review_confirmation(db
     records = save(db, *(Production(name="Shared production", organization_id=organization.id) for _ in range(5)))
     save(
         db,
-        *(ProductionMembership(production_id=record.id, person_id=director.id, role="director") for record in records),
+        *(
+            ProductionMembership(production_id=record.id, person_id=director.id, role_name="director")
+            for record in records
+        ),
     )
 
     statements = []
@@ -457,7 +462,7 @@ def test_review_ui_empty_and_manual_submission(db) -> None:
 def test_matching_uses_approved_person_identity_not_scraped_spelling(db, source) -> None:
     org, director = save(db, Organization(name="Theatre"), Person(name="Canonical Name"))
     prod = save(db, Production(name="Hamlet", organization_id=org.id))[0]
-    save(db, ProductionMembership(production_id=prod.id, person_id=director.id, role="director"))
+    save(db, ProductionMembership(production_id=prod.id, person_id=director.id, role_name="director"))
     person_case = propose_record("person", {"name": "Alternate Spelling"}, source_id=source.id, external_id="person")
     approve(person_case, director.id)
     case = propose_record(
@@ -515,7 +520,9 @@ def test_org_and_production_merges_rewire_graph(db) -> None:
     save(
         db,
         OrganizationMembership(organization_id=right.id, person_id=person.id, role="actor"),
-        ProductionMembership(production_id=prod_right.id, person_id=person.id, role="actor", character="King"),
+        ProductionMembership(
+            production_id=prod_right.id, person_id=person.id, role_name="actor", character_name="King"
+        ),
         AwardNomination(
             award_id=award.id,
             production_id=prod_right.id,
@@ -558,7 +565,7 @@ def test_stale_merge_preview_includes_relationship_changes(db) -> None:
     left, right, prod = save(db, Person(name="Same"), Person(name="Same"), Production(name="Work"))
     case = queue_duplicate("person", left.id, right.id, reason="Same person")
     preview = preview_case(case.id)
-    save(db, ProductionMembership(production_id=prod.id, person_id=right.id, role="director"))
+    save(db, ProductionMembership(production_id=prod.id, person_id=right.id, role_name="director"))
     with pytest.raises(ValueError, match="Data changed"):
         approve_case(case.id, revision=preview["revision"], actor_id="test")
     assert count(db, Person) == 2
@@ -567,7 +574,7 @@ def test_stale_merge_preview_includes_relationship_changes(db) -> None:
 
 def test_legacy_actor_character_credit_is_updated_not_duplicated(db, source) -> None:
     person, production = save(db, Person(name="Actor"), Production(name="Hamlet"))
-    credit = save(db, ProductionMembership(production_id=production.id, person_id=person.id, role="Hamlet"))[0]
+    credit = save(db, ProductionMembership(production_id=production.id, person_id=person.id, role_name="Hamlet"))[0]
     person_case = propose_record("person", {"name": "Actor"}, source_id=source.id, external_id="person")
     approve(person_case, person.id)
     case = propose_record(
@@ -581,7 +588,7 @@ def test_legacy_actor_character_credit_is_updated_not_duplicated(db, source) -> 
     with Session(db) as session:
         row = session.get(ProductionMembership, credit.id)
         assert row is not None
-        assert (row.role, row.character) == ("actor", "Hamlet")
+        assert (row.role_name, row.character_name) == ("actor", "Hamlet")
         assert count(db, ProductionMembership) == 1
 
 
@@ -685,13 +692,16 @@ def test_pending_merge_can_choose_survivor_after_other_merge_redirects(db) -> No
 def test_people_merge_table_batches_context_and_paginates(db) -> None:
     people = save(db, *(Person(name=f"Person {index}") for index in range(5)))
     theatre, production, unknown = save(
-        db, Organization(name="Theater", city="Berlin"), Production(name="Ohne Theater"), Production(name="Unbekannt")
+        db,
+        Organization(name="Theater", address_locality="Berlin"),
+        Production(name="Ohne Theater"),
+        Production(name="Unbekannt"),
     )
     show = save(db, Production(name="Hamlet", organization_id=theatre.id))[0]
     save(
         db,
-        ProductionMembership(person_id=people[0].id, production_id=show.id, role="actor"),
-        ProductionMembership(person_id=people[0].id, production_id=show.id, role="director"),
+        ProductionMembership(person_id=people[0].id, production_id=show.id, role_name="actor"),
+        ProductionMembership(person_id=people[0].id, production_id=show.id, role_name="director"),
         ProductionMembership(person_id=people[0].id, production_id=production.id),
         ProductionMembership(person_id=people[4].id, production_id=unknown.id),
     )
@@ -731,7 +741,7 @@ def test_people_merge_table_includes_text_credits_without_duplicate_productions(
         TextContribution(person_id=person.id, text_id=text.id, role="author"),
         TextContribution(person_id=person.id, text_id=text.id, role="adapter"),
         TextContribution(person_id=author.id, text_id=text.id, role="author"),
-        ProductionMembership(person_id=person.id, production_id=show.id, role="director"),
+        ProductionMembership(person_id=person.id, production_id=show.id, role_name="director"),
     )
     assert [row["productions"] for row in search_people_for_merge()] == [["Hamlet · Theater"], ["Hamlet · Theater"]]
 
@@ -811,7 +821,7 @@ def test_bulk_people_merge_rewires_every_reference_and_preserves_audit(db, sourc
     for person in (right, third):
         save(
             db,
-            ProductionMembership(person_id=person.id, production_id=prod.id, role="director"),
+            ProductionMembership(person_id=person.id, production_id=prod.id, role_name="director"),
             TextContribution(person_id=person.id, text_id=text.id, role="author"),
             OrganizationMembership(person_id=person.id, organization_id=org.id, role="actor"),
             AwardNomination(

@@ -230,7 +230,7 @@ def test_credit_preview_resolves_translation_and_production_fassung(db):
         assert next(c for c in credits if c.role == "translator").text_id != text_id
         assert session.exec(select(TextLineage)).one().relation == "translation"
         membership = session.exec(select(ProductionMembership)).one()
-        assert (people[membership.person_id], membership.role) == ("Carol", "adapter")
+        assert (people[membership.person_id], membership.role_name) == ("Carol", "adapter")
         saved = session.get(Production, production_id)
         assert saved is not None and saved.text_id == text_id
 

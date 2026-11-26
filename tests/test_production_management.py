@@ -267,7 +267,7 @@ def test_cast_and_crew_editor_shows_person_name_without_ids(db) -> None:
     person = Person(name="Example Person")
     person_id = person.id
     with Session(db) as session:
-        session.add(ProductionMembership(production=production, person=person, role="actor"))
+        session.add(ProductionMembership(production=production, person=person, role_name="actor"))
         session.commit()
 
     app = AppTest.from_file(str(PRODUCTION_APP)).run()
@@ -293,8 +293,8 @@ def test_renaming_cast_and_crew_name_updates_shared_person(db) -> None:
     with Session(db) as session:
         session.add_all(
             [
-                ProductionMembership(production=production, person=person, role="actor"),
-                ProductionMembership(production=other_production, person=person, role="director"),
+                ProductionMembership(production=production, person=person, role_name="actor"),
+                ProductionMembership(production=other_production, person=person, role_name="director"),
             ]
         )
         session.commit()

@@ -1,7 +1,8 @@
 import streamlit as st
 
 from backend.entity_management import get_people_productions
-from frontend.views.helpers import entity_link, production_people, theatre_label
+from backend.orif import orif_documents
+from frontend.views.helpers import entity_link, production_people, render_orif_download, theatre_label
 from frontend.views.organization import (
     domain_date_label,
     parse_date,
@@ -20,7 +21,7 @@ def collaboration_groups(productions: list[dict], person_id: str) -> tuple[dict[
         if organization:
             group = theatres.setdefault(
                 str(organization["id"]),
-                {"name": theatre_label(organization["name"], organization.get("city")), "productions": []},
+                {"name": theatre_label(organization["name"], organization.get("address_locality")), "productions": []},
             )
             group["productions"].append(production)
         for collaborator_id, person in production_people(production).items():
@@ -86,3 +87,4 @@ def render_person(data: dict) -> None:
     with st.expander("Technische Angaben"):
         st.caption("Interne Kennung dieses Eintrags")
         st.code(str(data["id"]), language=None)
+        render_orif_download(orif_documents(productions), data["name"], str(data["id"]))

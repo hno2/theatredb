@@ -103,7 +103,13 @@ def _season(data: dict, organization_id: UUID, key: str) -> None:
 
 def _general(data: dict, organization_id: UUID, key: str) -> None:
     st.text(" · ".join(str(data[field]) for field in ("name", "type") if data.get(field)))
-    st.text(" · ".join(str(data[field]) for field in ("street", "zip_code", "city", "country") if data.get(field)))
+    st.text(
+        " · ".join(
+            str(data[field])
+            for field in ("street_address", "postal_code", "address_locality", "address_country")
+            if data.get(field)
+        )
+    )
     st.text(data.get("url") or "Keine Website hinterlegt")
     st.caption(
         "Bestätige Name, Standort, Website und Organisationstyp anhand der Quelle. "

@@ -34,6 +34,45 @@ def test_role_config_uses_canonical_keys() -> None:
     assert all(alias == alias.casefold() for alias in ROLE_ALIASES)
 
 
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Gesang", "singer"),
+        ("Gesang (männliche Solopartien)", "singer"),
+        ("Gesang (weibliche Solopartien)", "singer"),
+        ("Gesang (diverse Solopartien)", "singer"),
+        ("Sopran", "singer"),
+        ("Musiktheaterregie", "director"),
+        ("Schauspiel (diverse Rollen)", "actor"),
+        ("sonstige Schauspiel", "actor"),
+        ("Autor*in", "author"),
+        ("Dirigat / Musikalische Leitung", "conductor"),
+        ("Tanz (weibliche Rollen)", "dancer"),
+        ("Tanz (männliche Rollen)", "dancer"),
+        ("Choreografie / Direktion", "choreographer"),
+        ("Assistenz Schauspielregie", "assistant_director"),
+        ("Assistenz Musiktheaterregie", "assistant_director"),
+        ("Leitung Schauspielregie", "directing_leadership"),
+        ("Chorleitung", "choir_director"),
+        ("Puppenspiel / Figurentheater", "puppeteer"),
+        ("Sounddesign", "sound_designer"),
+    ],
+)
+def test_requested_role_classifications(title: str, expected: str) -> None:
+    assert canonical_role(title) == expected
+    assert infer_person_type(title) == expected
+
+
+def test_unapproved_roles_are_not_mapped() -> None:
+    assert canonical_role("Performance") == "performance"
+    assert canonical_role("sonstige Musiktheater") == "sonstige musiktheater"
+    assert canonical_role("Assistenz Dramaturgie") == "assistenz dramaturgie"
+    assert infer_person_type("Performance") == "performance"
+    assert infer_person_type("sonstige Musiktheater") == "sonstige musiktheater"
+    assert infer_person_type("Assistenz Dramaturgie") == "assistenz dramaturgie"
+    assert infer_person_type("Leitung Musiktheaterregie") == "leitung musiktheaterregie"
+
+
 def test_duration() -> None:
     assert parse_duration_minutes("1h 30m") == 90
     assert parse_duration_minutes("45m") == 45

@@ -26,7 +26,14 @@ from urllib.parse import urlsplit
 from sqlalchemy import func
 from sqlmodel import Session, col, select
 
-from backend.config import CREDIT_ROLES, canonical_role
+from backend.config import (
+    CREDIT_ROLES,
+    PERFORMER_ROLES,
+    RECLASSIFIED_ROLE_ALIASES,
+    UNMAPPED_CREDIT_TITLES,
+    canonical_role,
+    credit_role,
+)
 from backend.config import PRODUCTION_FIELD_LABELS as FIELD_LABELS
 from backend.date_precision import DatePrecision, date_interval, intervals_overlap, parse_date
 from backend.ingestion.staging import validate_records
@@ -99,7 +106,7 @@ def author_name(value: str | None) -> str | None:
 
 
 def _credit(member: dict) -> dict:
-    raw_role = _clean(member.get("role"))
+    raw_role = _clean(member.get("role_name"))
     raw_types = member.get("type") or raw_role or "actor"
     types = [
         kind
@@ -108,15 +115,32 @@ def _credit(member: dict) -> dict:
         )
         if kind
     ]
-    role = canonical_role(raw_role) or types[0]
-    if role not in CREDIT_ROLES:
+    role = credit_role(raw_role) or types[0]
+    if (
+        canonical_role(role) not in CREDIT_ROLES
+        and role not in UNMAPPED_CREDIT_TITLES
+        and not role.startswith(("assistenz ", "leitung "))
+    ):
         role = types[0]
-    if role == "theatre_educator" and types == ["actor"]:
-        types = [role]
+    if types == ["actor"] and (
+        role == "theatre_educator" or (raw_role and raw_role.casefold() in RECLASSIFIED_ROLE_ALIASES)
+    ):
+        types = [canonical_role(role)]
     return {
         "name": member["name"].strip(),
         "role": role,
-        "character": (_clean(member.get("character")) or raw_role) if role == "actor" else None,
+        "character": (
+            _clean(member.get("character_name"))
+            or (
+                raw_role
+                if role == "actor"
+                and raw_role
+                and raw_role.casefold() not in {"sonstige schauspiel", "schauspiel (diverse rollen)"}
+                else None
+            )
+        )
+        if canonical_role(role) in PERFORMER_ROLES
+        else None,
         "types": types,
         "urls": list(dict.fromkeys([*([member["url"]] if member.get("url") else []), *member.get("urls", [])])),
         **{field: member.get(field) for field in PERSON_FILL_FIELDS},
@@ -128,7 +152,7 @@ def prepare_record(record: dict) -> dict:
     members = list(record.get("memberships", []))
     author = author_name(_clean(record.get("author")))
     if author and not any(normalize(member["name"]) == normalize(author) for member in members):
-        members.append({"name": author, "type": "author", "role": "author"})
+        members.append({"name": author, "type": "author", "role_name": "author"})
     credits = [_credit(member) for member in members]
     premiere = _clean(record.get("premiere"))
     incoming = validate_payload(
@@ -139,7 +163,7 @@ def prepare_record(record: dict) -> dict:
             "premiere": dt.datetime.fromisoformat(premiere).isoformat() if premiere else None,
             "premiere_precision": record.get("premiere_precision"),
             "duration": record.get("duration"),
-            "age_rating": record.get("age_rating"),
+            "suggested_min_age": record.get("suggested_min_age"),
             "url": record["url"],
             "tags": record.get("tags", []),
             "critics": record.get("critics", []),
@@ -215,15 +239,15 @@ def _members(session: Session, production: Production | None) -> list[tuple[Prod
 def _credit_matches(credit: dict, membership: ProductionMembership, person: Person) -> bool:
     if normalize(person.name) != normalize(credit["name"]):
         return False
-    role = canonical_role(membership.role)
+    role = credit_role(membership.role_name)
     return role == credit["role"] or (
-        credit["role"] == "actor" and bool(credit["character"]) and membership.role == credit["character"]
+        credit["role"] == "actor" and bool(credit["character"]) and membership.role_name == credit["character"]
     )
 
 
 def _directors_conflict(members: list[tuple[ProductionMembership, Person]], credits: list[dict]) -> bool:
-    existing = {normalize(p.name) for m, p in members if canonical_role(m.role) == "director"}
-    incoming = {normalize(c["name"]) for c in credits if c["role"] == "director"}
+    existing = {normalize(p.name) for m, p in members if canonical_role(m.role_name) == "director"}
+    incoming = {normalize(c["name"]) for c in credits if canonical_role(c["role"]) == "director"}
     return bool(existing and incoming and not existing & incoming)
 
 
@@ -315,8 +339,8 @@ def _people_rows(
     rows.extend(
         {
             "name": person.name,
-            "role": canonical_role(membership.role),
-            "character": membership.character,
+            "role": canonical_role(membership.role_name),
+            "character": membership.character_name,
             "status": "kept",
         }
         for membership, person in members
@@ -608,14 +632,14 @@ def _apply(
     if choices.get("director") == "incoming" and director_choice == "incoming":
         # Explicitly chosen: the uploaded direction replaces the existing one.
         for membership, _ in _members(session, production):
-            if canonical_role(membership.role) == "director":
+            if canonical_role(membership.role_name) == "director":
                 audit_event(session, membership, "delete", actor_id)
                 session.delete(membership)
                 changed = True
         session.flush()
     persons: dict[str, Person] = {}
     for credit in item["credits"]:
-        if credit["role"] == "director" and director_choice != "incoming":
+        if canonical_role(credit["role"]) == "director" and director_choice != "incoming":
             continue
         person = _resolve_person(
             session,

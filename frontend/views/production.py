@@ -4,11 +4,12 @@ from html import escape
 import altair as alt
 import streamlit as st
 
-from backend.config import canonical_role
+from backend.config import canonical_role, role_label
 from backend.entity_management import get_people_productions
 from backend.models import TagLayer, TagStatus
+from backend.orif import orif_documents
 from backend.taxonomy import FACETS, LAYER_LABELS, ORIGIN_LABELS
-from frontend.views.helpers import entity_anchor, render_tags, role_label, theatre_label
+from frontend.views.helpers import entity_anchor, render_orif_download, render_tags, theatre_label
 from frontend.views.organization import (
     domain_date_interval,
     domain_date_label,
@@ -36,7 +37,7 @@ def _director_ids(data: dict) -> set[str]:
     return {
         str(person_id)
         for credit in data.get("memberships") or []
-        if canonical_role(credit.get("role")) == "director"
+        if canonical_role(credit.get("role_name")) == "director"
         and (person_id := credit.get("person_id") or (credit.get("person") or {}).get("id"))
     }
 
@@ -61,9 +62,10 @@ def _render_cast(memberships: list[dict], text: dict) -> None:
             person = credit["person"]
             person_id = person["id"]
             people[person_id] = person["name"]
-            role = role_label(credit.get("role")) or fallback
+            # Production memberships use ORIF's role_name; text contributions keep role.
+            role = role_label(credit.get("role_name") or credit.get("role")) or fallback
             characters = roles.setdefault(person_id, {}).setdefault(role, {})
-            if character := credit.get("character"):
+            if character := credit.get("character_name"):
                 characters[character] = None
     if not roles:
         return
@@ -97,8 +99,8 @@ def _related_productions(entries: list[dict], current_id: str) -> list[dict]:
 def _related_line(entry: dict, *, context_field: str | None) -> str:
     organization = entry.get("organization") or {}
     parts = [entry["name"]]
-    theatre = theatre_label(organization.get("name") or "", organization.get("city"))
-    context = (organization.get("city") or theatre) if context_field == "city" else theatre
+    theatre = theatre_label(organization.get("name") or "", organization.get("address_locality"))
+    context = (organization.get("address_locality") or theatre) if context_field == "city" else theatre
     if context_field and context:
         parts.append(context)
     if year := _premiere_year(entry):
@@ -201,7 +203,7 @@ def _render_connections(data: dict) -> None:
         dict.fromkeys(
             entity_anchor(f"Mehr von {person['name']} →", "person", person["id"])
             for credit in data.get("memberships") or []
-            if canonical_role(credit.get("role")) == "director"
+            if canonical_role(credit.get("role_name")) == "director"
             and (person := credit.get("person") or {}).get("id")
             and person.get("name")
         )
@@ -226,7 +228,7 @@ def _render_connections(data: dict) -> None:
     if not cards and not related_texts:
         return
     st.header("Weitere Produktionen und Texte" if related_texts else "Weitere Produktionen")
-    with st.grid(min(3, len(cards) + bool(related_texts)), min_column_width=224):
+    with st.grid(min(3, len(cards) + bool(related_texts)), min_column_width=320):
         for title, rows, context_field, footer in cards:
             _render_related_card(title, rows, context_field, footer, data)
         if related_texts:
@@ -267,7 +269,9 @@ def _render_text_credit(text: dict, production_title: str, cast_ids: set[str]) -
 
 def _render_heading(data: dict, organization: dict, memberships: list[dict]) -> None:
     if organization.get("id"):
-        back = _organization_anchor(f"← {theatre_label(organization['name'], organization.get('city'))}", organization)
+        back = _organization_anchor(
+            f"← {theatre_label(organization['name'], organization.get('address_locality'))}", organization
+        )
         st.markdown(f"<p>{back}</p>", unsafe_allow_html=True)
     st.title(data["name"])
     if text := data.get("text"):
@@ -276,7 +280,7 @@ def _render_heading(data: dict, organization: dict, memberships: list[dict]) -> 
     facts = [
         f"Premiere: {premiere}" if premiere != "Nicht hinterlegt" else "",
         f"{data['duration']} Minuten" if data.get("duration") is not None else "",
-        f"Ab {data['age_rating']} Jahren" if data.get("age_rating") is not None else "",
+        f"Ab {data['suggested_min_age']} Jahren" if data.get("suggested_min_age") is not None else "",
     ]
     if any(facts):
         st.markdown(" · ".join(filter(None, facts)), help="Die Premiere ist kein aktueller Aufführungstermin.")
@@ -307,7 +311,8 @@ def _render_taxonomy(data: dict) -> None:
 def _render_overview(data: dict, memberships: list[dict]) -> None:
     description = data.get("description")
     if description and memberships:
-        overview, cast = st.columns([3, 2], gap="medium")
+        layout = st.grid(2, min_column_width=320, gap="medium")
+        overview, cast = layout.cell(), layout.cell()
     else:
         overview = cast = st.container()
     with overview:
@@ -339,6 +344,7 @@ def render_production(data: dict) -> None:
         for critic in critics:
             st.markdown(critic)
     with st.expander("Technische Angaben"):
+        render_orif_download(next(iter(orif_documents([data])), None), data["name"], str(data["id"]))
         st.json(data)
     if sources:
         render_sources(sources, compact=True)

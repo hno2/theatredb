@@ -14,7 +14,7 @@ from sqlalchemy.sql.selectable import Exists
 from sqlmodel import Session, col, select
 
 from backend.config import IMPORT_COVERAGE_FIELDS as FIELDS
-from backend.config import canonical_role
+from backend.config import PERFORMER_ROLES, canonical_role
 from backend.models import (
     EntitySource,
     EntityType,
@@ -71,7 +71,7 @@ def _production_stats(
     if not organization_ids:
         return stats
     in_theatres = col(Production.organization_id).in_(organization_ids)
-    role_column = col(ProductionMembership.role)
+    role_column = col(ProductionMembership.role_name)
     roles: dict[str, set[str]] = defaultdict(set)
     # Normalize only distinct labels, keeping Python casefold and role alias semantics.
     for role in session.exec(
@@ -81,8 +81,10 @@ def _production_stats(
         .distinct()
     ):
         canonical = canonical_role(role)
-        if role is not None and canonical in {"director", "actor"}:
-            roles[canonical].add(role)
+        if role is not None and canonical == "director":
+            roles["director"].add(role)
+        elif role is not None and canonical in PERFORMER_ROLES:
+            roles["actor"].add(role)
     scraped = (
         select(SourceRecord.id)
         .where(SourceRecord.entity_id == Production.id, SourceRecord.entity_type == EntityType.PRODUCTION)

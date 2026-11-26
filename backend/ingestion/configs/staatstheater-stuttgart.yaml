@@ -28,7 +28,7 @@ production:
     selector: div.productionheader__duration
     match: \d
     format: duration
-  age_rating:
+  suggested_min_age:
     selector: div.productionheader__agerecommendation
     extract: ab\s+(\d+)\s+Jahren?
     format: integer

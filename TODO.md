@@ -78,3 +78,22 @@
 - Rezensionen Zeit.de
 - scrapAI
 - Rezensionen https://www.ndr.de/kultur/buehne/theaterberichte
+
+## Open Repertoire (ORIF) follow-up
+
+See [specs/open-repertoire.md](specs/open-repertoire.md).
+
+- [ ] Run migration `0012` against a PostgreSQL copy of production data (backup first); verify
+  rewritten review payloads and crawl definitions, and test downgrade.
+- [ ] Announce the API field renames to API consumers (breaking change), or add a deprecation note/version.
+- [ ] Export all performance dates as ORIF events once source-backed dates exist (see library follow-up);
+  then character names survive even without a premiere event.
+- [ ] Month/year premieres are not exported: decide on a fallback (e.g. omit event, keep in description).
+- [ ] Store a timezone per organization instead of assuming Europe/Berlin (AT/CH theatres).
+- [ ] Map `dateModified` from entity/SCD2 history timestamps.
+- [ ] Add ORIF fields we could source: images/`logo`, `offers`/tickets, accessibility, `contentWarning`.
+- [ ] Export organization venues as event `location`s instead of the theatre address only.
+- [ ] Import: use all `isBasedOn`/`workPerformed` works, not just the first; use event locations for venues.
+- [ ] Bulk export endpoint (all productions of all theatres / since date) for feed consumers.
+- [ ] Validate exports against the official ORIF JSON schema in CI (currently only checked manually).
+- [ ] Contact Bühnenverein: register TheatreDB as ORIF producer/consumer; track ORIF v3 changes.

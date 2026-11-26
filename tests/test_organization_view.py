@@ -1,3 +1,4 @@
+import logging
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -90,12 +91,12 @@ def profile(monkeypatch: pytest.MonkeyPatch) -> ProfileFixture:
     data = {
         "id": "theater-1",
         "name": "Bühne & Haus",
-        "street": "Theaterstraße 1",
-        "zip_code": "1010",
-        "city": "Wien",
-        "country": "Österreich",
-        "lat": 48.2,
-        "lon": 16.4,
+        "street_address": "Theaterstraße 1",
+        "postal_code": "1010",
+        "address_locality": "Wien",
+        "address_country": "Österreich",
+        "latitude": 48.2,
+        "longitude": 16.4,
         "founded_year": 1900,
         "url": "https://theater.example",
         "url_plays": "https://theater.example/spielplan",
@@ -107,7 +108,7 @@ def profile(monkeypatch: pytest.MonkeyPatch) -> ProfileFixture:
                 "premiere": "2025-02-01T22:00:00+02:00",
                 "description": "Vollständige Beschreibung",
                 "duration": 90,
-                "age_rating": 0,
+                "suggested_min_age": 0,
                 "tags": ["Drama"],
                 "critics": ["Eine Kritik"],
             },
@@ -192,11 +193,83 @@ def test_favicon_download_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(organization, "build_opener", Mock(return_value=opener))
     organization.load_favicon.clear()
+    organization._download_favicon.clear()
     url = "https://favicon-cache-test.example/favicon.ico"
     assert organization.load_favicon(url) == b"favicon"
+    organization.load_favicon.clear()
     assert organization.load_favicon(url) == b"favicon"
     opener.open.assert_called_once()
+    request = opener.open.call_args.args[0]
+    assert request.full_url == url
+    assert request.get_header("User-agent") == "TheatreDB/0.1"
     organization.load_favicon.clear()
+    organization._download_favicon.clear()
+
+
+def test_favicon_failure_is_cached_temporarily_and_can_recover(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    response = MagicMock()
+    response.headers.get_content_type.return_value = "image/x-icon"
+    response.read.return_value = b"favicon"
+    response.__enter__.return_value = response
+    opener = Mock()
+    opener.open.side_effect = [OSError("HTTP 403"), response]
+    monkeypatch.setattr(
+        organization.socket,
+        "getaddrinfo",
+        lambda *args: [(organization.socket.AF_INET, organization.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(organization, "build_opener", Mock(return_value=opener))
+    organization.load_favicon.clear()
+    organization._download_favicon.clear()
+    url = "https://favicon-retry-test.example/favicon.ico"
+    with caplog.at_level(logging.WARNING, logger=organization.__name__):
+        assert organization.load_favicon(url) is None
+        assert organization.load_favicon(url) is None
+    opener.open.assert_called_once()
+    assert "Cannot load favicon from favicon-retry-test.example: HTTP 403" in caplog.text
+    organization.load_favicon.clear()
+    assert organization.load_favicon(url) == b"favicon"
+    assert opener.open.call_count == 2
+    organization.load_favicon.clear()
+    organization._download_favicon.clear()
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body", "reason"),
+    [
+        ("text/html", b"error", "non-image"),
+        ("image/x-icon", b"x" * (64 * 1024 + 1), "oversized"),
+    ],
+)
+def test_invalid_favicon_is_not_persisted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, content_type: str, body: bytes, reason: str
+) -> None:
+    response = MagicMock()
+    response.headers.get_content_type.return_value = content_type
+    response.read.return_value = body
+    response.__enter__.return_value = response
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr(
+        organization.socket,
+        "getaddrinfo",
+        lambda *args: [(organization.socket.AF_INET, organization.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(organization, "build_opener", Mock(return_value=opener))
+    organization.load_favicon.clear()
+    organization._download_favicon.clear()
+    url = "https://favicon-invalid-test.example/favicon.ico"
+    assert organization.load_favicon(url) is None
+    assert reason in caplog.text
+    response.headers.get_content_type.return_value = "image/x-icon"
+    response.read.return_value = b"favicon"
+    organization.load_favicon.clear()
+    assert organization.load_favicon(url) == b"favicon"
+    assert opener.open.call_count == 2
+    organization.load_favicon.clear()
+    organization._download_favicon.clear()
 
 
 def test_list_order_and_undated_entries(profile: ProfileFixture) -> None:
@@ -249,7 +322,7 @@ def test_bad_sources_are_visible_without_unsafe_links(profile: ProfileFixture) -
 
 def test_zero_coordinates_are_mapped(profile: ProfileFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     app, data, _ = profile
-    data.update(lat=0, lon=0)
+    data.update(latitude=0, longitude=0)
     map_widget = Mock()
     monkeypatch.setattr(organization.st, "map", map_widget)
     app.run()
@@ -259,7 +332,7 @@ def test_zero_coordinates_are_mapped(profile: ProfileFixture, monkeypatch: pytes
 
 def test_invalid_coordinates_are_not_mapped(profile: ProfileFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     app, data, _ = profile
-    data.update(lat=float("nan"), lon=181)
+    data.update(latitude=float("nan"), longitude=181)
     map_widget = Mock()
     monkeypatch.setattr(organization.st, "map", map_widget)
     app.run()
@@ -300,7 +373,7 @@ def test_theatre_shows_venues_memberships_and_credit_summary(profile: ProfileFix
         {"person": None, "start_date": "bad-date"},
     ]
     data["productions"][1]["memberships"] = [
-        {"person": {"id": "director", "name": "Alex"}, "role": "director"},
+        {"person": {"id": "director", "name": "Alex"}, "role_name": "director"},
     ]
     app.run()
     assert not app.exception
@@ -322,14 +395,14 @@ def test_theatre_shows_venues_memberships_and_credit_summary(profile: ProfileFix
 def test_credits_group_directors_first_actors_second_and_hide_other_roles() -> None:
     data = {
         "memberships": [
-            {"person": {"id": "actor-1", "name": "Anna"}, "role": "Schauspiel"},
-            {"person": {"id": "set", "name": "Nicht anzeigen"}, "role": "Bühnenbild"},
-            {"person": {"id": "director-1", "name": "Alex"}, "role": "director"},
-            {"person": {"id": "director-2", "name": "Bea"}, "role": "Inszenierung"},
-            {"person": {"id": "actor-2", "name": "Chris"}, "role": "actor"},
-            {"person": {"id": "actor-1", "name": "Anna"}, "role": "actor", "character": "Hamlet"},
-            {"person": {"id": "director-1", "name": "Alex"}, "role": "Regie"},
-            {"person": None, "role": "actor"},
+            {"person": {"id": "actor-1", "name": "Anna"}, "role_name": "Schauspiel"},
+            {"person": {"id": "set", "name": "Nicht anzeigen"}, "role_name": "Bühnenbild"},
+            {"person": {"id": "director-1", "name": "Alex"}, "role_name": "director"},
+            {"person": {"id": "director-2", "name": "Bea"}, "role_name": "Inszenierung"},
+            {"person": {"id": "actor-2", "name": "Chris"}, "role_name": "actor"},
+            {"person": {"id": "actor-1", "name": "Anna"}, "role_name": "actor", "character_name": "Hamlet"},
+            {"person": {"id": "director-1", "name": "Alex"}, "role_name": "Regie"},
+            {"person": None, "role_name": "actor"},
         ],
     }
     assert organization.production_credit_line(data) == "Regie: **Alex**, **Bea** · mit Anna, Chris"
@@ -339,7 +412,7 @@ def test_credits_group_directors_first_actors_second_and_hide_other_roles() -> N
 
 
 def test_credit_names_are_literal_markdown_not_links() -> None:
-    data = {"memberships": [{"person": {"id": "1", "name": "[Alex](https://example.org)"}, "role": "director"}]}
+    data = {"memberships": [{"person": {"id": "1", "name": "[Alex](https://example.org)"}, "role_name": "director"}]}
     assert organization.production_credit_line(data) == r"Regie: **\[Alex\]\(https://example.org\)**"
 
 
@@ -407,7 +480,7 @@ def test_incomplete_premiere_range_does_not_silently_hide_entries(profile: Profi
 def test_person_filter_searches_hidden_team_roles_and_text_contributions(profile: ProfileFixture) -> None:
     app, data, links = profile
     data["productions"][0]["memberships"] = [
-        {"person": {"id": "set", "name": "Alex Beispiel"}, "role": "set_designer"},
+        {"person": {"id": "set", "name": "Alex Beispiel"}, "role_name": "set_designer"},
     ]
     data["productions"][1]["text"] = {
         "contributions": [{"person": {"id": "author", "name": "Anna Autorin"}, "role": "author"}],
@@ -429,7 +502,7 @@ def test_person_filter_searches_hidden_team_roles_and_text_contributions(profile
 def test_list_uses_native_pagination_and_resets_after_filter_changes(profile: ProfileFixture) -> None:
     app, data, links = profile
     data["productions"] = [
-        {"id": str(index), "name": f"Produktion {index:02}", "age_rating": index % 2, "premiere": "2025-01-01"}
+        {"id": str(index), "name": f"Produktion {index:02}", "suggested_min_age": index % 2, "premiere": "2025-01-01"}
         for index in range(500)
     ]
     app.run()
@@ -476,9 +549,9 @@ def test_profile_batches_productions_and_credits_without_recursive_queries(monke
                 name=f"Produktion {index}",
                 organization=theatre,
                 description=f"Beschreibung {index}",
-                age_rating=index % 2,
+                suggested_min_age=index % 2,
                 text=Text(title=f"Text {index}", contributions=[TextContribution(person=author, role="author")]),
-                memberships=[ProductionMembership(person=person, role="director")],
+                memberships=[ProductionMembership(person=person, role_name="director")],
             )
             session.add(entry)
         session.add(OrganizationMembership(organization=theatre, person=member, role="director"))
