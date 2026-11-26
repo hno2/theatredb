@@ -117,6 +117,40 @@ VOCABULARY: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("reference.literatur", "Literarische Adaption", "Bühnenfassung eines Romans oder anderer Literatur.", ()),
 )
 
+# Existing vocabulary instead of an own one: codes whose meaning matches a GND subject heading carry its URI.
+# Unmapped codes have no exact GND equivalent (e.g. GND "Wiederaufnahme" is the legal retrial, not a revival).
+GND_CONCEPTS: dict[str, str] = {
+    "form.schauspiel": "4182552-4",  # Sprechtheater
+    "form.oper": "4043582-9",  # Oper
+    "form.musical": "4040801-2",  # Musical
+    "form.tanz": "4059028-8",  # Tanz
+    "form.performance": "4173750-7",  # Performance <Künste>
+    "form.revue": "4367568-2",  # Revue <Veranstaltung>
+    "form.figuren": "4247240-4",  # Figurentheater
+    "form.konzert": "4032359-6",  # Konzert
+    "premiere.ua": "4236166-7",  # Uraufführung
+    "practice.dokumentarisch": "4139054-4",  # Dokumentartheater
+    "context.frei": "4123226-4",  # Freies Theater
+    "theme.familie": "4123181-8",  # Familie <Motiv>
+    "theme.liebe": "4123655-5",  # Liebe <Motiv>
+    "theme.macht": "4168422-9",  # Macht <Motiv>
+    "theme.krieg": "4136410-7",  # Krieg <Motiv>
+    "theme.migration": "4393588-6",  # Migration <Motiv>
+    "theme.identitaet": "4311101-4",  # Identität <Motiv>
+    "theme.geschlecht": "4222106-7",  # Geschlechterrolle <Motiv>
+    "theme.arbeit": "4122820-0",  # Arbeit <Motiv>
+    "theme.umwelt": "4121809-7",  # Umwelt <Motiv>
+    "theme.erinnerung": "4193441-6",  # Erinnerung <Motiv>
+    "period.antike": "4251540-3",  # Antike <Motiv>
+    "period.mittelalter": "4170206-2",  # Mittelalter <Motiv>
+    "period.gegenwart": "4493484-1",  # Gegenwart <Motiv>
+    "period.zukunft": "4246619-2",  # Zukunft <Motiv>
+    "setting.grossstadt": "4136629-3",  # Großstadt <Motiv>
+    "reference.mythos": "4202767-6",  # Mythos <Motiv>
+    "reference.maerchen": "4131986-2",  # Märchen <Motiv>
+    "reference.literatur": "4150549-9",  # Dramatisierung
+}
+
 
 def _key(value: str) -> str:
     return " ".join(value.casefold().split())
@@ -131,6 +165,7 @@ def sync_vocabulary(session: Session) -> None:
         tag = existing.pop(code, None) or Tag(code=code, label=label, layer=layer, facet=code.split(".", 1)[0])
         tag.label, tag.layer, tag.definition, tag.aliases = label, layer, definition, list(aliases)
         tag.position, tag.active = position, True
+        tag.uri = f"https://d-nb.info/gnd/{GND_CONCEPTS[code]}" if code in GND_CONCEPTS else None
         session.add(tag)
     for tag in existing.values():
         tag.active = False

@@ -354,6 +354,15 @@ def _render_field(field: _FieldUI, defaults: dict[str, Any], *, form_key: str, e
             val = _render_json(field, d, key)
         case "fk_select":
             val = _render_fk_select(field, d, form_key=form_key)
+        case "choice":
+            options = [None, *(field.options or [])]
+            val = st.selectbox(
+                field.label,
+                options,
+                index=options.index(d) if d in options else 0,
+                format_func=lambda v: "—" if v is None else (field.option_labels or {}).get(v, v),
+                key=key,
+            )
         case _:
             val = _render_text(field, d, key)
 
