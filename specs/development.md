@@ -179,11 +179,14 @@ the workflow as a workaround.
    option on a manual run. Before the server's first pull, make the `theatredb`
    package public in GHCR so it can pull without a registry credential. The
    image contains public source, not the server's `.env` or database.
-2. Each deployment pulls the same digest for `app` and `crawl-worker`,
-   backs up PostgreSQL, and replaces only those two containers. The app
-   applies migrations at startup. Expect a short interruption, and avoid
+2. Each deployment pulls the same digest for `app`, `api` and `crawl-worker`,
+   backs up PostgreSQL, and replaces those containers. The app
+   applies migrations at startup; deployment waits for its health check before
+   starting the API and worker. The API is publicly routed at
+   `https://theater.simonklug.de/api/`, with documentation at `/docs`.
+   Expect a short interruption, and avoid
    deploying during active crawls. A successful deployment checks the
-   public Streamlit endpoint and worker process, not crawler job execution.
+   public Streamlit and API endpoints and worker process, not crawler job execution.
    The public check retries transient HTTP errors while the proxy catches up;
    persistent failures still fail the deployment.
 3. Keep the digest from the last successful Actions run. To roll back a
@@ -201,4 +204,14 @@ it was taken. For a schema-breaking release, plan a maintenance window
 and verify the restore procedure before deploying.
 
 If the base Compose file or deployment scripts change, update the server
-checkout and reinstall the two files before using the workflow again.
+checkout and reinstall the two files before using the workflow again. For the
+API service, this one-time update must happen before deploying the release:
+
+```bash
+git pull --ff-only origin main
+sudo install -m 755 deploy/deploy-production /usr/local/lib/theatredb/deploy-production
+sudo install -m 644 deploy/compose.production.yml /usr/local/lib/theatredb/compose.production.yml
+```
+
+Run these commands from the existing production checkout. Subsequent releases
+deploy all three services automatically until the deployment files change again.

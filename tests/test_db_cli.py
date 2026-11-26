@@ -100,6 +100,56 @@ def test_migrations_match_models(postgres) -> None:
     assert db.main(["status"]) == 0
 
 
+def test_orif_migration_rewrites_postgres_enum_payloads_and_downgrades(postgres) -> None:
+    with postgres.begin() as connection:
+        config = user_management.alembic_config(connection)
+        command.upgrade(config, "0011")
+        connection.execute(text("INSERT INTO source (id, name) VALUES (gen_random_uuid(), 'source')"))
+        for kind, payload in (
+            ("ORGANIZATION", '{"city":"Wien"}'),
+            ("PRODUCTION", '{"age_rating":12}'),
+            ("PERSON", '{"city":"unchanged"}'),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO reconciliationcase (id, key, entity_type, operation, status, reason, created_at, incoming) "
+                    "VALUES (gen_random_uuid(), :key, CAST(:kind AS entitytype), 'import', 'open', '', now(), "
+                    "CAST(:payload AS json))"
+                ),
+                {"key": kind, "kind": kind, "payload": payload},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO sourcerecord (id, source_id, entity_type, record_key, entity_id, payload) "
+                    "SELECT gen_random_uuid(), id, CAST(:kind AS entitytype), :key, gen_random_uuid(), "
+                    "json_build_object('incoming', CAST(:payload AS json)) FROM source"
+                ),
+                {"key": kind, "kind": kind, "payload": payload},
+            )
+
+        def payloads(query: str) -> dict:
+            return dict(connection.execute(text(query)).all())
+
+        cases = "SELECT CAST(entity_type AS text), incoming FROM reconciliationcase"
+        records = "SELECT CAST(entity_type AS text), payload FROM sourcerecord"
+        before_cases = payloads(cases)
+        before_records = payloads(records)
+        command.upgrade(config, "0012")
+        assert payloads(cases) == {
+            "ORGANIZATION": {"address_locality": "Wien"},
+            "PRODUCTION": {"suggested_min_age": 12},
+            "PERSON": {"city": "unchanged"},
+        }
+        assert payloads(records) == {
+            "ORGANIZATION": {"incoming": {"address_locality": "Wien"}},
+            "PRODUCTION": {"incoming": {"suggested_min_age": 12}},
+            "PERSON": {"incoming": {"city": "unchanged"}},
+        }
+        command.downgrade(config, "0011")
+        assert payloads(cases) == before_cases
+        assert payloads(records) == before_records
+
+
 def test_library_migration_keeps_passwords_and_allows_sso(postgres) -> None:
     legacy_id, sso_id = uuid.uuid4(), uuid.uuid4()
     with postgres.begin() as connection:

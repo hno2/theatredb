@@ -49,7 +49,7 @@ def _rewrite_column(
     rows = sa.table(table, sa.column(id_column), sa.column("entity_type"), sa.column(column, sa.JSON))
     query = sa.select(rows.c[id_column], rows.c[column])
     if types:
-        query = query.where(rows.c.entity_type.in_(types))
+        query = query.where(sa.cast(rows.c.entity_type, sa.String).in_(types))
     for row_id, value in bind.execute(query):
         if (renamed := _rename_at(value, key, mapping)) != value:
             bind.execute(rows.update().where(rows.c[id_column] == row_id).values({column: renamed}))

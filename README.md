@@ -43,6 +43,8 @@ uv run uvicorn backend.api:app --reload
 ```
 
 Open <http://localhost:8000/docs> for the interactive API documentation.
+The deployed API is available at <https://theater.simonklug.de/api/organizations>,
+with documentation at <https://theater.simonklug.de/docs>.
 The API uses the same database settings as the app; it does not create databases
 or run migrations on startup.
 
