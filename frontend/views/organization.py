@@ -13,7 +13,7 @@ from uuid import UUID
 import pandas as pd
 import streamlit as st
 
-from backend.config import canonical_role, role_label
+from backend.config import PERFORMER_ROLES, canonical_role, role_label
 from backend.data_quality import public_summary
 from backend.date_precision import DatePrecision, date_interval, format_date, intervals_overlap
 from backend.date_precision import parse_date as parse_domain_date
@@ -281,10 +281,12 @@ def render_production_summary(production: dict) -> None:
 
 
 def production_credit_line(production: dict) -> str:
-    """Group distinct directors first, followed by actors, preserving source order."""
+    """Group distinct directors first, followed by performers, preserving source order."""
     groups: dict[str, dict[str, str]] = {"director": {}, "actor": {}}
     for membership in production.get("memberships") or []:
         role = canonical_role(membership.get("role_name"))
+        if role in PERFORMER_ROLES:
+            role = "actor"
         person = membership.get("person") or {}
         if role in groups and person.get("name"):
             name = re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", person["name"])

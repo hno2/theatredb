@@ -12,6 +12,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Session, SQLModel, col, func, or_, select
 from sqlmodel.sql.expression import SelectOfScalar
 
+from backend.config import RECLASSIFIED_ROLE_ALIASES, canonical_role
 from backend.data_quality import QUALITY_FIELDS
 from backend.date_precision import DatePrecision
 from backend.reconciliation import resolve_id
@@ -53,6 +54,13 @@ def _public_snapshot(entity: SQLModel) -> dict[str, Any]:
             data.pop(field, None)
     elif isinstance(entity, OrganizationSeasonCheck):
         data.pop("checked_by", None)
+    elif isinstance(entity, Person):
+        data["type"] = list(
+            dict.fromkeys(
+                canonical_role(value) if value.strip().casefold() in RECLASSIFIED_ROLE_ALIASES else value
+                for value in (data.get("type") or [])
+            )
+        )
     return data
 
 

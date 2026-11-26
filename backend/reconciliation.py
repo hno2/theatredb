@@ -23,7 +23,7 @@ from sqlalchemy.sql.selectable import CTE
 from sqlmodel import Session, SQLModel, col, select
 from sqlmodel.sql.expression import Select, SelectOfScalar
 
-from backend.config import ENTITY_MODELS, LINK_IDENTITY_FIELDS, canonical_role
+from backend.config import ENTITY_MODELS, LINK_IDENTITY_FIELDS, canonical_role, credit_role
 from backend.data_quality import QUALITY_FIELDS
 from backend.date_precision import DatePrecision, date_interval, intervals_overlap, parse_date
 from backend.models import (
@@ -896,7 +896,7 @@ def _credit_comparison(session: Session, case: ReconciliationCase, target: Entit
     for credit in case.context.get("credits", []):
         related = session.get(ReconciliationCase, uuid.UUID(credit["case_id"]))
         name = related.incoming.get("name", "") if related else ""
-        role, character = canonical_role(credit.get("role")), credit.get("character")
+        role, character = credit_role(credit.get("role")), credit.get("character")
         status = "Person zuerst prüfen"
         if related and related.status == "approved" and related.target_id:
             person = _get(session, EntityType.PERSON, related.target_id)
@@ -1469,8 +1469,7 @@ def _deduplicate_links(session: Session, actor_id: str | None, touched: set[tupl
             seen = set()
             for match in matches:
                 key = tuple(
-                    canonical_role(getattr(match, f)) if f in {"role", "role_name"} else getattr(match, f)
-                    for f in fields
+                    credit_role(getattr(match, f)) if f in {"role", "role_name"} else getattr(match, f) for f in fields
                 )
                 if key in seen or (isinstance(match, TextLineage) and match.source_text_id == match.derived_text_id):
                     audit_event(session, match, "delete", actor_id)
@@ -1871,8 +1870,8 @@ def _credit_rows(
 
 def _same_credit(row: ProductionMembership | TextContribution, role: str | None, character: str | None) -> bool:
     if isinstance(row, ProductionMembership):
-        return canonical_role(row.role_name) == role and row.character_name == character
-    return canonical_role(row.role) == role
+        return credit_role(row.role_name) == role and row.character_name == character
+    return credit_role(row.role) == role
 
 
 def ensure_credit(
@@ -1884,7 +1883,7 @@ def ensure_credit(
     actor_id: str | None,
 ) -> bool:
     """Add a production membership or text contribution unless an equivalent credit exists."""
-    role = canonical_role(role)
+    role = credit_role(role)
     rows = _credit_rows(session, entity, person_id)
     if role == "actor" and character:
         legacy = next(

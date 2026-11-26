@@ -27,7 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, SQLModel, col, select
 from tqdm import tqdm
 
-from backend.config import IMAGE_SIGNATURES, canonical_role
+from backend.config import IMAGE_SIGNATURES, canonical_role, credit_role
 from backend.date_precision import parse_date
 from backend.ingestion.snapshots import digest, snapshot_path, without_null_fields
 from backend.ingestion.staging import validate_records
@@ -1159,7 +1159,7 @@ def _add_detail_people(
             if alias_owners.setdefault(alias, key) != key:
                 raise ValueError(f"Conflicting Theapolis detail IDs for legacy alias {alias}")
         person["legacy_ids"].update(aliases)
-        credits.append((key, role, character))
+        credits.append((key, credit_role(raw_role) or role, character))
         raw_credits.append(
             {
                 "source_person_id": key,

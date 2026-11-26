@@ -38,6 +38,29 @@ def test_unknown_role_label_preserves_source_text() -> None:
     assert not role_label(None)
 
 
+def test_music_theatre_direction_label_stays_distinct() -> None:
+    assert role_label("musiktheaterregie") == "Musiktheaterregie"
+    assert role_label("choreografie / direktion") == "Choreografie / Direktion"
+    assert role_label("sopran") == "Sopran"
+    assert role_label("assistenz musiktheaterregie") == "Assistenz Musiktheaterregie"
+
+
+def test_existing_singing_and_music_theatre_credits_are_grouped() -> None:
+    credits = [
+        {"role_name": "gesang (weibliche solopartien)", "person": {"name": "Singer", "id": "1"}},
+        {"role_name": "musiktheaterregie", "person": {"name": "Director", "id": "2"}},
+    ]
+    assert organization.production_credit_line({"memberships": credits}) == "Regie: **Director** · mit Singer"
+
+
+def test_existing_person_types_are_classified_without_changing_stored_values() -> None:
+    record = Person(
+        name="Example", type=["gesang (weibliche solopartien)", "musiktheaterregie", "director", "other role"]
+    )
+    assert entity_management._public_snapshot(record)["type"] == ["singer", "director", "other role"]
+    assert record.type == ["gesang (weibliche solopartien)", "musiktheaterregie", "director", "other role"]
+
+
 class LinkParser(HTMLParser):
     """Read the rendered anchor without depending on attribute order."""
 

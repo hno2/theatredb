@@ -12,7 +12,7 @@ from itertools import starmap
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from backend.config import canonical_role, role_label
+from backend.config import PERFORMER_ROLES, canonical_role, role_label
 
 ORIF_CONTEXT = "https://schema.org"
 ORIF_VERSION = "v2"
@@ -116,12 +116,15 @@ def _credits(production: dict) -> tuple[list[dict], list[dict]]:
     for membership in production.get("memberships") or []:
         if not (person := membership.get("person") or {}).get("name"):
             continue
-        role, character = canonical_role(membership.get("role_name")), membership.get("character_name")
-        if role == "actor" or character:
-            performer = {"characterName": character, "roleName": None if role == "actor" else role_label(role)}
+        role_name, character = membership.get("role_name"), membership.get("character_name")
+        role = canonical_role(role_name)
+        if role in PERFORMER_ROLES or character:
+            performer = {"characterName": character, "roleName": None if role == "actor" else role_label(role_name)}
             performers.append(_compact({"@type": "PerformanceRole", "performer": [_person(person)], **performer}))
         else:
-            creators.append(_compact({"@type": "Role", "creator": [_person(person)], "roleName": role_label(role)}))
+            creators.append(
+                _compact({"@type": "Role", "creator": [_person(person)], "roleName": role_label(role_name)})
+            )
     return creators, performers
 
 

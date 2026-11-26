@@ -83,6 +83,19 @@ def test_imprecise_premiere_has_no_event_and_keeps_cast_as_creators() -> None:
     assert [role["roleName"] for role in production["creator"]] == ["Regie", "Schauspiel"]
 
 
+def test_export_preserves_specialized_performer_and_director_titles() -> None:
+    production = {
+        **TOSCA,
+        "memberships": [
+            {"role_name": "sopran", "person": _person("singer", "Singer")},
+            {"role_name": "musiktheaterregie", "person": _person("director", "Director")},
+        ],
+    }
+    exported = orif_document(THEATRE, [production])["productions"][0]
+    assert exported["events"][0]["performer"][0]["roleName"] == "Sopran"
+    assert exported["creator"][0]["roleName"] == "Musiktheaterregie"
+
+
 def test_people_export_groups_by_theatre_and_skips_productions_without_one() -> None:
     other = {**TOSCA, "id": "other", "organization": {"id": "other", "name": "Andere"}}
     documents = orif_documents([{**TOSCA, "organization": THEATRE}, other, {**TOSCA, "id": "loose"}])

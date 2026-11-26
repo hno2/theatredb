@@ -47,7 +47,8 @@ pages.
     musical→`musical`) and from tags that match the ORIF genre list.
   - `productionType` comes from the premiere tags UA, DEA/DSE, ÖEA/SEA, and EA.
 - Credits:
-  - Actors and credits with a character become event `performer` entries.
+  - Performers (including singers and dancers) and credits with a character
+    become event `performer` entries.
   - All other memberships become `creator` roles with the German role label.
 - Event:
   - Only the premiere is exported, as one `Premiere` event with `duration`,
