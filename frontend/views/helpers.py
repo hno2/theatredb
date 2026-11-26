@@ -1,17 +1,32 @@
+import json
 import math
+import re
 from html import escape
 from unicodedata import normalize
 from urllib.parse import urlencode
 
 import streamlit as st
 
-from backend.config import ROLE_LABELS, canonical_role
+from backend.orif import ORIF_MEDIA_TYPE
 from frontend.views.settings import theatre_filter_link_params
 
 
-def role_label(role: str | None) -> str:
-    """Translate known canonical roles while retaining source-specific labels."""
-    return ROLE_LABELS.get(canonical_role(role) or "", role or "")
+def render_orif_download(document: dict | list | None, name: str, entity_id: str) -> None:
+    """Offer the entity as Open Repertoire (ORIF v2) JSON; ORIF requires a theatre per document."""
+    if not document:
+        st.caption("Kein Open-Repertoire-Export möglich: ORIF benötigt ein zugeordnetes Theater.")
+        return
+    slug = re.sub(r"\W+", "-", name).strip("-").lower() or entity_id
+    st.download_button(
+        "Open Repertoire (ORIF) herunterladen",
+        json.dumps(document, ensure_ascii=False, indent=2),
+        file_name=f"{slug}-orif.json",
+        mime=ORIF_MEDIA_TYPE,
+        icon=":material/download:",
+        on_click="ignore",
+        key=f"orif_{entity_id}",
+        help="Open Repertoire Interchange Format v2 (https://buehnenverein.github.io/open-repertoire/)",
+    )
 
 
 def theatre_city(name: str, city: str | None) -> str:

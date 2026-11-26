@@ -67,7 +67,7 @@ def _label(record: dict) -> str:
 
 
 def _member_key(member: dict) -> str:
-    return json.dumps([member.get("url") or member["name"], member.get("role"), member.get("character")])
+    return json.dumps([member.get("url") or member["name"], member.get("role_name"), member.get("character_name")])
 
 
 def _value_lines(prefix: str, value: object) -> list[str]:
@@ -88,7 +88,7 @@ def field_diff(before: dict, after: dict, *, prefix: str = "") -> list[str]:
             new = {_member_key(member): member for member in right}
             for key in sorted(old.keys() | new.keys()):
                 member = new.get(key) or old[key]
-                label = f"{member['name']} ({member.get('role') or 'actor'})"
+                label = f"{member['name']} ({member.get('role_name') or 'actor'})"
                 if key not in old:
                     lines.append(f"  + {path}: {label}")
                 elif key not in new:

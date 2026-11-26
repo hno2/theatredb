@@ -135,7 +135,7 @@ class ScraperConfig(ConfigModel):
     def validate_rules(self) -> ScraperConfig:
         """Allow only staging fields and compile selectors before network access."""
         allowed_production = set(StagedProduction.model_fields) - {"url", "memberships"}
-        allowed_person = set(StagedMembership.model_fields) - {"role", "character", "url", "type"}
+        allowed_person = set(StagedMembership.model_fields) - {"role_name", "character_name", "url", "type"}
         for label, rules, allowed, required in (
             ("production", self.production, allowed_production, "title"),
             ("person", self.person, allowed_person, "name"),
@@ -360,7 +360,7 @@ class ConfigurableScraper:
                 for index, name in enumerate(names):
                     member = {
                         "name": normalize_person_name(name),
-                        "role": role,
+                        "role_name": role,
                         "type": person_type,
                         "url": self.check_url(urls[index]) if urls else None,
                     }

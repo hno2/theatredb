@@ -246,7 +246,7 @@ def staged_records(items: list[dict]) -> list[dict]:
                     "name": _name(person),
                     "external_id": _identity(person),
                     "type": role,
-                    "role": role,
+                    "role_name": role,
                 }
                 if profile := person.get("profile"):
                     member.update(_profile_birthday(profile))
@@ -1204,7 +1204,12 @@ def validate_detail(entry: dict) -> None:
 def _organization(item: dict, previous: dict) -> tuple[dict, str | None]:
     location = item.get("location") or {}
     country, region = split_country(location.get("country"))
-    payload = {"name": _name(item), "city": location.get("city"), "country": country, **_description(item)}
+    payload = {
+        "name": _name(item),
+        "address_locality": location.get("city"),
+        "address_country": country,
+        **_description(item),
+    }
     if previous.get("description") and not payload.get("description"):
         payload["description"] = previous["description"]
     if region:
@@ -1213,7 +1218,7 @@ def _organization(item: dict, previous: dict) -> tuple[dict, str | None]:
         lat, lon = map(float, geolocation.split(","))
         if not math.isfinite(lat) or not math.isfinite(lon) or not -90 <= lat <= 90 or not -180 <= lon <= 180:
             raise ValueError(f"Invalid Theapolis coordinates: {geolocation!r}")
-        payload.update(lat=lat, lon=lon)
+        payload.update(latitude=lat, longitude=lon)
     slug = item.get("slug")
     url = f"{SITE}/de/organization/{quote(str(slug), safe='')}" if slug else None
     return payload, url
@@ -1515,7 +1520,7 @@ def _dach_import(
     organizations = {
         key: value
         for key, value in organizations.items()
-        if value[0].get("country") in DACH_COUNTRIES and len(production_ids.get(key, set())) > 1
+        if value[0].get("address_country") in DACH_COUNTRIES and len(production_ids.get(key, set())) > 1
     }
     productions = [production for production in productions if production[1] in organizations]
     person_keys = {key for _, _, _, credits in productions for key, *_ in credits}

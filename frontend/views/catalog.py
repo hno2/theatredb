@@ -46,8 +46,8 @@ CATALOGS: dict[str, tuple[CatalogModel, str, str, str, list[_FieldUI]]] = {
         "Bühnen und Ensembles nach Ort und Profil entdecken.",
         "Theater nach Land",
         [
-            _FieldUI("city", "Ort", "str", True),
-            _FieldUI("country", "Land", "str", True),
+            _FieldUI("address_locality", "Ort", "str", True),
+            _FieldUI("address_country", "Land", "str", True),
             _FieldUI("founded", "Gründung", "domain_date", True),
         ],
     ),
@@ -104,13 +104,13 @@ def _render_entry(kind: str, entry: dict) -> None:
         org = entry.get("organization") or {}
         meta = [
             domain_date_label(entry, "premiere") if entry.get("premiere") else "Premiere nicht hinterlegt",
-            theatre_label(org.get("name") or "", org.get("city")),
+            theatre_label(org.get("name") or "", org.get("address_locality")),
         ]
     else:
         count = entry["production_count"]
         meta = [f"{count} {'Produktion' if count == 1 else 'Produktionen'}"]
         if kind == "organization":
-            meta.extend((theatre_city(title, entry.get("city")), entry.get("country")))
+            meta.extend((theatre_city(title, entry.get("address_locality")), entry.get("address_country")))
         elif kind == "person":
             meta.extend((entry.get("nationality"), ", ".join(entry.get("type") or [])))
         else:

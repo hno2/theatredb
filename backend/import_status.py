@@ -71,7 +71,7 @@ def _production_stats(
     if not organization_ids:
         return stats
     in_theatres = col(Production.organization_id).in_(organization_ids)
-    role_column = col(ProductionMembership.role)
+    role_column = col(ProductionMembership.role_name)
     roles: dict[str, set[str]] = defaultdict(set)
     # Normalize only distinct labels, keeping Python casefold and role alias semantics.
     for role in session.exec(

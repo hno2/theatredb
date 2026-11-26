@@ -152,7 +152,7 @@ def test_stagings_cover_family_and_label_premieres(session):
     original = Text(title="Original")
     translation = Text(title="Übersetzung")
     based_on = Text(title="Nach Motiven")
-    theatre = Organization(name="Schauspiel", city="Köln")
+    theatre = Organization(name="Schauspiel", address_locality="Köln")
     session.add_all([original, translation, based_on, theatre])
     session.flush()
     session.add_all(

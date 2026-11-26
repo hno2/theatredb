@@ -18,12 +18,12 @@ def main() -> None:
                 "model": ProductionMembership,
                 "fk_field": "person_id",
                 "title": "Productions",
-                "order_by": "role",
+                "order_by": "role_name",
                 "editable_table": True,
                 "fk_autocreate": {
                     "production_id": {
                         "payload_field": "name",
-                        "infer_type_from": "role",
+                        "infer_type_from": "role_name",
                     }
                 },
                 "field_overrides": {
@@ -33,7 +33,7 @@ def main() -> None:
                         "fk_display": "name",
                         "label": "Production",
                     },
-                    "role": {"label": "Role (e.g. director, actor)"},
+                    "role_name": {"label": "Role (e.g. director, actor)"},
                 },
             },
             {

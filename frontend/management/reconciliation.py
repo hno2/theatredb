@@ -25,6 +25,7 @@ from backend.date_precision import DatePrecision, format_date, parse_date
 from backend.entity_management import list_entities
 from backend.import_status import FIELDS, scrape_overview, theatre_status
 from backend.models import Organization, Source
+from backend.orif import as_staged
 from backend.production_import import (
     OPERATION,
     count_production_cases,
@@ -54,13 +55,13 @@ NEW_PRODUCTION = "__new__"
 
 @st.cache_data(ttl=30)
 def _theatre_names() -> dict[str, str]:
-    return {str(org.id): theatre_label(org.name, org.city) for org in list_entities(Organization)}
+    return {str(org.id): theatre_label(org.name, org.address_locality) for org in list_entities(Organization)}
 
 
 def _label(record: dict) -> str:
     name = record.get("name") or record.get("title") or "Ohne Titel"
     details = [
-        theatre_city(name, record.get("city"))
+        theatre_city(name, record.get("address_locality"))
         or (_format("premiere", record["premiere"], record.get("premiere_precision")) if record.get("premiere") else "")
         or record.get("born")
         or ""
@@ -95,7 +96,7 @@ def _import_tab() -> None:
         st.info("Noch kein Theater vorhanden. Bitte zuerst unter Verwaltung → Organisationen anlegen.")
         return
     by_id = {str(org.id): org for org in theatres}
-    theatre_labels = _unique({key: theatre_label(org.name, org.city) for key, org in by_id.items()})
+    theatre_labels = _unique({key: theatre_label(org.name, org.address_locality) for key, org in by_id.items()})
     theatre = st.selectbox(
         "Theater",
         list(by_id),
@@ -106,13 +107,17 @@ def _import_tab() -> None:
     )
     if theatre:
         _theatre_status(theatre)
-    uploaded = st.file_uploader("Produktionsdatei (JSON)", type=["json"])
+    uploaded = st.file_uploader(
+        "Produktionsdatei (JSON)",
+        type=["json"],
+        help="Staged-Produktionsliste oder Open-Repertoire-Dokument (ORIF v2).",
+    )
     records = None
     if uploaded is not None:
         try:
-            records = json.loads(uploaded.getvalue())
-        except json.JSONDecodeError as exc:
-            st.error(f"Keine gültige JSON-Datei: {exc}")
+            records = as_staged(json.loads(uploaded.getvalue()))
+        except ValueError as exc:  # includes json.JSONDecodeError
+            st.error(f"Keine gültige JSON- oder ORIF-Datei: {exc}")
     first_url = (
         records[0].get("url", "") if isinstance(records, list) and records and isinstance(records[0], dict) else ""
     )

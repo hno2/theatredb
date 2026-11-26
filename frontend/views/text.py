@@ -7,9 +7,9 @@ import uuid
 import streamlit as st
 
 from backend import library
-from backend.config import LINEAGE_LABELS, TEXT_GENRES
+from backend.config import LINEAGE_LABELS, TEXT_GENRES, role_label
 from backend.user_management import get_session
-from frontend.views.helpers import entity_link, role_label
+from frontend.views.helpers import entity_link
 from frontend.views.organization import domain_date_label
 from frontend.views.personal import render_actions
 

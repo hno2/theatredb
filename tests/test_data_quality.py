@@ -107,7 +107,7 @@ def test_nested_public_productions_do_not_expose_organization_reviewers(db: Engi
         production = Production(name="Play", organization_id=organization.id)
         session.add_all([person, production])
         session.flush()
-        session.add(ProductionMembership(person_id=person.id, production_id=production.id, role="actor"))
+        session.add(ProductionMembership(person_id=person.id, production_id=production.id, role_name="actor"))
         session.commit()
         person_id = str(person.id)
     discovery, _ = browse_entities(Production)
@@ -335,7 +335,7 @@ def test_quality_migration_preserves_existing_data_and_audit(monkeypatch) -> Non
         command.upgrade(migration, "head")
         row = connection.execute(
             text(
-                "SELECT name, city, lat, lon, general_verified_at, history_from_season, update_scope "
+                "SELECT name, address_locality, latitude, longitude, general_verified_at, history_from_season, update_scope "
                 "FROM organization WHERE id = :id"
             ),
             {"id": org_id.hex},

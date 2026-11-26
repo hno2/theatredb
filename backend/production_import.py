@@ -99,7 +99,7 @@ def author_name(value: str | None) -> str | None:
 
 
 def _credit(member: dict) -> dict:
-    raw_role = _clean(member.get("role"))
+    raw_role = _clean(member.get("role_name"))
     raw_types = member.get("type") or raw_role or "actor"
     types = [
         kind
@@ -116,7 +116,7 @@ def _credit(member: dict) -> dict:
     return {
         "name": member["name"].strip(),
         "role": role,
-        "character": (_clean(member.get("character")) or raw_role) if role == "actor" else None,
+        "character": (_clean(member.get("character_name")) or raw_role) if role == "actor" else None,
         "types": types,
         "urls": list(dict.fromkeys([*([member["url"]] if member.get("url") else []), *member.get("urls", [])])),
         **{field: member.get(field) for field in PERSON_FILL_FIELDS},
@@ -128,7 +128,7 @@ def prepare_record(record: dict) -> dict:
     members = list(record.get("memberships", []))
     author = author_name(_clean(record.get("author")))
     if author and not any(normalize(member["name"]) == normalize(author) for member in members):
-        members.append({"name": author, "type": "author", "role": "author"})
+        members.append({"name": author, "type": "author", "role_name": "author"})
     credits = [_credit(member) for member in members]
     premiere = _clean(record.get("premiere"))
     incoming = validate_payload(
@@ -139,7 +139,7 @@ def prepare_record(record: dict) -> dict:
             "premiere": dt.datetime.fromisoformat(premiere).isoformat() if premiere else None,
             "premiere_precision": record.get("premiere_precision"),
             "duration": record.get("duration"),
-            "age_rating": record.get("age_rating"),
+            "suggested_min_age": record.get("suggested_min_age"),
             "url": record["url"],
             "tags": record.get("tags", []),
             "critics": record.get("critics", []),
@@ -215,14 +215,14 @@ def _members(session: Session, production: Production | None) -> list[tuple[Prod
 def _credit_matches(credit: dict, membership: ProductionMembership, person: Person) -> bool:
     if normalize(person.name) != normalize(credit["name"]):
         return False
-    role = canonical_role(membership.role)
+    role = canonical_role(membership.role_name)
     return role == credit["role"] or (
-        credit["role"] == "actor" and bool(credit["character"]) and membership.role == credit["character"]
+        credit["role"] == "actor" and bool(credit["character"]) and membership.role_name == credit["character"]
     )
 
 
 def _directors_conflict(members: list[tuple[ProductionMembership, Person]], credits: list[dict]) -> bool:
-    existing = {normalize(p.name) for m, p in members if canonical_role(m.role) == "director"}
+    existing = {normalize(p.name) for m, p in members if canonical_role(m.role_name) == "director"}
     incoming = {normalize(c["name"]) for c in credits if c["role"] == "director"}
     return bool(existing and incoming and not existing & incoming)
 
@@ -315,8 +315,8 @@ def _people_rows(
     rows.extend(
         {
             "name": person.name,
-            "role": canonical_role(membership.role),
-            "character": membership.character,
+            "role": canonical_role(membership.role_name),
+            "character": membership.character_name,
             "status": "kept",
         }
         for membership, person in members
@@ -608,7 +608,7 @@ def _apply(
     if choices.get("director") == "incoming" and director_choice == "incoming":
         # Explicitly chosen: the uploaded direction replaces the existing one.
         for membership, _ in _members(session, production):
-            if canonical_role(membership.role) == "director":
+            if canonical_role(membership.role_name) == "director":
                 audit_event(session, membership, "delete", actor_id)
                 session.delete(membership)
                 changed = True

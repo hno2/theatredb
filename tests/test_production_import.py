@@ -83,7 +83,7 @@ def rows(db, model, *where: ColumnElement[bool] | bool) -> list:
 
 @pytest.fixture
 def theatre(db) -> Organization:
-    return save(db, Organization(name="Staatstheater", city="Karlsruhe"))[0]
+    return save(db, Organization(name="Staatstheater", address_locality="Karlsruhe"))[0]
 
 
 def upload(theatre, *records: dict, source="theatre.example", captured_at=CAPTURE):
@@ -100,8 +100,8 @@ HAMLET = {
     "tags": ["drama"],
     "author": "William Shakespeare",
     "memberships": [
-        {"name": "Director One", "type": "director", "role": "Regie"},
-        {"name": "Actor One", "type": "actor", "role": "Hamlet"},
+        {"name": "Director One", "type": "director", "role_name": "Regie"},
+        {"name": "Actor One", "type": "actor", "role_name": "Hamlet"},
     ],
 }
 
@@ -114,7 +114,7 @@ def existing_hamlet(db, theatre) -> Production:
     production = save(db, Production(name="Hamlet", organization_id=theatre.id, tags=["classic"], text_id=text.id))[0]
     save(
         db,
-        ProductionMembership(production_id=production.id, person_id=director.id, role="director"),
+        ProductionMembership(production_id=production.id, person_id=director.id, role_name="director"),
         EntitySource(source_id=other.id, entity_type="production", entity_id=production.id, external_url="https://x"),
     )
     return production
@@ -140,7 +140,7 @@ def test_same_title_without_conflict_is_merged_with_people_text_and_second_sourc
     assert len(rows(db, EntitySource, EntitySource.entity_id == production.id)) == 2
     assert len(rows(db, Person)) == 3  # director, author and actor were all reused
     assert len(rows(db, Text)) == 1
-    roles = {(m.role, m.character) for m in rows(db, ProductionMembership)}
+    roles = {(m.role_name, m.character_name) for m in rows(db, ProductionMembership)}
     assert roles == {("director", None), ("actor", "Hamlet"), ("author", None)}
     assert not rows(db, ReconciliationCase)
     assert upload(theatre, HAMLET)["unchanged"] == ["Hamlet"]
@@ -192,8 +192,8 @@ def test_staged_text_metadata_imports_text_credits_and_keeps_production_adapters
         },
         "memberships": [
             *HAMLET["memberships"],
-            {"name": "Anna Translator", "type": "translator", "role": "translator"},
-            {"name": "Adam Adapter", "type": "adapter", "role": "adapter"},
+            {"name": "Anna Translator", "type": "translator", "role_name": "translator"},
+            {"name": "Adam Adapter", "type": "adapter", "role_name": "adapter"},
         ],
     }
 
@@ -204,8 +204,8 @@ def test_staged_text_metadata_imports_text_credits_and_keeps_production_adapters
     people = {row.id: row.name for row in rows(db, Person)}
     contributions = {(people[row.person_id], row.role) for row in rows(db, TextContribution)}
     assert contributions == {("William Shakespeare", "author"), ("Anna Translator", "translator")}
-    assert ("translator", None) in {(row.role, row.character) for row in rows(db, ProductionMembership)}
-    assert ("adapter", None) in {(row.role, row.character) for row in rows(db, ProductionMembership)}
+    assert ("translator", None) in {(row.role_name, row.character_name) for row in rows(db, ProductionMembership)}
+    assert ("adapter", None) in {(row.role_name, row.character_name) for row in rows(db, ProductionMembership)}
     assert upload(theatre, record)["unchanged"] == ["Hamlet"]
     assert len(rows(db, Text)) == 2
 
@@ -281,7 +281,7 @@ def test_translator_refinement_without_text_metadata_uses_current_text_title(db,
         "title": "Theatre display title",
         "url": "https://theatre.example/refine",
         "author": "Original Author",
-        "memberships": [{"name": "New Translator", "role": "translator", "type": "translator"}],
+        "memberships": [{"name": "New Translator", "role_name": "translator", "type": "translator"}],
     }
 
     assert upload(theatre, metadata)["merged"] == ["Theatre display title"]
@@ -381,12 +381,12 @@ def test_conflict_is_reviewed_side_by_side_and_resolved_in_backend(db, theatre) 
 
 def test_conflict_keeps_existing_value_by_default(db, theatre) -> None:
     existing_hamlet(db, theatre)
-    upload(theatre, {**HAMLET, "memberships": [{"name": "Someone Else", "role": "Regie"}]})
+    upload(theatre, {**HAMLET, "memberships": [{"name": "Someone Else", "role_name": "Regie"}]})
     case = list_production_cases()[0]
     review = production_review(case["id"])
     assert review["conflicts"] == ["director"]
     resolve_production_case(case["id"], revision=review["revision"], actor_id="test")
-    directors = rows(db, ProductionMembership, ProductionMembership.role == "director")
+    directors = rows(db, ProductionMembership, ProductionMembership.role_name == "director")
     assert len(directors) == 1
     assert rows(db, Person, Person.id == directors[0].person_id)[0].name == "Director One"
 
@@ -428,7 +428,7 @@ def test_theatre_is_required(db) -> None:
 
 @pytest.mark.parametrize("person_type", [None, "actor", ["actor"], "theatre_educator"])
 def test_vermittlung_imports_as_educator_even_from_legacy_actor_snapshot(db, theatre, person_type) -> None:
-    member = {"name": "Example Educator", "role": "Vermittlung"}
+    member = {"name": "Example Educator", "role_name": "Vermittlung"}
     if person_type is not None:
         member["type"] = person_type
     upload(
@@ -442,8 +442,8 @@ def test_vermittlung_imports_as_educator_even_from_legacy_actor_snapshot(db, the
     person = rows(db, Person, Person.name == "Example Educator")[0]
     assert person.type == ["theatre_educator"]
     membership = rows(db, ProductionMembership, ProductionMembership.person_id == person.id)[0]
-    assert membership.role == "theatre_educator"
-    assert membership.character is None
+    assert membership.role_name == "theatre_educator"
+    assert membership.character_name is None
 
 
 def test_person_and_production_fields_survive_import(db, theatre) -> None:
@@ -458,13 +458,13 @@ def test_person_and_production_fields_survive_import(db, theatre) -> None:
                 {
                     "name": "Multi-role Person",
                     "type": ["actor", "director"],
-                    "role": "Regie",
+                    "role_name": "Regie",
                     "url": "https://theatre.example/people/1",
                     "urls": ["https://profile.example/1"],
                     "born": "1980-01-02",
                     "nationality": "Example",
                 },
-                {"name": "Actor", "type": "actor", "role": "source label", "character": "Hamlet"},
+                {"name": "Actor", "type": "actor", "role_name": "source label", "character_name": "Hamlet"},
             ],
         },
     )
@@ -473,8 +473,8 @@ def test_person_and_production_fields_survive_import(db, theatre) -> None:
     assert person.born == dt.datetime(1980, 1, 2)
     assert person.born_precision == "day"
     assert person.urls == ["https://theatre.example/people/1", "https://profile.example/1"]
-    assert rows(db, ProductionMembership, ProductionMembership.person_id == person.id)[0].role == "director"
-    assert rows(db, ProductionMembership, ProductionMembership.role == "actor")[0].character == "Hamlet"
+    assert rows(db, ProductionMembership, ProductionMembership.person_id == person.id)[0].role_name == "director"
+    assert rows(db, ProductionMembership, ProductionMembership.role_name == "actor")[0].character_name == "Hamlet"
     production = rows(db, Production)[0]
     assert (production.tags, production.critics) == (["drama"], ["https://reviews.example/current"])
     # The person page URL identifies the person again, even with a changed spelling.
@@ -483,7 +483,9 @@ def test_person_and_production_fields_survive_import(db, theatre) -> None:
         {
             "title": "Other",
             "url": "https://theatre.example/p/other",
-            "memberships": [{"name": "Multi Role Person", "url": "https://theatre.example/people/1", "role": "Regie"}],
+            "memberships": [
+                {"name": "Multi Role Person", "url": "https://theatre.example/people/1", "role_name": "Regie"}
+            ],
         },
     )
     assert len(rows(db, Person)) == 2
@@ -697,7 +699,7 @@ def test_status_counts_distinct_productions_and_scoped_pending_conflicts(db, the
             external_url="//example.org/other",
         ),
         *(
-            ProductionMembership(production_id=production.id, person_id=person.id, role=role)
+            ProductionMembership(production_id=production.id, person_id=person.id, role_name=role)
             for role in ("\tREGIE\u2003", "director", "actor", "ACTOR")
         ),
         *(

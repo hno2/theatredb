@@ -77,7 +77,9 @@ def test_detail_roles_characters_and_work_credit_scope(db):
     _import(db, 2, item)
     _import(db, 3, {**item, **_detail()})
     assert len(set(ids.values())) == 3  # Name, URL and numeric ID alone do not link.
-    assert {(row.person_id, row.role, row.character) for row in session.exec(select(ProductionMembership))} == {
+    assert {
+        (row.person_id, row.role_name, row.character_name) for row in session.exec(select(ProductionMembership))
+    } == {
         (ids["directors:9"], "director", None),
         (ids["creators:9"], "author", None),
         (ids["detail:9"], "actor", "Hamlet / Prinz"),
@@ -211,7 +213,7 @@ def test_archive_links_only_unambiguous_profile_overlap(db, existing, caplog):
     ids = _import(db, 3, archive_item)
     assert _import(db, 3, archive_item) == ids
     members = session.exec(select(ProductionMembership)).all()
-    assert all(member.role == "director" for member in members)
+    assert all(member.role_name == "director" for member in members)
     if existing == "list_only":
         assert ids[key] == legacy_id
         assert [member.person_id for member in members] == [legacy_id]

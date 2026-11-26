@@ -70,7 +70,9 @@ uv run python -m backend.ingestion.staged_to_db \
   --organization-name "Badisches Staatstheater Karlsruhe"
 ```
 
-Matching is limited to that theatre. Re-uploading is idempotent; unresolved
+The file may also be an Open Repertoire v2 document; see
+[specs/open-repertoire.md](../../specs/open-repertoire.md). Matching is limited
+to that theatre. Re-uploading is idempotent; unresolved
 conflicts go to **Produktionskonflikte**. Missing credits are not treated as
 deletions.
 

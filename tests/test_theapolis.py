@@ -170,7 +170,7 @@ def test_export_paginates_parallel_and_preserves_dates(monkeypatch, tmp_path, it
     assert data[0]["title"] == "Hamlet"
     assert "id" not in data[0]
     assert "organization" not in data[0]
-    assert data[0]["memberships"][0]["role"] == "director"
+    assert data[0]["memberships"][0]["role_name"] == "director"
     assert data[1]["premiere"] == "2026-01-01T00:00:00"
     assert data[1]["premiere_precision"] == "month"
     assert source["items"][1]["premierDate"] == "2026-01"
@@ -442,7 +442,7 @@ def test_profile_summary_and_missing_authors_keep_source_id(db, monkeypatch, tmp
         assert not result["person"]
         return
     memberships = json.loads(path.read_text())[0]["memberships"]
-    author = next(member for member in memberships if member["external_id"] == "9" and member["role"] == "author")
+    author = next(member for member in memberships if member["external_id"] == "9" and member["role_name"] == "author")
     assert author["name"] == "Alex"
     assert "url" not in author and "born" not in author
     with Session(db) as session:
@@ -932,7 +932,7 @@ def test_accepted_import_is_idempotent_and_preserves_source_only_urls(db, tmp_pa
         assert all(p.url is None for p in productions)
         organization = session.exec(select(Organization)).one()
         assert organization.url is None
-        assert organization.lat == pytest.approx(52.5) and organization.lon == pytest.approx(13.4)
+        assert organization.latitude == pytest.approx(52.5) and organization.longitude == pytest.approx(13.4)
         assert any("produktionen/123" in (s.external_url or "") for s in session.exec(select(EntitySource)).all())
 
 
@@ -964,7 +964,7 @@ def test_dach_import_limits_all_related_records_and_counts_distinct_productions(
     }
     assert theapolis.import_all(path) == result
     with Session(db) as session:
-        assert {org.name: (org.country, org.region) for org in session.exec(select(Organization))} == {
+        assert {org.name: (org.address_country, org.region) for org in session.exec(select(Organization))} == {
             "Organization 1": ("Deutschland", "Nordrhein-Westfalen"),
             "Organization 2": ("Österreich", "Wien"),
             "Organization 3": ("Schweiz", "Bern"),
@@ -982,7 +982,7 @@ def test_dach_import_limits_all_related_records_and_counts_distinct_productions(
     with Session(db) as session:
         assert len(session.exec(select(Production)).all()) == 12
         foreign = session.exec(select(Organization).where(Organization.name == "Organization 4")).one()
-        assert (foreign.country, foreign.region) == ("Frankreich", None)
+        assert (foreign.address_country, foreign.region) == ("Frankreich", None)
 
 
 @pytest.mark.parametrize(
@@ -1004,7 +1004,7 @@ def test_dach_import_accepts_country_aliases(db, item, tmp_path, country, expect
     assert len(theapolis.import_all(path, dach_only=True)["production"]) == 2
     with Session(db) as session:
         org = session.exec(select(Organization)).one()
-        assert (org.country, org.region) == (expected, None)
+        assert (org.address_country, org.region) == (expected, None)
 
 
 @pytest.mark.parametrize(
@@ -1022,9 +1022,12 @@ def test_reimport_repairs_only_unchanged_legacy_region(db, tmp_path, item, exist
     result = theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
         org = session.exec(select(Organization)).one()
-        org.country = existing_country
+        org.address_country = existing_country
         record = session.exec(select(SourceRecord).where(SourceRecord.entity_id == org.id)).one()
-        record.payload = {**record.payload, "incoming": {**record.payload["incoming"], "country": "Kanton Tessin"}}
+        record.payload = {
+            **record.payload,
+            "incoming": {**record.payload["incoming"], "address_country": "Kanton Tessin"},
+        }
         session.commit()
 
     location["country"] = "Kanton Tessin"
@@ -1033,7 +1036,7 @@ def test_reimport_repairs_only_unchanged_legacy_region(db, tmp_path, item, exist
     assert theapolis.import_all(path, dach_only=False) == result
     with Session(db) as session:
         org = session.exec(select(Organization)).one()
-        assert (org.country, org.region) == expected
+        assert (org.address_country, org.region) == expected
 
 
 @pytest.mark.parametrize(("switch", "dach_only"), [([], True), (["--dach-only"], True), (["--all"], False)])
@@ -1070,7 +1073,7 @@ def test_role_scoped_person_ids_keep_colliding_credits_separate(db, tmp_path, it
         production = session.get(Production, uuid.UUID(result["production"][0]))
         text = session.get(Text, uuid.UUID(result["text"][0]))
         assert production is not None and text is not None
-        assert {(member.person_id, member.role) for member in production.memberships} == {
+        assert {(member.person_id, member.role_name) for member in production.memberships} == {
             (records["directors:15696"].entity_id, "director"),
             (records["creators:15696"].entity_id, "author"),
         }
@@ -1108,7 +1111,7 @@ def test_same_name_cross_role_merge_preserves_credits_and_source_ids(
         records = session.exec(select(SourceRecord).where(SourceRecord.entity_type == EntityType.PERSON)).all()
         assert {record.external_id for record in records} == {"directors:9", "creators:77"}
         assert {record.entity_id for record in records} == {person.id}
-        assert {(credit.person_id, credit.role) for credit in session.exec(select(ProductionMembership))} == {
+        assert {(credit.person_id, credit.role_name) for credit in session.exec(select(ProductionMembership))} == {
             (person.id, "director"),
             (person.id, "author"),
         }
@@ -1166,7 +1169,7 @@ def test_batched_cross_role_merge_preserves_all_references_and_audits(db, monkey
                     row
                     for person_id in identities
                     for row in (
-                        ProductionMembership(production_id=production.id, person_id=person_id, role="Regie"),
+                        ProductionMembership(production_id=production.id, person_id=person_id, role_name="Regie"),
                         TextContribution(text_id=text.id, person_id=person_id, role="author"),
                         OrganizationMembership(organization_id=organization.id, person_id=person_id, role="director"),
                         AwardNomination(
@@ -1188,7 +1191,7 @@ def test_batched_cross_role_merge_preserves_all_references_and_audits(db, monkey
         assert session.get(Person, duplicate) is None
         memberships = session.exec(select(ProductionMembership)).all()
         assert len(memberships) == 2
-        assert {(row.person_id, canonical_role(row.role)) for row in memberships} == {
+        assert {(row.person_id, canonical_role(row.role_name)) for row in memberships} == {
             (target, "director"),
             (target, "author"),
         }
@@ -1422,7 +1425,7 @@ def test_direct_import_preserves_conflicts_fills_blanks_and_keeps_source_observa
         assert production is not None and organization is not None
         production.name = "Manual title"
         production.url = "https://official.example/hamlet"
-        organization.city = "Manual city"
+        organization.address_locality = "Manual city"
         session.add_all([production, organization])
         session.commit()
     item["name"] = "Changed source title"
@@ -1433,7 +1436,7 @@ def test_direct_import_preserves_conflicts_fills_blanks_and_keeps_source_observa
     with Session(db) as session:
         production = session.exec(select(Production)).one()
         assert production.name == "Manual title" and production.url == "https://official.example/hamlet"
-        assert session.exec(select(Organization)).one().city == "Manual city"
+        assert session.exec(select(Organization)).one().address_locality == "Manual city"
         director = session.exec(select(SourceRecord).where(SourceRecord.external_id == "directors:9")).one()
         person = session.get(Person, director.entity_id)
         assert person is not None and person.born_precision == "year"
@@ -1525,7 +1528,7 @@ def test_import_removes_nuls_before_domain_and_json_writes(db, tmp_path, item, c
         production = session.exec(select(Production)).one()
         assert production.name == "Hamlet" and production.tags == ["Drama"]
         organization = session.exec(select(Organization)).one()
-        assert organization.name == "Theater" and organization.city == "Berlin"
+        assert organization.name == "Theater" and organization.address_locality == "Berlin"
         assert {person.name for person in session.exec(select(Person))} == {"Alex", "Other Alex"}
 
 

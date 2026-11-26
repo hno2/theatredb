@@ -155,7 +155,7 @@
           "default": null,
           "title": "Nationality"
         },
-        "role": {
+        "role_name": {
           "anyOf": [
             {
               "type": "string"
@@ -165,9 +165,9 @@
             }
           ],
           "default": null,
-          "title": "Role"
+          "title": "Role Name"
         },
-        "character": {
+        "character_name": {
           "anyOf": [
             {
               "type": "string"
@@ -177,7 +177,7 @@
             }
           ],
           "default": null,
-          "title": "Character"
+          "title": "Character Name"
         }
       },
       "required": [
@@ -434,7 +434,7 @@
           ],
           "default": null
         },
-        "age_rating": {
+        "suggested_min_age": {
           "anyOf": [
             {
               "$ref": "#/$defs/NonNegativeInt"

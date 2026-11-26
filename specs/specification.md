@@ -36,8 +36,9 @@ administrative tools for imports, review, and data maintenance.
 
 - Standalone theatre scrapes write staged snapshots, never directly to the
   database. Validate and compare snapshots before uploading.
-- Theatre uploads match within the selected organization, validate the full
-  file before writes, and are idempotent. Ambiguous production or text matches
+- Theatre uploads accept staged JSON or Open Repertoire v2 documents
+  ([open-repertoire.md](open-repertoire.md)), match within the selected
+  organization, validate the full file before writes, and are idempotent. Ambiguous production or text matches
   wait for review; missing credits do not delete existing data.
 - Publisher text metadata may come from supplied records or HTML. No live
   publisher crawling is bundled. Known identities may fill blanks; changed

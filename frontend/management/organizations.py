@@ -10,8 +10,8 @@ def main() -> None:
         model_cls=Organization,
         field_overrides={
             **{field: {"exclude": True} for field in QUALITY_FIELDS},
-            "lat": {"exclude": True},  # TODO: Should be added by geocoding, but currently is not
-            "lon": {"exclude": True},
+            "latitude": {"exclude": True},  # TODO: Should be added by geocoding, but currently is not
+            "longitude": {"exclude": True},
             "tags": {"label": "Schlagworte"},
         },
         selected_callback=render_quality_editor,

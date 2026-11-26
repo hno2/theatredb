@@ -27,7 +27,7 @@ production:
     selector: main h1 ~ .row > .col-md-4 p
     match: '^Dauer\b.*\d'
     format: duration
-  age_rating:
+  suggested_min_age:
     selector: main h1 ~ .row > .col-md-4 p
     extract: ab\s+(\d+)\s+Jahren?
     format: integer
