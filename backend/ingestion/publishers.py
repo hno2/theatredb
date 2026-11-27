@@ -5,9 +5,11 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 
+from pydantic import Field
 from selectolax.lexbor import LexborHTMLParser
 from sqlalchemy import or_
 from sqlmodel import Session, col, select
+from tqdm import tqdm
 
 from backend.ingestion.configurable import FieldRule, extract_field
 from backend.ingestion.staging import HttpURL, NonEmptyText, StagedText
@@ -22,7 +24,7 @@ from backend.models import (
     TextContribution,
 )
 from backend.reconciliation import canonical_url, normalize, resolve_id, stable_digest
-from backend.texts import CreditPeople, family_roots, resolve_staged_text
+from backend.texts import CreditPeople, family_roots, fill_text_metadata, resolve_staged_text
 
 PUBLISHERS = {
     "theatertexte.de": "https://www.theatertexte.de/",
@@ -57,6 +59,7 @@ class PublisherText(StagedText):
     url: HttpURL
     external_id: NonEmptyText | None = None
     world_premiere: NonEmptyText | None = None
+    source_metadata: dict = Field(default_factory=dict)
 
 
 def _publisher(name: str) -> str:
@@ -80,7 +83,7 @@ def normalize_metadata(record: Mapping[str, object]) -> PublisherText:
         if field in data and data[field] != value:
             raise ValueError(f"Conflicting metadata for {field}")
         data[field] = value
-    for field in ("authors", "translators", "composers", "lyricists"):
+    for field in ("authors", "translators", "composers", "lyricists", "adapters", "editors"):
         if isinstance(data.get(field), str):
             data[field] = [data[field]]
     return PublisherText.model_validate(data)
@@ -181,10 +184,40 @@ def _known_metadata(session: Session, text: Text, payload: dict) -> dict:
     previous = dict(payload)
     roots = family_roots(session, text.id)
     previous.setdefault("title", text.title)
+    if "original_subtitle" not in previous and len(roots) == 1:
+        previous["original_subtitle"] = roots[0].subtitle
     previous.setdefault("genre", text.genre)
     previous.setdefault("language", text.languages[0] if text.languages else None)
     previous.setdefault("published", text.published.isoformat() if text.published else None)
-    for role in ("author", "translator", "composer", "lyricist"):
+    for field in (
+        "subtitle",
+        "subtitle_en",
+        "keywords",
+        "genre_labels",
+        "women_min",
+        "women_max",
+        "men_min",
+        "men_max",
+        "total_cast_min",
+        "total_cast_max",
+        "cast_note",
+        "cast_note_en",
+        "suggested_min_age",
+        "description",
+        "description_en",
+        "is_free_for_school_amateur_play",
+        "is_novel_or_film_material",
+        "released_for_udse",
+        "has_role_book",
+        "foreign_rights",
+        "school_amateur_note",
+        "foreign_rights_note",
+        "translations_note",
+        "translations_note_en",
+    ):
+        if previous.get(field) in (None, "", []):
+            previous[field] = getattr(text, field)
+    for role in ("author", "translator", "composer", "lyricist", "adapter", "editor"):
         target = roots[0] if role == "author" and len(roots) == 1 else text
         if not previous.get(f"{role}s"):
             previous[f"{role}s"] = list(
@@ -240,10 +273,13 @@ def _replay(
 
 
 def _fill_known_text(session: Session, text: Text, metadata: dict, people: CreditPeople) -> None:
+    fill_text_metadata(session, text, metadata)
+    if metadata.get("original_subtitle"):
+        roots = family_roots(session, text.id)
+        if len(roots) == 1 and not roots[0].subtitle:
+            roots[0].subtitle = metadata["original_subtitle"]
+            session.add(roots[0])
     updates = {}
-    for key in ("genre", "published", "published_precision", "description"):
-        if getattr(text, key) is None and metadata.get(key) is not None:
-            updates[key] = metadata[key]
     if not text.languages and metadata.get("language"):
         updates["languages"] = [metadata["language"]]
     if updates:
@@ -252,7 +288,7 @@ def _fill_known_text(session: Session, text: Text, metadata: dict, people: Credi
             setattr(text, key, getattr(validated, key))
         session.add(text)
     roots = family_roots(session, text.id)
-    for role in ("author", "translator", "composer", "lyricist"):
+    for role in ("author", "translator", "composer", "lyricist", "adapter", "editor"):
         target = roots[0] if role == "author" and len(roots) == 1 else text
         if (
             session.exec(
@@ -265,7 +301,7 @@ def _fill_known_text(session: Session, text: Text, metadata: dict, people: Credi
 
 
 def ingest_text_metadata(
-    session: Session, source_name: str, records: Sequence[Mapping[str, object]]
+    session: Session, source_name: str, records: Sequence[Mapping[str, object]], *, progress: tqdm | None = None
 ) -> list[Text | ReconciliationCase]:
     """Validate all records, then import texts and source links; caller owns the transaction."""
     publisher = _publisher(source_name)
@@ -281,7 +317,9 @@ def ingest_text_metadata(
     people = CreditPeople(session)
     for record in validated:
         observation = record.model_dump(mode="json", exclude_none=True)
-        metadata = record.model_dump(mode="json", exclude={"url", "external_id", "world_premiere"}, exclude_none=True)
+        metadata = record.model_dump(
+            mode="json", exclude={"url", "external_id", "world_premiere", "source_metadata"}, exclude_none=True
+        )
         stored = _source_record(session, source.id, record)
         result = (
             _replay(session, source, stored, metadata, people)
@@ -298,6 +336,8 @@ def ingest_text_metadata(
                 "publisher_observations": observations if observation in observations else [*observations, observation],
             }
             session.add(result)
-            continue
-        _save_publisher_observation(session, result, source.id, record, stored)
+        else:
+            _save_publisher_observation(session, result, source.id, record, stored)
+        if progress is not None:
+            progress.update()
     return results

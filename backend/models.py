@@ -604,11 +604,34 @@ class Text(SourceMixin, DomainModel, table=True):
     title: str
     languages: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     genre: str | None = None
+    subtitle: str | None = None
+    subtitle_en: str | None = None
+    keywords: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    genre_labels: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    women_min: int | None = None
+    women_max: int | None = None
+    men_min: int | None = None
+    men_max: int | None = None
+    total_cast_min: int | None = None
+    total_cast_max: int | None = None
+    cast_note: str | None = None
+    cast_note_en: str | None = None
+    suggested_min_age: int | None = None
+    is_free_for_school_amateur_play: bool | None = None
+    is_novel_or_film_material: bool | None = None
+    released_for_udse: bool | None = None
+    has_role_book: bool | None = None
+    foreign_rights: bool | None = None
+    school_amateur_note: str | None = None
+    foreign_rights_note: str | None = None
+    translations_note: str | None = None
+    translations_note_en: str | None = None
     created: dt.datetime | None = Field(default=None, sa_type=DateTime)  # start of writing, e.g. GND dateOfProduction
     created_precision: DatePrecision | None = None
     published: dt.datetime | None = Field(default=None, sa_type=DateTime)
     published_precision: DatePrecision | None = None
     description: str | None = None
+    description_en: str | None = None
     contributions: list[TextContribution] = Relationship(back_populates="text")
     productions: list[Production] = Relationship(back_populates="text")
     titles: list[TextTitle] = Relationship(back_populates="text")
@@ -634,6 +657,32 @@ class Text(SourceMixin, DomainModel, table=True):
             raise ValueError("Invalid text genre")
         if "title" in data and not data["title"].strip():
             raise ValueError("Text title must not be empty")
+        for key in (
+            "women_min",
+            "women_max",
+            "men_min",
+            "men_max",
+            "total_cast_min",
+            "total_cast_max",
+            "suggested_min_age",
+        ):
+            number = data.get(key)
+            if number is not None and (type(number) is not int or number < 0):
+                raise ValueError(f"{key} must be a non-negative integer")
+        for group in ("women", "men", "total_cast"):
+            lower, upper = data.get(f"{group}_min"), data.get(f"{group}_max")
+            if lower is not None and upper is not None and lower > upper:
+                raise ValueError(f"{group}_min must not exceed {group}_max")
+        for key in (
+            "is_free_for_school_amateur_play",
+            "is_novel_or_film_material",
+            "released_for_udse",
+            "has_role_book",
+            "foreign_rights",
+        ):
+            flag = data.get(key)
+            if flag is not None and type(flag) is not bool:
+                raise ValueError(f"{key} must be a boolean")
         return data
 
 

@@ -12,6 +12,7 @@ from pydantic import (
     ConfigDict,
     Field,
     RootModel,
+    StrictBool,
     StrictInt,
     StringConstraints,
     WithJsonSchema,
@@ -115,6 +116,14 @@ class StagedMembership(StagedDomainModel):
     character_name: str | None = None
 
 
+class StagedTextTitle(BaseModel):
+    """An attested title variant, not evidence for a separate translated text."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    title: NonEmptyText
+    language: Annotated[str, Field(pattern=r"^[a-z]{2}$")] | None = None
+
+
 class StagedText(StagedDomainModel):
     """Normalized text metadata shared by theatre snapshots and publisher imports."""
 
@@ -123,17 +132,53 @@ class StagedText(StagedDomainModel):
 
     title: NonEmptyText
     original_title: NonEmptyText | None = None
+    original_subtitle: NonEmptyText | None = None
     original_language: Annotated[str, Field(pattern=r"^(?:[a-z]{2}|mul)$")] | None = None
     authors: list[NonEmptyText] = Field(default_factory=list)
     translators: list[NonEmptyText] = Field(default_factory=list)
     composers: list[NonEmptyText] = Field(default_factory=list)
     lyricists: list[NonEmptyText] = Field(default_factory=list)
+    adapters: list[NonEmptyText] = Field(default_factory=list)
+    editors: list[NonEmptyText] = Field(default_factory=list)
+    titles: list[StagedTextTitle] = Field(default_factory=list)
     based_on: StagedText | NonEmptyText | None = None
     language: Annotated[str, Field(pattern=r"^(?:[a-z]{2}|mul)$")] | None = None
     genre: Literal["play", "musical", "opera", "novel", "film", "other"] | None = None
     published: DomainDate = None
     published_precision: DatePrecision | None = None
     description: str | None = None
+    description_en: str | None = None
+    subtitle: NonEmptyText | None = None
+    subtitle_en: NonEmptyText | None = None
+    keywords: list[NonEmptyText] = Field(default_factory=list)
+    genre_labels: list[NonEmptyText] = Field(default_factory=list)
+    women_min: NonNegativeInt | None = None
+    women_max: NonNegativeInt | None = None
+    men_min: NonNegativeInt | None = None
+    men_max: NonNegativeInt | None = None
+    total_cast_min: NonNegativeInt | None = None
+    total_cast_max: NonNegativeInt | None = None
+    cast_note: NonEmptyText | None = None
+    cast_note_en: NonEmptyText | None = None
+    suggested_min_age: NonNegativeInt | None = None
+    is_free_for_school_amateur_play: StrictBool | None = None
+    is_novel_or_film_material: StrictBool | None = None
+    released_for_udse: StrictBool | None = None
+    has_role_book: StrictBool | None = None
+    foreign_rights: StrictBool | None = None
+    school_amateur_note: NonEmptyText | None = None
+    foreign_rights_note: NonEmptyText | None = None
+    translations_note: NonEmptyText | None = None
+    translations_note_en: NonEmptyText | None = None
+
+    @model_validator(mode="after")
+    def validate_cast_ranges(self) -> StagedText:
+        """Keep independent cast ranges; total need not equal gender subtotals."""
+        for group in ("women", "men", "total_cast"):
+            lower, upper = getattr(self, f"{group}_min"), getattr(self, f"{group}_max")
+            if lower is not None and upper is not None and lower > upper:
+                raise ValueError(f"{group}_min must not exceed {group}_max")
+        return self
 
 
 class StagedProduction(StagedDomainModel):

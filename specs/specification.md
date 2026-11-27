@@ -100,6 +100,26 @@ administrative tools for imports, review, and data maintenance.
   Ambiguous imported matches wait for review.
 - A text may have a `description` (blurb/synopsis). Imports fill it only when
   empty; it shows on the text detail page.
+- Text publisher metadata includes `subtitle`, `keywords`, `genre_labels`,
+  `suggested_min_age`, `cast_note`, and independent `women_min/max`,
+  `men_min/max`, `total_cast_min/max` requirements. Counts are nonnegative;
+  zero differs from unknown and each minimum must not exceed its maximum.
+  Free-form publisher genres do not replace the canonical genre vocabulary.
+  Imports fill blank fields only; changed known publisher observations require
+  review. Full Rowohlt API responses are retained as source observations,
+  including values too inconsistent to normalize safely.
+- Rowohlt descriptions are Markdown in German (`description`) and English
+  (`description_en`). English subtitles and cast notes use `subtitle_en` and
+  `cast_note_en`. Missing translations stay unknown. Publisher rights/material
+  flags (`is_free_for_school_amateur_play`, `is_novel_or_film_material`,
+  `released_for_udse`, `has_role_book`, `foreign_rights`) are nullable booleans;
+  false is preserved. Markdown rights notes use `school_amateur_note` and
+  `foreign_rights_note`; these records do not grant performance permission.
+  Rowohlt's explicit `originalTitle` creates a translation edge to the original
+  work even if translator credit is absent; the source language remains unknown
+  unless stated. A same-title collision not already linked to that source waits
+  for review. Available-translation and premiere text is stored as Markdown
+  notes, never mistaken for a specific translated edition.
 
 ## Production taxonomy
 

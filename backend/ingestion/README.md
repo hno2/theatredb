@@ -135,9 +135,91 @@ or a single unsplit string; dates and language codes must use the staging format
 This entry point makes **no network requests**. For supplied HTML,
 `extract_metadata(html, url=..., rules=...)` reuses the configurable crawler's
 validated CSS `FieldRule` and extraction helpers. No publisher-specific selectors
-or live-page parsing are bundled: verified page fixtures and source permissions
-are still needed before configuring actual publisher crawls. The existing managed
+are bundled for the other publishers: verified page fixtures and source permissions
+are still needed before configuring their crawls. The existing managed
 crawler's production/person pipeline is not silently repurposed as a text crawler.
+
+### Rowohlt downloader
+
+Rowohlt's public API supplies a paginated catalogue and play details. Downloads
+write a validated publisher JSON snapshot, not database rows:
+
+```bash
+uv run python -m backend.ingestion.rowohlt download --play-id 8915
+uv run python -m backend.ingestion.rowohlt download --limit 10
+uv run python -m backend.ingestion.rowohlt download
+uv run python -m backend.ingestion.rowohlt import
+```
+
+The default snapshot is `data/staged/rowohlt/plays.json`; use `download --output`
+and `import --json` for another path. A successful download atomically replaces
+the snapshot; failed downloads leave the previous file untouched. Full downloads
+follow every catalogue page and fetch each unique play detail, sequentially with
+a 200 ms pause before each request. A full run can take several minutes.
+The CLI uses the existing `tqdm` terminal progress bars: downloads count validated
+plays, with the catalogue total (capped by `--limit`) providing percentage and ETA;
+imports count processed observations, including observations queued for review.
+Failed detail requests do not advance the download bar. Bars close on completion
+or failure; final success messages are only printed after saving or committing.
+`import` validates the complete file before initializing the database, then
+commits the shared publisher import in one transaction. Known identities replay
+idempotently; conflicting metadata waits for text-link review.
+
+Like the other API downloader, Rowohlt uses module-level `download`, `_fetch`,
+and `_download_pages` helpers; `parse_detail` verifies and normalizes one API
+response. `normalize_play` remains available for offline metadata normalization.
+It does not inherit the HTML/production-oriented `TheaterScraper` base class.
+The shared `ingest_text_metadata` accepts optional `progress`; existing non-CLI
+callers remain silent by default.
+
+Normalized fields include descriptions, subtitles, publisher genre labels,
+keywords, minimum age, separate women/men/total cast minima and maxima, cast notes,
+and title variants. Zero is a valid count; unknown stays `null`. Gender ranges
+are independent of total cast size (doubling and flexible casting). Contradictory
+upstream ranges are omitted with an explicit warning, never sorted or guessed;
+the full original detail response remains in `SourceRecord.payload.source_metadata`,
+including rights restrictions, contributor IDs and biographies, keyword hierarchy,
+awards, links, original subtitles, premiere information and related records.
+API timestamps and premiere dates are not text publication dates.
+
+Rowohlt `description` (German) and `descriptionEnglish` (English) are converted
+from HTML to Markdown with the installed `markdownify` library, preserving
+paragraphs, emphasis, lists and links. They populate `Text.description` and
+`Text.description_en` respectively; the existing description field stays
+compatible with current readers. Missing English does not copy German or invent
+a translation. `subtitleEnglish` and `castNoteEnglish` populate `subtitle_en` and
+`cast_note_en`; these labels remain plain text.
+
+Rights/material flags are normalized into nullable booleans:
+`isFreeForSchoolAmateurPlay` → `is_free_for_school_amateur_play`,
+`isNovelOrFilmMaterial` → `is_novel_or_film_material`,
+`releasedForUdse` → `released_for_udse`, `hasRoleBook` → `has_role_book`, and
+`foreignRights` → `foreign_rights`. Explicit `false` is retained; absent flags
+remain unknown, not false. `freeTextSchoolAmateurPlay` and `foreignRightsText`
+become Markdown `school_amateur_note` and `foreign_rights_note`. Flags and notes
+are publisher observations, not an automatic grant of performance rights.
+Re-download to obtain the new fields. Imports fill blanks only; existing
+nonempty descriptions that differ after Markdown conversion wait for review
+rather than overwriting previous imports or manual edits.
+
+English foreign-rights titles are title variants, not proof of a translation.
+`originalTitle` explicitly identifies the source title, so it creates a
+translation edge even when a translator credit is missing; the source language
+stays unknown unless the API says otherwise. Existing matching source titles and
+authors are reused; title collisions without that source edge wait for review.
+`originalSubtitle` belongs to source text. `translations` and
+`translationsEnglish` describe licensed translation availability and premiere
+information, not identified translated texts, so they are retained as Markdown
+notes and do not create speculative lineage.
+
+Explicit adaptation labels (`Bearbeitet von`,
+`Fassung von`) put adapters on the dramatic text and original authors on its
+`based_on` source. Source-book titles/authors take precedence over inferred
+same-title sources. Unspecified source medium stays `other` (existing novels or
+films can match); novel/film material catalogue entries without an explicit
+adaptation are source texts, not invented stage versions. Other editor labels
+stay editor credits. Unstructured “nach” mentions remain in the observation
+rather than creating speculative lineage.
 
 ## Theapolis
 

@@ -623,6 +623,17 @@
           ],
           "default": null
         },
+        "original_subtitle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "original_language": {
           "anyOf": [
             {
@@ -662,6 +673,27 @@
             "$ref": "#/$defs/NonEmptyText"
           },
           "title": "Lyricists",
+          "type": "array"
+        },
+        "adapters": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Adapters",
+          "type": "array"
+        },
+        "editors": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Editors",
+          "type": "array"
+        },
+        "titles": {
+          "items": {
+            "$ref": "#/$defs/StagedTextTitle"
+          },
+          "title": "Titles",
           "type": "array"
         },
         "based_on": {
@@ -738,6 +770,257 @@
           ],
           "default": null,
           "title": "Description"
+        },
+        "description_en": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description En"
+        },
+        "subtitle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "subtitle_en": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "keywords": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Keywords",
+          "type": "array"
+        },
+        "genre_labels": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Genre Labels",
+          "type": "array"
+        },
+        "women_min": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "women_max": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "men_min": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "men_max": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "total_cast_min": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "total_cast_max": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cast_note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cast_note_en": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "suggested_min_age": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "is_free_for_school_amateur_play": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Free For School Amateur Play"
+        },
+        "is_novel_or_film_material": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Novel Or Film Material"
+        },
+        "released_for_udse": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Released For Udse"
+        },
+        "has_role_book": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Has Role Book"
+        },
+        "foreign_rights": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Foreign Rights"
+        },
+        "school_amateur_note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "foreign_rights_note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "translations_note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "translations_note_en": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -839,6 +1122,33 @@
           }
         }
       ]
+    },
+    "StagedTextTitle": {
+      "additionalProperties": false,
+      "description": "An attested title variant, not evidence for a separate translated text.",
+      "properties": {
+        "title": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z]{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "StagedTextTitle",
+      "type": "object"
     }
   },
   "description": "Non-empty production array accepted by the staging importer.",
