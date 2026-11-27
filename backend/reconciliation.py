@@ -1624,6 +1624,17 @@ def _merge_options(kind: EntityType, states: list[dict], field: str, *, is_date:
     return values
 
 
+def _text_title_quality(title: str) -> tuple[bool, bool, bool, str, str]:
+    cleaned = title.strip()
+    return (
+        cleaned == title,
+        cleaned.istitle(),
+        bool(cleaned) and cleaned[0].isupper() and not cleaned.isupper(),
+        cleaned.casefold(),
+        cleaned,
+    )
+
+
 def merge_entity_fields(kind: EntityType, states: list[dict]) -> tuple[dict, list[dict]]:
     """Combine person/text fields with shared list, date precision, and conflict rules."""
     model = Person if kind == EntityType.PERSON else Text
@@ -1636,6 +1647,8 @@ def merge_entity_fields(kind: EntityType, states: list[dict]) -> tuple[dict, lis
         if not values:
             continue
         value = values[0]["value"]
+        if kind == EntityType.TEXT and field == "title":
+            value = max((option["value"] for option in values), key=_text_title_quality)
         if isinstance(value, list):
             value = []
             for option in values:
