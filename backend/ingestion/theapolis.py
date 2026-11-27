@@ -785,19 +785,31 @@ def _participation_credit(row: dict) -> dict:
     }
 
 
-async def _participations(session: aiohttp.ClientSession, identity: str) -> dict:
+async def _participation_page(session: aiohttp.ClientSession, identity: str, number: int) -> dict | None:
+    query = urlencode({"page": number, "items": 1000})
+    try:
+        body = await _fetch(session, f"{SITE}/api/de/productions/{quote(identity, safe='')}/participations?{query}")
+    except aiohttp.ClientResponseError as error:
+        # Productions deleted after the list capture have no evidence; they stay without detail.
+        if error.status != 404 or number != 1:
+            raise
+        LOG.warning("Theapolis production %s no longer exists; skipping its cast and crew", identity)
+        return None
+    result = json.loads(body)
+    if result.get("success") is not True:
+        raise ValueError(f"Theapolis rejected participations for production {identity}, page {number}")
+    return result
+
+
+async def _participations(session: aiohttp.ClientSession, identity: str) -> dict | None:
     pages: list[dict] = []
     seen: set[str] = set()
     credits = []
     number = 1
     total = None
     while True:
-        query = urlencode({"page": number, "items": 1000})
-        result = json.loads(
-            await _fetch(session, f"{SITE}/api/de/productions/{quote(identity, safe='')}/participations?{query}")
-        )
-        if result.get("success") is not True:
-            raise ValueError(f"Theapolis rejected participations for production {identity}, page {number}")
+        if (result := await _participation_page(session, identity, number)) is None:
+            return None
         data = result["data"]
         if total is None:
             total = data["totalCount"]
@@ -832,7 +844,7 @@ def _credits_needing_profile_name(entry: dict) -> list[tuple[dict, str]]:
     ]
 
 
-async def _production_credits(session: aiohttp.ClientSession, identity: str, *, listed_empty: bool) -> dict:
+async def _production_credits(session: aiohttp.ClientSession, identity: str, *, listed_empty: bool) -> dict | None:
     # The list's participant count is never zero for productions with credits (verified on 11k productions).
     if listed_empty:
         return {
@@ -899,6 +911,8 @@ async def _download_participations(
 
     async def fetch(identity: str) -> None:
         entry = await _production_credits(session, identity, listed_empty=identity in empty)
+        if entry is None:
+            return
         await enrich(entry)
         validate_detail(entry)
         pending.append((identity, entry, time()))

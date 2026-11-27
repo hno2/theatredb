@@ -237,12 +237,26 @@ def test_api_participations_pagination_preserves_crew_and_rejects_incomplete(mon
             return await theapolis._participations(session, "123")
 
     entry = asyncio.run(run())
+    assert entry is not None
     assert requested == [1, 2]
     assert entry["theapolis_detail"]["credits"][1]["role"] == "Assistenz Kostümbild"
     assert entry["theapolis_detail"]["api_pages"][0]["data"]["items"][0]["description"] == "Additional source detail"
     broken = True
     with pytest.raises(ValueError, match="Incomplete"):
         asyncio.run(run())
+
+
+def test_deleted_production_is_skipped_without_detail(monkeypatch):
+    async def fetch(_session, _url):
+        await asyncio.sleep(0)
+        raise aiohttp.ClientResponseError(Mock(), (), status=404)
+
+    async def run():
+        async with theapolis._session(1) as session:
+            return await theapolis._participations(session, "29667")
+
+    monkeypatch.setattr(theapolis, "_fetch", fetch)
+    assert asyncio.run(run()) is None
 
 
 @pytest.mark.parametrize("main_name", ["Bernhard Bruchhardt", None])
