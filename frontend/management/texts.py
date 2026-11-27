@@ -10,6 +10,7 @@ from sqlmodel import Session, col, select
 from backend.ai import parse_credits, propose_text_lineage, suggest_titles
 from backend.config import LINEAGE_LABELS, ROLE_LABELS
 from backend.models import (
+    EntityType,
     LineageRelation,
     Person,
     Production,
@@ -32,7 +33,8 @@ from backend.texts import (
     resolve_text_case,
 )
 from backend.user_management import get_session
-from backend.wikidata import create_text_stub, enrich_text, search_texts
+from backend.wikidata import create_text_stub, search_texts
+from frontend.management.authority import render_authority_panel
 from frontend.management.uifactory import _actor_id, render_sqlmodel_crud
 
 LABEL_ROLES = ("author", "translator", "adapter")
@@ -147,21 +149,6 @@ def _titles(session: Session, text: Text) -> None:  # ruff: ignore[complex-struc
             except Exception as exc:  # ruff: ignore[blind-except]
                 session.rollback()
                 st.error(str(exc))
-
-
-def _enrich(session: Session, text: Text, is_root: bool) -> None:
-    if not is_root:
-        st.caption("Wikidata-Anreicherung ist am Ursprung der Werkfamilie verfügbar.")
-        return
-    if st.button("Verknüpftes Wikidata-Werk anreichern", key=f"enrich_{text.id}"):
-        try:
-            report = enrich_text(session, text)
-            session.commit()
-            st.success("Wikidata-Daten übernommen.")
-            st.json(report)
-        except Exception as exc:  # ruff: ignore[blind-except]
-            session.rollback()
-            st.error(f"Anreicherung fehlgeschlagen: {exc}")
 
 
 def _walk_lineage(
@@ -569,7 +556,10 @@ def _selected(row: dict) -> None:
         if text:
             family_ids, is_root = _family(session, text)
             _titles(session, text)
-            _enrich(session, text, is_root)
+            if is_root:
+                render_authority_panel(EntityType.TEXT, row)
+            else:
+                st.caption("Normdaten-Abgleich ist am Ursprung der Werkfamilie verfügbar.")
             _link(session, text)
             _credit(session, text, family_ids)
             _lineage_proposal(session, text)

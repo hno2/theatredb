@@ -1,7 +1,13 @@
 from backend.data_quality import QUALITY_FIELDS
-from backend.models import Organization, OrganizationMembership, Person
+from backend.models import EntityType, Organization, OrganizationMembership, Person
+from frontend.management.authority import render_authority_panel
 from frontend.management.quality import render_quality_editor
 from frontend.management.uifactory import render_sqlmodel_crud
+
+
+def _selected(row: dict) -> None:
+    render_quality_editor(row)
+    render_authority_panel(EntityType.ORGANIZATION, row)
 
 
 def main() -> None:
@@ -14,7 +20,7 @@ def main() -> None:
             "longitude": {"exclude": True},
             "tags": {"label": "Schlagworte"},
         },
-        selected_callback=render_quality_editor,
+        selected_callback=_selected,
         inline_relations=[
             {
                 "model": OrganizationMembership,

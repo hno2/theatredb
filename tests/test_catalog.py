@@ -193,6 +193,7 @@ def test_catalog_does_not_repeat_city_in_results(monkeypatch, kind):
     monkeypatch.setattr(catalog, "catalog_suggestions", lambda *args: [])
     monkeypatch.setattr(catalog, "_summary", lambda *args: [])
     monkeypatch.setattr(catalog, "_tag_options", lambda *args: [])
+    monkeypatch.setattr(catalog, "_facet_fields", list)
     file = "catalog_productions.py" if kind == "production" else "catalog_theater.py"
     app = AppTest.from_file(VIEWS / file)
     app.query_params["q"] = "test"

@@ -1,6 +1,9 @@
 from backend.entity_management import get_unique_field_values
-from backend.models import Person, Production, ProductionMembership, Text, TextContribution
+from backend.models import PERSON_GENDERS, EntityType, Person, Production, ProductionMembership, Text, TextContribution
+from frontend.management.authority import render_authority_panel
 from frontend.management.uifactory import render_sqlmodel_crud
+
+GENDER_LABELS = {"m": "männlich", "f": "weiblich", "none": "kein Geschlecht", "div": "divers"}
 
 
 def main() -> None:
@@ -12,7 +15,14 @@ def main() -> None:
         field_overrides={
             "type": {"kind": "multiselect", "label": "Types", "options": get_unique_field_values(Person, "type")},
             "urls": {"kind": "list_text", "label": "URLs"},
+            "gender": {
+                "kind": "choice",
+                "label": "Geschlecht (leer = unbekannt)",
+                "options": list(PERSON_GENDERS),
+                "option_labels": GENDER_LABELS,
+            },
         },
+        selected_callback=lambda row: render_authority_panel(EntityType.PERSON, row),
         inline_relations=[
             {
                 "model": ProductionMembership,

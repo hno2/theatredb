@@ -51,6 +51,7 @@ def render_text_page(data: dict) -> None:
     facts = [
         TEXT_GENRES.get(genre, genre),
         ", ".join(data.get("languages") or []),
+        f"entstanden {domain_date_label(data, 'created')}" if data.get("created") else None,
         domain_date_label(data, "published") if data.get("published") else None,
     ]
     if metadata := " · ".join(filter(None, facts)):

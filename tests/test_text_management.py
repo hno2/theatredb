@@ -374,13 +374,20 @@ def test_wikidata_enrichment_requires_button(db, monkeypatch):
         session.add(text)
         session.commit()
     calls = []
-    monkeypatch.setattr(wikidata, "enrich_text", lambda *args: calls.append(True) or {"warnings": []})
+    hit = {"id": "Q1", "label": "Example", "description": "", "url": "", "record": {"id": "Q1"}}
+    monkeypatch.setattr(wikidata, "search", lambda *args: [hit])
+    monkeypatch.setattr(wikidata, "refs", lambda *args: [])
+    monkeypatch.setattr(
+        wikidata, "enrich", lambda *args, **kwargs: calls.append(True) or {"filled": [], "conflicts": []}
+    )
     app = AppTest.from_file(str(TEXT_APP)).run()
     key = app.dataframe[0].proto.id.rsplit("-", 1)[1]
     app.session_state[key] = {"edited_rows": {0: {"Auswahl": True}}, "added_rows": [], "deleted_rows": []}
     app.run()
     assert not calls
-    next(button for button in app.button if button.label == "Verknüpftes Wikidata-Werk anreichern").click()
+    buttons = [b for b in app.button if b.label == "Bestätigen & übernehmen"]
+    assert len(buttons) == 1  # GND is offline in tests, only the Wikidata hit is offered
+    buttons[0].click()
     app.run()
     assert calls == [True]
 
