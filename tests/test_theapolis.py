@@ -51,7 +51,7 @@ from backend.reconciliation import (
     preview_entity_merge,
     propose_record,
 )
-from backend.scd2 import SCD2History
+from backend.scd2 import SCD2History, add_scd2_events
 from frontend.views.organization import filter_productions, premiere_label, production_dates
 
 
@@ -80,6 +80,41 @@ def item():
         "directors": [{"id": 9, "name": "Alex"}],
         "creators": [{"id": 9, "name": "Alex"}, {"id": 10, "name": "Other Alex"}],
     }
+
+
+def test_large_audit_batch_bounds_parameters_and_preserves_history_and_rollback(db):
+    people = [Person(name=f"Person {index}") for index in range(1101)]
+    with Session(db) as session:
+        add_scd2_events(session, inserted=people, updated=[], actor_id="initial")
+        session.commit()
+
+        def check_parameters(_connection, _cursor, statement, parameters, _context, _executemany):
+            if statement.lstrip().upper().startswith(("SELECT", "UPDATE")):
+                assert len(parameters) <= 2100
+
+        event.listen(db, "before_cursor_execute", check_parameters)
+        try:
+            people[0].name = "Updated"
+            add_scd2_events(
+                session, inserted=[Person(name="New")], updated=people[:-1], deleted=people[-1:], actor_id="merge"
+            )
+            history = session.exec(select(SCD2History)).all()
+            assert len(history) == 2203
+            previous = [row for row in history if row.actor_id == "initial"]
+            assert all(row.version == 1 and not row.is_current and row.valid_to is not None for row in previous)
+            changes = [row for row in history if row.actor_id == "merge"]
+            assert sum(row.operation == "insert" and row.version == 1 and row.is_current for row in changes) == 1
+            assert sum(row.operation == "update" and row.version == 2 and row.is_current for row in changes) == 1100
+            deleted = next(row for row in changes if row.operation == "delete")
+            assert deleted.version == 2 and not deleted.is_current and deleted.valid_to == deleted.valid_from
+            updated = next(row for row in changes if row.entity_id == str(people[0].id))
+            assert updated.snapshot["name"] == "Updated"
+            session.rollback()
+            restored = session.exec(select(SCD2History)).all()
+            assert len(restored) == 1101
+            assert all(row.is_current and row.valid_to is None for row in restored)
+        finally:
+            event.remove(db, "before_cursor_execute", check_parameters)
 
 
 @pytest.mark.parametrize(

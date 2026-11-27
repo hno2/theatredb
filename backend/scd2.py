@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import Sequence
+from itertools import batched
 from typing import Any, cast
 
 from sqlalchemy import JSON, Column, insert, tuple_, update
@@ -33,23 +34,25 @@ def add_scd2_events(
     actor_id: str | None,
     deleted: Sequence[SQLModel] = (),
 ) -> None:
-    """Audit an import batch without querying history for newly allocated identities."""
+    """Audit atomically, bounding history queries to stay below DB parameter limits."""
     now = dt.datetime.now(dt.UTC)
     versions = {}
     keys = [(type(row).__name__.lower(), str(row.model_dump()["id"])) for row in [*updated, *deleted]]
-    if keys:
-        identity = tuple_(SCD2History.entity_name, SCD2History.entity_id)
-        versions = {
-            (name, entity_id): version
-            for name, entity_id, version in session.exec(
-                select(SCD2History.entity_name, SCD2History.entity_id, func.max(SCD2History.version))
-                .where(identity.in_(keys))
-                .group_by(SCD2History.entity_name, SCD2History.entity_id)
-            )
-        }
+    identity = tuple_(SCD2History.entity_name, SCD2History.entity_id)
+    for batch in batched(keys, 1000, strict=False):
+        versions.update(
+            {
+                (name, entity_id): version
+                for name, entity_id, version in session.exec(
+                    select(SCD2History.entity_name, SCD2History.entity_id, func.max(SCD2History.version))
+                    .where(identity.in_(batch))
+                    .group_by(SCD2History.entity_name, SCD2History.entity_id)
+                )
+            }
+        )
         session.execute(
             update(SCD2History)
-            .where(identity.in_(keys), col(SCD2History.is_current))
+            .where(identity.in_(batch), col(SCD2History.is_current))
             .values(is_current=False, valid_to=now),
             execution_options={"synchronize_session": False},
         )
