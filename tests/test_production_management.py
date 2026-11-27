@@ -358,7 +358,7 @@ def test_production_add_searches_while_typing_and_saves_existing_choice(db) -> N
         assert membership.production_id == production_id
 
 
-def test_person_relation_tabs_show_latest_productions_with_context(db) -> None:
+def test_person_relation_tabs_show_latest_productions_with_context(db, monkeypatch) -> None:
     person = Person(name="Example Person")
     person_id = person.id
     with Session(db) as session:
@@ -379,26 +379,62 @@ def test_person_relation_tabs_show_latest_productions_with_context(db) -> None:
         "Text Contributions :grey-badge[0]",
     ]
     assert len(app.dataframe) == 1
-    tab_key = f"detail_tabs_Person_{person_id}"
-    app.session_state[tab_key] = "Productions :grey-badge[4]"
+    app.query_params["tab"] = "Productions"
     app.run()
     assert not app.exception
     editor = app.dataframe[1]
     assert editor.value["production_id"].tolist() == ["Latest", "Earlier", "Old", "Unknown"]
     assert editor.value["theatre"].tolist() == ["Latest Theatre", "Earlier Theatre", "Old Theatre", "Unknown Theatre"]
     assert editor.value["year"].iloc[:3].tolist() == [2026, 2026, 2000]
-    assert editor.proto.editing_mode == editor.proto.EditingMode.DELETE_ONLY
+    assert editor.proto.editing_mode == editor.proto.EditingMode.FIXED
     app.session_state[editor.proto.id.split("-", 2)[2]] = {
         "edited_rows": {0: {"role_name": "director"}},
         "added_rows": [],
-        "deleted_rows": [1],
+        "deleted_rows": [],
     }
     app.button(key=f"save_ProductionMembership_person_id_{person_id}").click().run()
+    editor_key = app.dataframe[1].proto.id.split("-", 2)[2]
+    app.session_state[editor_key] = {"edited_rows": {1: {"Auswahl": True}}, "added_rows": [], "deleted_rows": []}
+    app.run().button(key=f"remove_ProductionMembership_person_id_{person_id}").click().run()
     assert not app.exception
     assert not app.error
     assert app.tabs[1].label == "Productions :grey-badge[3]"
     assert app.dataframe[1].value["production_id"].tolist() == ["Latest", "Old", "Unknown"]
     assert app.dataframe[1].value["role_name"].tolist() == ["director", "actor", "actor"]
+    open_key = f"open_ProductionMembership_person_id_{person_id}"
+    assert app.button(key=open_key).disabled
+    editor_key = app.dataframe[1].proto.id.split("-", 2)[2]
+    app.session_state[editor_key] = {"edited_rows": {0: {"Auswahl": True}}, "added_rows": [], "deleted_rows": []}
+    switched = []
+    monkeypatch.setattr("streamlit.switch_page", lambda page, query_params: switched.append((page, query_params)))
+    app.run().button(key=open_key).click().run()
+    with Session(db) as session:
+        latest = session.exec(select(Production).where(Production.name == "Latest")).one()
+    assert switched == [("management/productions.py", {"production": [str(latest.id)]})]
+
+
+def test_management_pages_deeplink_selected_record_and_tab(db) -> None:
+    production = Production(name="Deep Link")
+    production_id = production.id
+    with Session(db) as session:
+        session.add_all([Production(name=f"Production {i:03}") for i in range(60)] + [production])
+        session.commit()
+    app = AppTest.from_file(str(PRODUCTION_APP))
+    app.query_params["production"] = str(production_id)
+    app.run()
+    assert not app.exception
+    assert app.text_input(key=f"edit_production_{production_id}_field_name").value == "Deep Link"
+    person = Person(name="Ada")
+    person_id = person.id
+    with Session(db) as session:
+        session.add(person)
+        session.commit()
+    app = AppTest.from_file(str(PERSON_APP))
+    app.query_params.update(person=str(person_id), tab="Text Contributions")
+    app.run()
+    assert not app.exception
+    assert app.session_state[f"detail_tabs_Person_{person_id}"] == "Text Contributions :grey-badge[0]"
+    assert app.tabs[2].label == "Text Contributions :grey-badge[0]"
 
 
 def test_person_text_editor_edits_and_deletes_only_links(db) -> None:

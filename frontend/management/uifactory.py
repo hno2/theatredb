@@ -604,14 +604,16 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
     revision_key = f"{editor_key}_revision"
     merge = cast(dict | None, relation.get("merge"))
     epoch = st.session_state.get(f"table_epoch_{merge['kind']}", 0) if merge else 0
-    if merge:
-        # Built-in row ticks never reach Python before trash is pressed, so merge tables
+    open_link = cast(dict | None, relation.get("open"))
+    selectable = bool(merge or open_link)
+    if selectable:
+        # Built-in row ticks never reach Python before trash is pressed, so selectable tables
         # use one rerunning checkbox column instead (num_rows="fixed" hides the built-in ones).
         df.insert(0, "Auswahl", False)
         column_config["Auswahl"] = st.column_config.CheckboxColumn("Auswahl", width="small")
     edited = st.data_editor(
         df,
-        num_rows="fixed" if merge else "delete" if relation.get("sortable") else "dynamic",
+        num_rows="fixed" if selectable else "delete" if relation.get("sortable") else "dynamic",
         hide_index=True,
         key=f"{editor_key}_{st.session_state.get(revision_key, 0)}_{epoch}",
         column_config=column_config,
@@ -624,26 +626,41 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
         save = st.button(
             f"Save {relation.get('title', child_name)}", key=save_key, type="primary", icon=":material/save:"
         )
-        if merge:
-            selected = [row_id for row_id in edited.loc[edited["Auswahl"], "__id"] if row_id]
-            targets = {_id_of(m): str(getattr(m, merge["field"])) for m in members}
-            ids = dict.fromkeys(targets[row_id] for row_id in selected if row_id in targets)
-            render_merge_action(merge["kind"], [{"id": value} for value in ids], actor, confirm=True)
+        selected = [row_id for row_id in edited.loc[edited["Auswahl"], "__id"] if row_id] if selectable else []
+        members_by_id = {_id_of(m): m for m in members}
+        if open_link:
+            targets = [str(getattr(members_by_id[row_id], open_link["field"])) for row_id in selected]
             if st.button(
-                "Entfernen",
-                key=f"remove_{relation_key}_{parent_id}",
-                icon=":material/delete:",
-                disabled=not selected,
-                help="Ausgewählte Verknüpfungen löschen; die Texte selbst bleiben erhalten.",
+                open_link["label"],
+                key=f"open_{relation_key}_{parent_id}",
+                icon=":material/open_in_new:",
+                disabled=len(targets) != 1,
+                help="Genau eine Zeile ankreuzen, um sie auf ihrer Verwaltungsseite zu öffnen.",
             ):
-                for row_id in selected:
-                    delete_entity(child_model, entity_id=row_id, actor_id=actor)
-                st.session_state["_flash"] = f"{len(selected)} Verknüpfung(en) entfernt."
-                st.session_state[revision_key] = st.session_state.get(revision_key, 0) + 1
-                _clear_choice_caches()
-                st.rerun()
-    if merge:
-        st.caption("Zeilen ankreuzen: Zusammenführen führt die Texte zusammen, Entfernen löscht nur die Verknüpfungen.")
+                st.switch_page(open_link["page"], query_params={open_link["field"].removesuffix("_id"): targets})
+        if merge:
+            ids = dict.fromkeys(str(getattr(members_by_id[row_id], merge["field"])) for row_id in selected)
+            render_merge_action(merge["kind"], [{"id": value} for value in ids], actor, confirm=True)
+        if selectable and st.button(
+            "Entfernen",
+            key=f"remove_{relation_key}_{parent_id}",
+            icon=":material/delete:",
+            disabled=not selected,
+            help="Ausgewählte Verknüpfungen löschen; die verknüpften Datensätze bleiben erhalten.",
+        ):
+            for row_id in selected:
+                delete_entity(child_model, entity_id=row_id, actor_id=actor)
+            st.session_state["_flash"] = f"{len(selected)} Verknüpfung(en) entfernt."
+            st.session_state[revision_key] = st.session_state.get(revision_key, 0) + 1
+            _clear_choice_caches()
+            st.rerun()
+    if selectable:
+        st.caption(
+            "Zeilen ankreuzen: "
+            + ("Öffnen zeigt den Datensatz, " if open_link else "")
+            + ("Zusammenführen führt die Texte zusammen, " if merge else "")
+            + "Entfernen löscht nur die Verknüpfungen."
+        )
 
     if save:
         for f in fields:
@@ -854,6 +871,19 @@ def _render_inline_relations(  # ruff: ignore[complex-structure]
                 st.rerun()
 
 
+def _tab_name(label: str) -> str:
+    return label.split(" :grey-badge[", maxsplit=1)[0]
+
+
+def _sync_tab_url(key: str) -> None:
+    # bind="query-params" would put the badge count into the URL, so sync the bare tab name.
+    name = _tab_name(st.session_state[key])
+    if name == "Edit":
+        st.query_params.pop("tab", None)
+    else:
+        st.query_params["tab"] = name
+
+
 def _render_selected_tabs(
     model_cls: type[SQLModel],
     fields: list[_FieldUI],
@@ -873,9 +903,9 @@ def _render_selected_tabs(
             ).one()
             labels.append(f"{relation['title']} :grey-badge[{count}]")
     key = f"detail_tabs_{model_cls.__name__}_{parent_id}"
-    active = st.session_state.get(key, "Edit").split(" :grey-badge[")[0]
-    st.session_state[key] = next(label for label in labels if label.split(" :grey-badge[")[0] == active)
-    tabs = st.tabs(labels, key=key, on_change="rerun")
+    active = st.query_params.get("tab") or _tab_name(st.session_state.get(key, "Edit"))
+    st.session_state[key] = next((label for label in labels if _tab_name(label) == active), labels[0])
+    tabs = st.tabs(labels, key=key, on_change=_sync_tab_url, args=(key,))
     if tabs[0].open:
         with tabs[0]:
             _render_edit_form(model_cls, fields, row, actor)
@@ -903,26 +933,30 @@ def _load_df(
 ) -> tuple[pd.DataFrame, int]:
     offset = (page - 1) * PAGE_SIZE
     filters = filters or []
+    kind = model_cls.__name__.lower()
     if model_cls is Person:
         matches = count_people_for_merge(search, filters)
         rows = search_people_for_merge(search, limit=PAGE_SIZE, offset=offset, filters=filters)
-        if st.session_state.get("table_selection_epoch_person") == st.session_state.get("table_epoch_person", 0):
-            selected = set(st.session_state.get("table_selected_person", []))
-            missing = selected - {row["id"] for row in rows}
-            if missing:
-                extra = search_people_for_merge(
-                    "", limit=None, filters=[col(Person.id).in_([UUID(value) for value in missing])]
-                )
-                if missing - {row["id"] for row in extra}:
-                    st.warning("Einige ausgewählte Personen existieren nicht mehr und wurden abgewählt.")
-                rows = extra + rows
-                if extra:
-                    st.caption("Ausgewählte Personen außerhalb der aktuellen Trefferseite werden zusätzlich angezeigt.")
-        for row in rows:
-            row["Produktionen · Theater"] = "; ".join(row.pop("productions"))
     else:
         entities, matches = entity_page(model_cls, search, limit=PAGE_SIZE, offset=offset, filters=filters)
         rows = [_entity_to_row(e) for e in entities]
+    if st.session_state.get(f"table_selection_epoch_{kind}") == st.session_state.get(f"table_epoch_{kind}", 0):
+        missing = set(st.session_state.get(f"table_selected_{kind}", [])) - {row["id"] for row in rows}
+        if missing:
+            ids = {UUID(value) for value in missing}
+            extra = (
+                search_people_for_merge("", limit=None, filters=[col(Person.id).in_(ids)])
+                if model_cls is Person
+                else [_entity_to_row(e) for e in entities_by_ids(model_cls, ids)]
+            )
+            if missing - {row["id"] for row in extra}:
+                st.warning("Einige ausgewählte Einträge existieren nicht mehr und wurden abgewählt.")
+            rows = extra + rows
+            if extra:
+                st.caption("Ausgewählte Einträge außerhalb der aktuellen Trefferseite werden zusätzlich angezeigt.")
+    if model_cls is Person:
+        for row in rows:
+            row["Produktionen · Theater"] = "; ".join(row.pop("productions"))
     df = pd.DataFrame(rows)
     if not df.empty and "id" in df.columns:
         df = df.set_index("id", drop=False)
@@ -1159,13 +1193,19 @@ def _render_table(
         for field in ("organization", "text"):
             if field in df_view.columns:
                 df_view[field] = df_view[field].map(lambda value: [value] if value else [])
-    key = f"table_{model_cls.__name__.lower()}_{stable_digest(df['id'].tolist())}"
+    kind = model_cls.__name__.lower()
+    epoch = st.session_state.get(f"table_epoch_{kind}", 0)
+    key = f"table_{kind}_{epoch}_{stable_digest(df['id'].tolist())}"
+    url_selected = st.session_state.get(f"table_selected_{kind}", [])[:1]
     sel = st.dataframe(
         df_view,
         hide_index=True,
         key=key,
         on_select="rerun",
         selection_mode="single-row",
+        selection_default={
+            "selection": {"rows": [index for index, value in enumerate(df.index) if value in url_selected]}
+        },
         column_order=_management_column_order(df_view, model_cls),
         column_config=_management_column_config(df_view, model_cls),
     )
@@ -1277,37 +1317,39 @@ def _render_item_count(model_cls: type[SQLModel], count: int) -> None:
     st.caption(f"{count} {label} insgesamt")
 
 
-def _restore_person_url_selection() -> None:
-    values = st.query_params.get_all("person")
-    if st.session_state.get("_person_selection_url") == values:
+def _restore_url_selection(kind: str) -> None:
+    values = st.query_params.get_all(kind)
+    if st.session_state.get(f"_selection_url_{kind}") == values:
         return
-    if "_person_selection_url" in st.session_state:
-        st.session_state["table_epoch_person"] = st.session_state.get("table_epoch_person", 0) + 1
+    if f"_selection_url_{kind}" in st.session_state:
+        st.session_state[f"table_epoch_{kind}"] = st.session_state.get(f"table_epoch_{kind}", 0) + 1
     selected = []
     for value in values:
         try:
             selected.append(str(UUID(value)))
         except ValueError:
-            st.warning("Ungültige Personen-ID in der URL; dieser Eintrag wurde nicht ausgewählt.")
-    st.session_state["table_selected_person"] = list(dict.fromkeys(selected))
-    st.session_state["table_selection_epoch_person"] = st.session_state.get("table_epoch_person", 0)
-    st.session_state["_person_selection_url"] = values
+            st.warning("Ungültige ID in der URL; dieser Eintrag wurde nicht ausgewählt.")
+    st.session_state[f"table_selected_{kind}"] = list(dict.fromkeys(selected))
+    st.session_state[f"table_selection_epoch_{kind}"] = st.session_state.get(f"table_epoch_{kind}", 0)
+    st.session_state[f"_selection_url_{kind}"] = values
 
 
-def _sync_person_url_selection(selected: list[str]) -> None:
-    # data_editor does not support bind="query-params".
-    if st.query_params.get_all("person") != selected:
+def _sync_url_selection(kind: str, selected: list[str]) -> None:
+    # data_editor and dataframe selections do not support bind="query-params".
+    st.session_state[f"table_selected_{kind}"] = selected
+    if st.query_params.get_all(kind) != selected:
         if selected:
-            st.query_params["person"] = selected
+            st.query_params[kind] = selected
         else:
-            st.query_params.pop("person", None)
-    st.session_state["_person_selection_url"] = selected
+            st.query_params.pop(kind, None)
+    if len(selected) != 1:
+        st.query_params.pop("tab", None)
+    st.session_state[f"_selection_url_{kind}"] = selected
 
 
 def _render_crud_page(model_cls: type[SQLModel], fields: list[_FieldUI]) -> pd.DataFrame:
     kind = model_cls.__name__.lower()
-    if model_cls is Person:
-        _restore_person_url_selection()
+    _restore_url_selection(kind)
     query = st.text_input(
         "Alle Einträge durchsuchen",
         key=f"crud_search_{kind}",
@@ -1379,8 +1421,7 @@ def render_sqlmodel_crud(
     if merge_kind == "text" and not df.empty:
         df["Autoren"] = _page_authors(df)
     selected = [] if df.empty else _render_table(df, fields, model_cls, merge_kind=merge_kind, actor=actor)
-    if model_cls is Person:
-        _sync_person_url_selection([str(row["id"]) for row in selected])
+    _sync_url_selection(model_cls.__name__.lower(), [str(row["id"]) for row in selected])
     if merge_kind:
         st.caption(
             "Einträge auf dieser Seite zum Bearbeiten oder Zusammenführen auswählen. "

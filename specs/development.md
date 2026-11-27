@@ -88,16 +88,21 @@ free-text fields such as URLs and descriptions never become dropdowns.
 Person details use Edit, Productions and Text Contributions tabs with link
 counts. Relation tables support header sorting, editing and row deletion;
 changes persist on Save. Add links using the form below the table.
-Text Contributions use an `Auswahl` checkbox column (built-in row ticks never
+Productions and Text Contributions use an `Auswahl` checkbox column (built-in row ticks never
 reach Python in `st.data_editor`). With two or more ticked, Zusammenführen
 (next to the green Save) opens a dialog asking which text survives and reuses
 the regular text merge; Entfernen deletes the ticked links only. Text
 Contributions sort alphabetically by title. Foreign-key pickers share a
 five-minute `_fk_choices` cache, cleared after any management save or merge.
 Productions include theatre and premiere year, newest premiere first.
-Selected people are stored as repeated `person=<UUID>` URL parameters and
-restored on reload. Selected rows outside the current results page remain
-visible until deselected; unrelated URL parameters are preserved.
+Every management page stores its selection as repeated `<kind>=<UUID>` URL
+parameters (`person`, `text`, `production`, `organization`, `award`, `source`)
+and restores it on reload, so records can be deep-linked. Selected rows outside
+the current results page remain visible until deselected; unrelated URL
+parameters are preserved. The open person tab is stored as `tab=<name>`
+(e.g. `tab=Productions`; omitted for Edit). In the Productions and Text
+Contributions tabs, tick exactly one row to open the linked record on its
+management page.
 The production add form searches after two typed characters (500 ms debounce)
 instead of loading all productions. Up to 50 suggestions, including theatre
 and year, appear newest first with a loading spinner. Suggestions and linked

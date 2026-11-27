@@ -32,6 +32,7 @@ def main() -> None:
                 "editable_table": True,
                 "sortable": True,
                 "production_context": True,
+                "open": {"page": "management/productions.py", "field": "production_id", "label": "Produktion öffnen"},
                 "fk_autocreate": {
                     "production_id": {
                         "payload_field": "name",
@@ -56,6 +57,7 @@ def main() -> None:
                 "editable_table": True,
                 "sortable": True,
                 "merge": {"kind": "text", "field": "text_id"},
+                "open": {"page": "management/texts.py", "field": "text_id", "label": "Text öffnen"},
                 "sort_by": "text_id",
                 "field_overrides": {
                     "text_id": {
