@@ -71,6 +71,8 @@ def _complete(kind: str, preview: dict, actor: str, choices: dict[str, str]) -> 
         choices=choices,
     )
     st.session_state.pop(f"merge_preview_{kind}", None)
+    # Merged-away records must vanish from every cached picker and filter.
+    st.cache_data.clear()
     st.session_state[f"table_epoch_{kind}"] = st.session_state.get(f"table_epoch_{kind}", 0) + 1
     st.session_state["_flash"] = f"{len(preview['records'])} {ENTITY_LABELS[kind]} zusammengeführt."
     st.rerun()
@@ -193,8 +195,8 @@ def _merge_dialog(kind: str, actor: str) -> None:
         st.rerun()
 
 
-def render_merge_action(kind: str, rows: list[dict], actor: str | None) -> None:
-    """Merge a native table selection immediately or show a conflict dialog."""
+def render_merge_action(kind: str, rows: list[dict], actor: str | None, *, confirm: bool = False) -> None:
+    """Merge a native table selection immediately or show a conflict dialog; confirm always asks."""
     ids = [row["id"] for row in rows]
     key = f"merge_preview_{kind}"
     preview = st.session_state.get(key)
@@ -206,7 +208,7 @@ def render_merge_action(kind: str, rows: list[dict], actor: str | None) -> None:
         except ERRORS as exc:
             st.error(f"Zusammenführung fehlgeschlagen: {exc}")
         else:
-            if any(field["conflict"] for field in preview["fields"]):
+            if confirm or any(field["conflict"] for field in preview["fields"]):
                 st.session_state[key] = preview
                 st.session_state.pop(f"merge_survivor_{kind}", None)
             else:
