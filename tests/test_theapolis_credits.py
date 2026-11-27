@@ -185,6 +185,19 @@ def test_profile_name_fallback_is_order_independent(db, first, second, expected)
     assert set(person.alt_names) == {first, second} - {expected}
 
 
+def test_profile_name_fallback_prefers_most_credited_plain_name(db):
+    def item(identity, name, **extra: object):
+        return {"id": identity, "name": "Play", **_detail(_credit("profile:77608", name=name, **extra))}
+
+    used = {"used_name": True}
+    mapping = _import(
+        db, 1, item(1, "Claudia Roth"), item(2, "Regieassistenz", **used), item(3, "Regieassistenz", **used)
+    )
+    person = db[0].get(Person, mapping["detail:profile:77608"])
+    assert person is not None
+    assert (person.name, person.alt_names) == ("Claudia Roth", ["Regieassistenz"])
+
+
 def test_official_profile_name_wins_and_manual_main_name_is_preserved(db):
     item = {"id": 1, "name": "Play", **_detail(_credit("profile:157005", name="Bernhard Niechotz"))}
     mapping = _import(db, 1, item)

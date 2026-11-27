@@ -780,6 +780,8 @@ def _participation_credit(row: dict) -> dict:
         "character": row.get("roleName") or None,
         **({"profile_url": canonical_url(profile["url"])} if profile.get("url") else {}),
         **({"profile_name": _name(profile)} if profile.get("name") else {}),
+        # Without a custom credit name, Theapolis shows the profile's main name, so no profile lookup is needed.
+        **({"used_name": True} if row.get("usedNameCheck") or (row.get("usedName") or "").strip() else {}),
     }
 
 
@@ -822,8 +824,33 @@ async def _participations(session: aiohttp.ClientSession, identity: str) -> dict
     return entry
 
 
-async def _profile_main_name(session: aiohttp.ClientSession, identity: str) -> str:
-    result = json.loads(await _fetch(session, f"{SITE}/api/de/profiles/{identity}"))
+def _credits_needing_profile_name(entry: dict) -> list[tuple[dict, str]]:
+    return [
+        (credit, match[1])
+        for credit in entry["theapolis_detail"]["credits"]
+        if credit.get("used_name") and (match := re.fullmatch(r"profile:(\d+)", str(credit["person_id"])))
+    ]
+
+
+async def _production_credits(session: aiohttp.ClientSession, identity: str, *, listed_empty: bool) -> dict:
+    # The list's participant count is never zero for productions with credits (verified on 11k productions).
+    if listed_empty:
+        return {
+            "production_id": identity,
+            "theapolis_detail_status": "confirmed_empty",
+            "theapolis_detail": {"credits": []},
+        }
+    return await _participations(session, identity)
+
+
+async def _profile_main_name(session: aiohttp.ClientSession, identity: str) -> str | None:
+    try:
+        result = json.loads(await _fetch(session, f"{SITE}/api/de/profiles/{identity}"))
+    except aiohttp.ClientResponseError as error:
+        # Deleted or unpublished profiles still appear in participations; credit names remain the fallback.
+        if error.status != 404:
+            raise
+        return None
     if result.get("success") is not True or str(result["data"].get("id")) != identity:
         raise ValueError(f"Theapolis rejected profile identity {identity}")
     return _name(result["data"])
@@ -834,36 +861,44 @@ async def _download_participations(
 ) -> None:
     archive.reuse_participations(run)
     targets = list(archive.detail_targets(run, time() - PARTICIPATION_CACHE_AGE))
-    LOG.info("Theapolis participations: %s productions need first capture or refresh", len(targets))
+    empty = archive.without_participants(run)
+    LOG.info(
+        "Theapolis participations: %s productions need first capture or refresh, %s listed without participants",
+        len(targets),
+        len(empty.intersection(targets)),
+    )
     pending: list[tuple[str, dict, float]] = []
     names = archive.cached("profile-name", time() - PROFILE_CACHE_AGE)
-    lookups: dict[str, asyncio.Task[str]] = {}
+    lookups: dict[str, asyncio.Task[str | None]] = {}
     profile_slots = asyncio.Semaphore(concurrency)
 
-    async def profile_name(identity: str) -> str:
+    async def profile_name(identity: str) -> str | None:
+        if identity in names:
+            return names[identity]
         async with profile_slots:
             name = await _profile_main_name(session, identity)
         archive.cache_profile_name(identity, name, time())
         names[identity] = name
         return name
 
+    def lookup(identity: str) -> asyncio.Task[str | None]:
+        if identity not in lookups:
+            lookups[identity] = asyncio.create_task(profile_name(identity))
+        return lookups[identity]
+
     async def enrich(entry: dict) -> None:
-        for credit in entry["theapolis_detail"]["credits"]:
-            if match := re.fullmatch(r"profile:(\d+)", str(credit["person_id"])):
-                identity = match[1]
-                if identity not in names:
-                    if identity not in lookups:
-                        lookups[identity] = asyncio.create_task(profile_name(identity))
-                    names[identity] = await lookups[identity]
-                credit["profile_name"] = names[identity]
+        # Lookups run concurrently; awaiting them one by one made each production wait for every new profile.
+        credits = _credits_needing_profile_name(entry)
+        found = await asyncio.gather(*(lookup(identity) for _, identity in credits))
+        for (credit, _), name in zip(credits, found, strict=True):
+            credit["profile_name"] = name
 
     def checkpoint() -> None:
-        if pending:
-            archive.put_participations(run, pending)
-            pending.clear()
+        archive.put_participations(run, pending)
+        pending.clear()
 
     async def fetch(identity: str) -> None:
-        entry = await _participations(session, identity)
+        entry = await _production_credits(session, identity, listed_empty=identity in empty)
         await enrich(entry)
         validate_detail(entry)
         pending.append((identity, entry, time()))
@@ -1070,17 +1105,20 @@ def _detail_credit(row: object) -> tuple[str, str, str, str, str | None, list[st
     return key, name, raw_role, role, normalize_character(character), aliases
 
 
-def _preferred_credit_name(names: list[str]) -> str:
-    def score(name: str) -> tuple[int, int, int, int]:
+def _preferred_credit_name(names: list[str], counts: dict[str, int]) -> str:
+    # One-off credit names can be role labels (e.g. "Regieassistenz"), so frequency outranks form.
+    def score(name: str) -> tuple[int, int, int, int, int]:
         accents = sum(unicodedata.combining(char) != 0 for char in unicodedata.normalize("NFD", name))
         words = name.split()
         initials = sum(bool(re.fullmatch(r"[^\W\d_]\.", word)) for word in words)
-        return accents, name.count("-"), -initials, -len(words)
+        return counts.get(name, 0), accents, name.count("-"), -initials, -len(words)
 
     return max(names, key=score)
 
 
-def _detail_person(people: dict, key: str, name: str, profile_name: str | None = None) -> dict:
+def _detail_person(
+    people: dict, key: str, name: str, profile_name: str | None = None, *, used_name: bool = False
+) -> dict:
     person = people.setdefault(key, {"name": name, "type": [], "legacy_ids": set(), "alt_names": []})
     if person["name"] != name:
         if not re.fullmatch(r"detail:profile:\d+", key):
@@ -1091,13 +1129,15 @@ def _detail_person(people: dict, key: str, name: str, profile_name: str | None =
             person["name"],
             name,
         )
+    counts = person.setdefault("_name_counts", {})
+    counts[name] = counts.get(name, 0) + (not used_name)
     names = list(dict.fromkeys([person["name"], *person["alt_names"], name]))
     if profile_name:
         if person.get("_profile_name") not in (None, profile_name):
             raise ValueError(f"Conflicting Theapolis main names for profile {key}")
         person["_profile_name"] = profile_name
         names = list(dict.fromkeys([*names, profile_name]))
-    person["name"] = person.get("_profile_name") or _preferred_credit_name(names)
+    person["name"] = person.get("_profile_name") or _preferred_credit_name(names, counts)
     person["alt_names"] = [value for value in names if value != person["name"]]
     return person
 
@@ -1157,7 +1197,7 @@ def _add_detail_people(
     for row in rows:
         credit = _detail_credit(row)
         key, name, raw_role, role, character, aliases = credit
-        person = _detail_person(people, key, name, _credit_profile_name(row))
+        person = _detail_person(people, key, name, _credit_profile_name(row), used_name=row.get("used_name") is True)
         if row.get("profile_url"):
             url = person["profile_url"] = canonical_url(row["profile_url"])
             if profile_matches is not None:
@@ -1300,7 +1340,7 @@ def _prepare_import(
             canonical_url(url) if url else None,
         )
     _set_profile_matches(people, profile_matches, alias_owners)
-    metadata = {"profile_url", "legacy_ids", "matched_legacy_ids", "_profile_name"}
+    metadata = {"profile_url", "legacy_ids", "matched_legacy_ids", "_profile_name", "_name_counts"}
     for key, payload in people.items():
         people[key] = validate_payload(
             EntityType.PERSON,

@@ -182,17 +182,20 @@ name and text matching described below.
 The public production list exposes directors and creators, not complete cast
 and crew. Normal archive `download` now also fetches the paginated JSON API
 `/api/de/productions/{id}/participations` for every production missing fresh
-credits. Cast, characters, music, crew and assistants are retained, along with
+credits; productions the list reports with `numberOfParticipants: 0` are stored
+as confirmed empty without a request. Cast, characters, music, crew and assistants are retained, along with
 the raw API evidence. Profile IDs are scoped separately from creator/director
 IDs; missing profiles use participation-scoped IDs, never guessed name matches.
 Different credit names for the same numeric profile ID retain one person.
-The downloader fetches that profile's official `name` from
-`/api/de/profiles/{id}`, once per profile with a 30-day SQLite cache.
+A credit without a custom name (`usedNameCheck`/`usedName`) shows the profile's
+main name, so the downloader fetches the official `name` from
+`/api/de/profiles/{id}` only for credits with a custom name (about 2%), once per
+profile with a 30-day SQLite cache; a deleted profile (404) keeps the fallback.
 That name takes precedence; other observed names are stored in `Person.alt_names`
 and stay unchanged in the production's source context and raw evidence.
-When the official name is unavailable in an older archive or supplied feed,
-fallback selection prefers accents and umlauts, hyphenated names and spelled-out
-initials; otherwise it prefers fewer name parts. Thus `Clarke-Hasters` wins over
+Otherwise the name on most credits without a custom name wins; ties prefer
+accents and umlauts, hyphenated names and spelled-out initials, then fewer name
+parts. Thus `Clarke-Hasters` wins over
 `Clarke`, `Hans Herbert Diehl` over `Hans H. Diehl`, and `Martina Mann` over
 `Martina Beate Mann`. These rules select names within an established identity,
 never merge separate people. Manual main-name edits are not overwritten;

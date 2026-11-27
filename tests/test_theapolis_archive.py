@@ -2,9 +2,10 @@ import asyncio
 import copy
 import json
 from time import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, urlsplit
 
+import aiohttp
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 from streamlit.testing.v1 import AppTest
@@ -244,28 +245,34 @@ def test_api_participations_pagination_preserves_crew_and_rejects_incomplete(mon
         asyncio.run(run())
 
 
-def test_profile_main_name_is_cached_once_and_attached_to_credits(tmp_path, monkeypatch):
+@pytest.mark.parametrize("main_name", ["Bernhard Bruchhardt", None])
+def test_profile_main_name_is_cached_once_and_attached_to_credits(tmp_path, monkeypatch, main_name):
     requested = []
 
     async def participations(_session, identity):
         await asyncio.sleep(0)
+        assert identity != "3"
+        credits = [
+            {"person_id": "profile:157005", "name": "Bernhard Niechotz", "role": "Spiel", "used_name": True},
+            {"person_id": "profile:9", "name": "Plain Name", "role": "Regie"},
+        ]
         return {
             "production_id": identity,
             "theapolis_detail_status": "parsed",
-            "theapolis_detail": {
-                "credits": [{"person_id": "profile:157005", "name": "Bernhard Niechotz", "role": "Spiel"}]
-            },
+            "theapolis_detail": {"credits": credits},
         }
 
     async def fetch(_session, url):
         requested.append(url)
         await asyncio.sleep(0)
-        return json.dumps({"success": True, "data": {"id": 157005, "name": "Bernhard Bruchhardt"}}).encode()
+        if main_name is None:
+            raise aiohttp.ClientResponseError(Mock(), (), status=404)
+        return json.dumps({"success": True, "data": {"id": 157005, "name": main_name}}).encode()
 
     monkeypatch.setattr(theapolis, "_participations", participations)
     monkeypatch.setattr(theapolis, "_fetch", fetch)
     with open_archive(tmp_path / "archive.sqlite3", write=True) as archive:
-        write_run(archive, [production(1), production(2)])
+        write_run(archive, [production(1), production(2), {**production(3), "numberOfParticipants": 0}])
 
         async def download(run):
             async with theapolis._session(2) as session:
@@ -274,10 +281,13 @@ def test_profile_main_name_is_cached_once_and_attached_to_credits(tmp_path, monk
         run = archive.begin_details()
         asyncio.run(download(run))
         archive.seal(run)
-        for item in archive.items(run):
-            credit = item["theapolis_detail"]["credits"][0]
+        items = {item["id"]: item for item in archive.items(run)}
+        assert items[3]["theapolis_detail_status"] == "confirmed_empty"
+        for identity in (1, 2):
+            credit, plain = items[identity]["theapolis_detail"]["credits"]
             assert credit["name"] == "Bernhard Niechotz"
-            assert credit["profile_name"] == "Bernhard Bruchhardt"
+            assert credit.get("profile_name") == main_name
+            assert "profile_name" not in plain
         archive.db.execute("delete from cache where kind = 'participations-v2'")
         archive.db.commit()
         run = archive.begin_details()

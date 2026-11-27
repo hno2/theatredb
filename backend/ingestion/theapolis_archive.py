@@ -268,13 +268,21 @@ class Archive:
             )
         return run
 
-    def cache_profile_name(self, identity: str, name: str, captured_at: float) -> None:
+    def cache_profile_name(self, identity: str, name: str | None, captured_at: float) -> None:
         """Stage the provider's main name separately from name-based profile lookups."""
         self.db.execute(
             """insert into cache values ('profile-name', ?, ?, ?)
                on conflict(kind, key) do update set hash = excluded.hash, captured_at = excluded.captured_at""",
             (identity, self._put(name), captured_at),
         )
+
+    def without_participants(self, run: int) -> set[str]:
+        """Production IDs the list reports with zero participants."""
+        return {
+            identity
+            for identity, raw in self.db.execute("select id, raw from item where run = ?", (run,))
+            if self._read(raw)[0].get("numberOfParticipants") == 0
+        }
 
     def detail_targets(self, run: int, since: float) -> Iterator[str]:
         """Yield production IDs without fresh API participation evidence."""
