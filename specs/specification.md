@@ -117,15 +117,19 @@ administrative tools for imports, review, and data maintenance.
   are the authorities for people, texts and theatres, behind one provider
   interface (`backend/authority_match.py`). Selecting a person, theatre or
   family-root text in management looks both up automatically (linked record,
-  else name search, cached for a day); several hits come as a selectbox with an
-  "Eintrag öffnen" link, and one click ("Bestätigen & leere Felder füllen")
-  links the ID as a reviewed `EntitySource` and fills blank fields only: person
+  else name search, cached for a day) and shows them side by side: a selectbox
+  per authority (with "— nicht übernehmen —") and an "Eintrag öffnen" link. The
+  chosen GND record's Wikidata link preselects that item. If the two records
+  name each other they are shown as matching; if one names a different ID,
+  applying is blocked. One click ("Bestätigen & übernehmen") links both IDs as
+  reviewed `EntitySource`s in one transaction and fills blank fields only: person
   life dates, gender and up to 10 Latin-script same-surname variants; text
   creation/publication dates, genre (GND work form), titles, authors/composers
-  and selected direct predecessors (`based_on`, one hop); theatre founding and
-  closing dates (GND predecessor/successor bodies are only reported). A finer
-  date agreeing with a coarser stored one refines it; other differences are
-  reported as conflicts. Same-name local records are reported, never merged.
+  and selected direct predecessors (`based_on`, one hop, one list for both);
+  theatre founding and closing dates (GND predecessor/successor bodies are only
+  reported); a blank description from Wikidata. Dates keep the most precise
+  agreeing value whatever the source order (1749 and 1749-08-28 give the day);
+  other differences are reported as conflicts. Same-name local records are reported, never merged.
 - High confidence needs evidence beyond the name: a GND↔Wikidata cross-link
   (GND `sameAs`, Wikidata P227), or an exact name/title plus a matching life
   year, an author already linked to the same authority, or the theatre's city

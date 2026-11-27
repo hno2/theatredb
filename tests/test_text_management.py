@@ -385,7 +385,7 @@ def test_wikidata_enrichment_requires_button(db, monkeypatch):
     app.session_state[key] = {"edited_rows": {0: {"Auswahl": True}}, "added_rows": [], "deleted_rows": []}
     app.run()
     assert not calls
-    buttons = [b for b in app.button if b.label == "Bestätigen & leere Felder füllen"]
+    buttons = [b for b in app.button if b.label == "Bestätigen & übernehmen"]
     assert len(buttons) == 1  # GND is offline in tests, only the Wikidata hit is offered
     buttons[0].click()
     app.run()

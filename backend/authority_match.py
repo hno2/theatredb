@@ -177,6 +177,15 @@ def evidence(
     return _organization_evidence(entity, provider, record)
 
 
+def agreement(gnd_record: dict, wikidata_record: dict) -> bool | None:
+    """True if either record names the other, False if one names a different ID, None without cross-links."""
+    gnd_id, qid = GND.record_id(gnd_record), WIKIDATA.record_id(wikidata_record)
+    declared = [(GND.cross_ids(gnd_record), qid), (WIKIDATA.cross_ids(wikidata_record), gnd_id)]
+    if any(other in ids for ids, other in declared):
+        return True
+    return False if any(ids for ids, _ in declared) else None
+
+
 def _cross_link(
     session: Session, provider: Provider, kind: EntityType, entity_id: uuid.UUID, fetch: Callable[[Provider, str], dict]
 ) -> tuple[str, str] | None:

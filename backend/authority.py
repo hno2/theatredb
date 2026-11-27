@@ -88,26 +88,33 @@ def attach_identity(
 _ORDER = list(DatePrecision)
 
 
-def _refines(entity: object, field: str, value: object, precision: DatePrecision | None) -> bool:
-    """A finer date agreeing with the stored coarser one (1749 -> 1749-08-28) adds detail, not a conflict."""
+def _agrees(fine: object, coarse: object, precision: DatePrecision) -> bool:
+    parts = {DatePrecision.YEAR: ("year",), DatePrecision.MONTH: ("year", "month")}.get(precision)
+    return parts is not None and all(getattr(fine, p) == getattr(coarse, p) for p in parts)
+
+
+def _compare(entity: object, field: str, value: object, precision: DatePrecision | None) -> int:
+    """+1 if ``value`` refines the stored agreeing date (1749 -> 1749-08-28), -1 if it is a coarser agreeing one."""
     current, stored = getattr(entity, field), getattr(entity, f"{field}_precision", None)
-    if precision is None or stored is None or _ORDER.index(precision) <= _ORDER.index(stored):
-        return False
-    parts = {DatePrecision.YEAR: ("year",), DatePrecision.MONTH: ("year", "month")}.get(stored)
-    return parts is not None and all(getattr(current, p) == getattr(value, p) for p in parts)
+    if precision is None or stored is None or precision == stored:
+        return 0
+    if _ORDER.index(precision) > _ORDER.index(stored):
+        return 1 if _agrees(value, current, stored) else 0
+    return -1 if _agrees(current, value, precision) else 0
 
 
 def fill(entity: object, field: str, value: object, report: dict, precision: DatePrecision | None = None) -> None:
-    """Set blank fields (or refine a coarser agreeing date); a different value is reported, never overwritten."""
+    """Set blank fields, keeping the most precise agreeing date; a different value is reported, never overwritten."""
     if value is None:
         return
     current = getattr(entity, field)
-    if current in (None, "", []) or _refines(entity, field, value, precision):
+    order = _compare(entity, field, value, precision)
+    if current in (None, "", []) or order == 1:
         setattr(entity, field, value)
         if precision is not None:
             setattr(entity, f"{field}_precision", precision)
         report["filled"].append(field)
-    elif current != value:
+    elif current != value and order == 0:
         report["conflicts"].append({"field": field, "current": str(current), "authority": str(value)})
 
 

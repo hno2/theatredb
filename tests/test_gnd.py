@@ -197,14 +197,34 @@ def _hit(gnd_id):
     return {"id": gnd_id, "label": record["preferredName"], "description": "", "url": "", "record": record}
 
 
-def test_panel_looks_up_on_selection_and_fills_after_one_click(tmp_path, monkeypatch):
+def _claim(value):
+    return {"mainsnak": {"snaktype": "value", "datavalue": {"value": value}}}
+
+
+GOETHE_WIKIDATA = {
+    "id": "Q5879",
+    "labels": {"de": {"value": "Johann Wolfgang von Goethe"}},
+    "descriptions": {"de": {"value": "deutscher Dichter"}},
+    "claims": {
+        "P569": [_claim({"time": "+1749-00-00T00:00:00Z", "precision": 9})],
+        "P227": [_claim("118540238")],
+    },
+}
+
+
+def test_panel_looks_up_both_and_fills_from_both_after_one_click(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'gnd-ui.db'}")
     SQLModel.metadata.create_all(engine)
     monkeypatch.setattr(user_management, "_get_engine", lambda: engine)
     monkeypatch.setattr(gnd, "search", lambda query, kind: [_hit("118540238")])
-    monkeypatch.setattr(wikidata, "search", lambda query, kind: [])
+    wikidata_hit = {"id": "Q5879", "label": "Goethe", "description": "", "url": "", "record": GOETHE_WIKIDATA}
+    monkeypatch.setattr(wikidata, "search", lambda query, kind: [wikidata_hit])
+    monkeypatch.setattr(gnd, "fetch_record", RECORDS.__getitem__)
+    monkeypatch.setattr(wikidata, "fetch_entity", lambda qid: GOETHE_WIKIDATA)
     with Session(engine) as db:
-        person = Person(name="Johann Wolfgang von Goethe", born=dt.datetime(1749, 1, 1))
+        person = Person(
+            name="Johann Wolfgang von Goethe", born=dt.datetime(1749, 1, 1), born_precision=DatePrecision.YEAR
+        )
         db.add(person)
         db.commit()
         person_id = str(person.id)
@@ -215,16 +235,35 @@ def test_panel_looks_up_on_selection_and_fills_after_one_click(tmp_path, monkeyp
     ).run()
     assert not app.exception
     assert any("Hohe Sicherheit" in s.value for s in app.success)
+    assert any("verweisen aufeinander" in s.value for s in app.success)
     with Session(engine) as db:
         unchanged = db.get(Person, person.id)
         assert unchanged is not None
         assert unchanged.died is None  # lookup alone never writes
-    next(b for b in app.button if b.label == "Bestätigen & leere Felder füllen").click().run()
+    [button] = [b for b in app.button if b.label == "Bestätigen & übernehmen"]
+    button.click().run()
+    assert not app.warning, [w.value for w in app.warning]
+    assert any(s.value.startswith("Übernommen: born, description, died, gender") for s in app.success)
     with Session(engine) as db:
         stored = db.get(Person, person.id)
         assert stored is not None
-        assert (stored.gender, stored.died) == ("m", dt.datetime(1832, 3, 22))
+        assert (stored.gender, stored.died, stored.description) == ("m", dt.datetime(1832, 3, 22), "deutscher Dichter")
+        assert (stored.born, stored.born_precision) == (dt.datetime(1749, 8, 28), DatePrecision.DAY)
+        assert (
+            gnd.identity(db, EntityType.PERSON, person.id),
+            wikidata.identity(db, EntityType.PERSON, person.id),
+        ) == (
+            "118540238",
+            "Q5879",
+        )
     engine.dispose()
+
+
+def test_contradicting_cross_link_is_not_a_match():
+    gnd_record = {**RECORDS["118540238"], "sameAs": [{"id": "http://www.wikidata.org/entity/Q1"}]}
+    assert authority_match.agreement(gnd_record, GOETHE_WIKIDATA) is True  # Wikidata P227 names the GND record
+    assert authority_match.agreement(gnd_record, {"id": "Q2"}) is False
+    assert authority_match.agreement(RECORDS["118540238"], {"id": "Q2"}) is None
 
 
 def test_name_alone_is_not_a_high_confidence_match(session):
@@ -326,3 +365,6 @@ def test_finer_agreeing_date_refines_instead_of_conflicting(session):
     report = gnd.enrich_person(session, person, "118540238")
     assert (person.born, person.born_precision) == (dt.datetime(1749, 8, 28), DatePrecision.DAY)
     assert report["conflicts"] == []
+    report = wikidata.enrich_person(session, person, "Q5879", entity=GOETHE_WIKIDATA)  # coarser agreeing year
+    assert (person.born, person.born_precision) == (dt.datetime(1749, 8, 28), DatePrecision.DAY)
+    assert "born" not in report["filled"] and report["conflicts"] == []

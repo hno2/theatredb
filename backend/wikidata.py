@@ -183,26 +183,25 @@ def search(query: str, kind: EntityType, limit: int = 10) -> list[dict]:
 record_id = itemgetter("id")
 
 
+def description(entity: dict) -> str:
+    """German, else English short description."""
+    descriptions = entity.get("descriptions", {})
+    return next((descriptions[lang].get("value", "") for lang in ("de", "en") if descriptions.get(lang)), "")
+
+
 def summary(entity: dict) -> str:
     """Description plus life or creation years for disambiguation."""
-    description = next(
-        (
-            entity.get("descriptions", {}).get(lang, {}).get("value")
-            for lang in ("de", "en")
-            if entity.get("descriptions", {}).get(lang)
-        ),
-        "",
-    )
     span = " - ".join(str(y) for y in years(entity).values())
-    return " · ".join(filter(None, [description, span]))
+    return " · ".join(filter(None, [description(entity), span]))
 
 
 def names(entity: dict) -> list[str]:
-    """All labels and aliases; used for exact-name matching, never as identity."""
-    found = [label["value"] for label in entity.get("labels", {}).values() if label.get("value")]
+    """German/English label first, then all labels and aliases; for exact-name matching, never as identity."""
+    found = [_label(entity)] if entity.get("labels") else []
+    found += [label["value"] for label in entity.get("labels", {}).values() if label.get("value")]
     for aliases in entity.get("aliases", {}).values():
         found += [alias["value"] for alias in aliases if alias.get("value")]
-    return found
+    return list(dict.fromkeys(found))
 
 
 def _year(value: object) -> int | None:
@@ -440,6 +439,12 @@ def _fill_date(target: object, field: str, entity: dict, prop: str, report: dict
         fill(target, field, parsed[0], report, parsed[1])
 
 
+def _fill_description(target: Person | Organization | Text, entity: dict, report: dict) -> None:
+    """Blank descriptions only; differing free text is not a conflict worth reporting."""
+    if not target.description:
+        fill(target, "description", description(entity) or None, report)
+
+
 def _report(qid: str) -> dict:
     return {"qid": qid, "filled": [], "conflicts": [], "added_names": [], "warnings": []}
 
@@ -479,7 +484,7 @@ def _person_names(person: Person, entity: dict, report: dict) -> None:
 
 
 def enrich_person(session: Session, person: Person, qid: str | None = None, *, entity: dict | None = None) -> dict:
-    """Life dates, gender and alternative names; fills blanks only."""
+    """Life dates, gender, alternative names and description; fills blanks only."""
     entity = _resolve(session, EntityType.PERSON, person.id, qid, entity)
     report = _report(entity["id"])
     _fill_date(person, "born", entity, "P569", report)
@@ -488,6 +493,7 @@ def enrich_person(session: Session, person: Person, qid: str | None = None, *, e
     if len(genders) == 1:
         fill(person, "gender", genders.pop(), report)
     _person_names(person, entity, report)
+    _fill_description(person, entity, report)
     session.add(person)
     session.flush()
     return report
@@ -496,11 +502,12 @@ def enrich_person(session: Session, person: Person, qid: str | None = None, *, e
 def enrich_organization(
     session: Session, organization: Organization, qid: str | None = None, *, entity: dict | None = None
 ) -> dict:
-    """Inception (P571) and dissolution (P576) dates; fills blanks only."""
+    """Inception (P571) and dissolution (P576) dates plus description; fills blanks only."""
     entity = _resolve(session, EntityType.ORGANIZATION, organization.id, qid, entity)
     report = _report(entity["id"])
     _fill_date(organization, "founded", entity, "P571", report)
     _fill_date(organization, "closed", entity, "P576", report)
+    _fill_description(organization, entity, report)
     session.add(organization)
     session.flush()
     return report
@@ -565,6 +572,7 @@ def enrich_text(
     _enrich_languages(entity, report)
     text.languages = list(dict.fromkeys([*(text.languages or []), *report["languages"]]))
     _enrich_publication(text, entity, report["warnings"])
+    _fill_description(text, entity, report)
     session.add(text)
     session.flush()
     return report
