@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 import re
 import unicodedata
 import uuid
@@ -51,6 +52,7 @@ from backend.user_management import get_session
 
 type Entity = Organization | Person | Production | Text | Award
 EMPTY = (None, "", [], {})
+LOG = logging.getLogger(__name__)
 
 
 def normalize(value: str) -> str:
@@ -1563,6 +1565,54 @@ def _merge(
     audit_event(session, duplicate, "delete", actor_id)
     session.delete(duplicate)
     session.flush()
+    if case.entity_type == EntityType.PERSON:
+        _merge_author_texts(session, target.id, actor_id)
+
+
+def _merge_author_texts(session: Session, person_id: uuid.UUID, actor_id: str | None) -> None:
+    """Consolidate compatible texts whose author identities now coincide."""
+    credits = session.exec(
+        select(TextContribution).where(
+            col(TextContribution.text_id).in_(
+                select(TextContribution.text_id).where(TextContribution.person_id == person_id)
+            )
+        )
+    ).all()
+    authors: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for credit in credits:
+        if canonical_role(credit.role) == "author":
+            authors.setdefault(credit.text_id, set()).add(credit.person_id)
+    groups: dict[tuple[str, frozenset[uuid.UUID]], list[uuid.UUID]] = {}
+    for text in session.exec(select(Text).where(col(Text.id).in_(authors))):
+        if person_id in authors[text.id]:
+            groups.setdefault((normalize(text.title), frozenset(authors[text.id])), []).append(text.id)
+    for ids in groups.values():
+        if len(ids) < 2:
+            continue
+        preview = _entity_merge_preview(session, EntityType.TEXT, ids, None)
+        conflicts = {field["field"] for field in preview["fields"] if field["conflict"]}
+        if conflicts - {"title"}:
+            LOG.warning(
+                "Texts %s still have conflicting fields after person merge %s; merge them manually: %s",
+                sorted(map(str, ids)),
+                person_id,
+                sorted(conflicts - {"title"}),
+            )
+            continue
+        choices = (
+            {
+                "title": next(
+                    option["entity_id"]
+                    for field in preview["fields"]
+                    if field["field"] == "title"
+                    for option in field["options"]
+                    if option["value"] == preview["result"]["title"]
+                )
+            }
+            if "title" in conflicts
+            else {}
+        )
+        _apply_entity_merge(session, preview, actor_id=actor_id, choices=choices, require_choices=True, automatic=True)
 
 
 def _prepare_link_merge(
@@ -1738,6 +1788,95 @@ def _merge_choices(preview: dict, choices: dict[str, str] | None, *, require_cho
     return result
 
 
+def _apply_entity_merge(
+    session: Session,
+    preview: dict,
+    *,
+    actor_id: str | None,
+    choices: dict[str, str] | None,
+    require_choices: bool,
+    automatic: bool = False,
+) -> uuid.UUID:
+    kind = _kind(preview["kind"])
+    result = _merge_choices(preview, choices, require_choices=require_choices)
+    target = session.get(ENTITY_MODELS[kind], uuid.UUID(preview["target_id"]))
+    if target is None:
+        raise ValueError("Merge target no longer exists")
+    before = entity_snapshot(target)
+    validated = revalidate(target, result)
+    approved_ids = {uuid.UUID(state["record"]["id"]) for state in preview["records"]}
+    aliases = session.exec(
+        select(EntityRedirect.old_id).where(
+            EntityRedirect.entity_type == kind,
+            col(EntityRedirect.target_id).in_(approved_ids),
+        )
+    ).all()
+    review_ids = approved_ids | set(aliases)
+    related_cases = session.exec(
+        select(ReconciliationCase).where(
+            ReconciliationCase.entity_type == kind,
+            ReconciliationCase.operation == "merge",
+            ReconciliationCase.status == "pending",
+            col(ReconciliationCase.target_id).in_(review_ids),
+            col(ReconciliationCase.duplicate_id).in_(review_ids),
+        )
+    ).all()
+    for field in result.keys() - {"id"}:
+        setattr(target, field, getattr(validated, field))
+    if entity_snapshot(target) != before:
+        session.add(target)
+        audit_event(session, target, "update", actor_id)
+    for duplicate in preview["records"][1:]:
+        duplicate_id = duplicate["record"]["id"]
+        key = stable_digest(["duplicate", kind, sorted([str(target.id), duplicate_id])])
+        case = session.exec(select(ReconciliationCase).where(ReconciliationCase.key == key)).first()
+        case = case or ReconciliationCase(
+            key=key,
+            entity_type=kind,
+            operation="merge",
+            reason="Gleicher Titel und gleiche Autoren nach Personenmerge" if automatic else "Datensatzauswahl geprüft",
+            incoming={field: duplicate["record"][field] for field in ("name", "title") if field in duplicate["record"]},
+        )
+        case.target_id = target.id
+        case.duplicate_id = uuid.UUID(duplicate_id)
+        case.status, case.actor_id = "approved", actor_id
+        case.decided_at = dt.datetime.now(dt.UTC)
+        case.decision_note = (
+            "Nach Personenmerge automatisch anhand von Titel und Autoren zusammengeführt."
+            if automatic
+            else "Identität und Feldwerte in der Datensatzauswahl bestätigt."
+        )
+        case.context = {
+            **case.context,
+            "decision": {"before": before, "after": entity_snapshot(target), "duplicate": duplicate},
+        }
+        _merge(
+            session,
+            case,
+            target,
+            duplicate_id,
+            actor_id,
+            approved_ids=approved_ids,
+        )
+        session.add(case)
+    for case in related_cases:
+        if case.status == "pending":
+            case.status, case.actor_id = "approved", actor_id
+            case.target_id = target.id
+            case.decided_at = dt.datetime.now(dt.UTC)
+            case.decision_note = "Durch bestätigte Datensatzauswahl zusammengeführt."
+            case.context = {
+                **case.context,
+                "bulk_merge": {
+                    "target_id": str(target.id),
+                    "entity_ids": sorted(str(value) for value in approved_ids),
+                    "revision": preview["revision"],
+                },
+            }
+            session.add(case)
+    return target.id
+
+
 def _execute_entity_merge(
     kind: EntityType,
     entity_ids: Collection[uuid.UUID | str],
@@ -1752,82 +1891,11 @@ def _execute_entity_merge(
         preview = _entity_merge_preview(session, kind, entity_ids, target_id)
         if preview["revision"] != revision:
             raise ValueError("Data changed since preview. Refresh and review again.")
-        result = _merge_choices(preview, choices, require_choices=require_choices)
-        target = session.get(ENTITY_MODELS[kind], uuid.UUID(preview["target_id"]))
-        if target is None:
-            raise ValueError("Merge target no longer exists")
-        before = entity_snapshot(target)
-        validated = revalidate(target, result)
-        approved_ids = {uuid.UUID(state["record"]["id"]) for state in preview["records"]}
-        aliases = session.exec(
-            select(EntityRedirect.old_id).where(
-                EntityRedirect.entity_type == kind,
-                col(EntityRedirect.target_id).in_(approved_ids),
-            )
-        ).all()
-        review_ids = approved_ids | set(aliases)
-        related_cases = session.exec(
-            select(ReconciliationCase).where(
-                ReconciliationCase.entity_type == kind,
-                ReconciliationCase.operation == "merge",
-                ReconciliationCase.status == "pending",
-                col(ReconciliationCase.target_id).in_(review_ids),
-                col(ReconciliationCase.duplicate_id).in_(review_ids),
-            )
-        ).all()
-        for field in result.keys() - {"id"}:
-            setattr(target, field, getattr(validated, field))
-        if entity_snapshot(target) != before:
-            session.add(target)
-            audit_event(session, target, "update", actor_id)
-        for duplicate in preview["records"][1:]:
-            duplicate_id = duplicate["record"]["id"]
-            key = stable_digest(["duplicate", kind, sorted([str(target.id), duplicate_id])])
-            case = session.exec(select(ReconciliationCase).where(ReconciliationCase.key == key)).first()
-            case = case or ReconciliationCase(
-                key=key,
-                entity_type=kind,
-                operation="merge",
-                reason="Datensatzauswahl geprüft",
-                incoming={
-                    field: duplicate["record"][field] for field in ("name", "title") if field in duplicate["record"]
-                },
-            )
-            case.target_id = target.id
-            case.duplicate_id = uuid.UUID(duplicate_id)
-            case.status, case.actor_id = "approved", actor_id
-            case.decided_at = dt.datetime.now(dt.UTC)
-            case.decision_note = "Identität und Feldwerte in der Datensatzauswahl bestätigt."
-            case.context = {
-                **case.context,
-                "decision": {"before": before, "after": entity_snapshot(target), "duplicate": duplicate},
-            }
-            _merge(
-                session,
-                case,
-                target,
-                duplicate_id,
-                actor_id,
-                approved_ids=approved_ids,
-            )
-            session.add(case)
-        for case in related_cases:
-            if case.status == "pending":
-                case.status, case.actor_id = "approved", actor_id
-                case.target_id = target.id
-                case.decided_at = dt.datetime.now(dt.UTC)
-                case.decision_note = "Durch bestätigte Datensatzauswahl zusammengeführt."
-                case.context = {
-                    **case.context,
-                    "bulk_merge": {
-                        "target_id": str(target.id),
-                        "entity_ids": sorted(str(value) for value in approved_ids),
-                        "revision": revision,
-                    },
-                }
-                session.add(case)
+        target_id = _apply_entity_merge(
+            session, preview, actor_id=actor_id, choices=choices, require_choices=require_choices
+        )
         session.commit()
-        return target.id
+        return target_id
 
 
 def merge_entities(

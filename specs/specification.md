@@ -62,6 +62,12 @@ administrative tools for imports, review, and data maintenance.
   with references, source identities, redirects, decisions, and audit history
   preserved; groups involving other sources retain the reviewed merge path.
   Other-source matching uses its own review workflow.
+- Reviewed person merges also consolidate affected texts when normalized titles
+  and complete, non-empty author sets match. Heading-case titles are preferred;
+  productions, other credits, sources, redirects and audit history are retained
+  in the same transaction. Conflicting text metadata is logged and left for
+  manual resolution; different coauthors or non-author credits alone never
+  establish a match.
 - Theapolis premiere types (including `UA`) become production tags.
   Organization directory descriptions and public person biographies are
   downloaded and fill empty descriptions; supplied production descriptions

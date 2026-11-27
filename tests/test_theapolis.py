@@ -1545,26 +1545,21 @@ def test_reimport_after_people_and_text_merge_reuses_survivors(db, monkeypatch, 
         patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
         patch.setattr(theapolis, "_merge_texts", lambda *args: {})
         result = theapolis.import_all(path, dach_only=False)
-    targets = {}
-    for kind, ids in (("person", result["person"][:2]), ("text", result["text"])):
-        preview = preview_entity_merge(kind, ids)
-        targets[kind] = str(
-            merge_entities(
-                kind,
-                ids,
-                target_id=preview["target_id"],
-                revision=preview["revision"],
-                actor_id="test",
-            )
-        )
+    ids = result["person"][:2]
+    preview = preview_entity_merge("person", ids)
+    person_id = merge_entities(
+        "person", ids, target_id=preview["target_id"], revision=preview["revision"], actor_id="test"
+    )
+    with Session(db) as session:
+        text_id = session.exec(select(Text.id)).one()
     again = theapolis.import_all(path, dach_only=False)
-    assert set(again["text"]) == {targets["text"]}
+    assert set(again["text"]) == {str(text_id)}
     assert len(again["person"]) == 2
-    assert targets["person"] in again["person"]
+    assert str(person_id) in again["person"]
     with Session(db) as session:
         assert len(session.exec(select(Person)).all()) == 2
         assert len(session.exec(select(Text)).all()) == 1
-        assert {production.text_id for production in session.exec(select(Production))} == {uuid.UUID(targets["text"])}
+        assert {production.text_id for production in session.exec(select(Production))} == {text_id}
         assert all(
             record.payload.get("merged_sources")
             for record in session.exec(select(SourceRecord).where(SourceRecord.entity_type == EntityType.PERSON))

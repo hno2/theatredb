@@ -323,6 +323,9 @@ uv run python -m backend.ingestion.theapolis merge-duplicates
 ```
 
 To merge records manually, use **Verwaltung → Personen / Texte → Zusammenführen**.
+Merging people also merges their compatible texts with the same normalized title
+and complete non-empty author set, in the same transaction. Conflicting text
+metadata is logged and requires a manual text merge.
 
 To explicitly migrate stored pending Theapolis cases, back up the database first:
 

@@ -319,6 +319,129 @@ def test_person_merge_rewires_all_links_and_deduplicates_roles(db, source) -> No
     ] == str(left.id)
 
 
+@pytest.mark.parametrize("merge_path", ["case", "people", "entities"])
+def test_person_merge_also_merges_matching_author_texts(db, source, merge_path) -> None:
+    author, typo, coauthor, composer, first, second = save(
+        db,
+        Person(name="Sibylle Berg"),
+        Person(name="Sybille Berg"),
+        Person(name="Coauthor"),
+        Person(name="Composer"),
+        Text(id=uuid.UUID(int=1), title="helges leben"),
+        Text(id=uuid.UUID(int=2), title="Helges Leben", languages=["de"]),
+    )
+    production = save(db, Production(name="Staging", text_id=second.id))[0]
+    save(
+        db,
+        TextContribution(text_id=first.id, person_id=author.id, role="author"),
+        TextContribution(text_id=second.id, person_id=typo.id, role="Autor"),
+        TextContribution(text_id=first.id, person_id=coauthor.id, role="author"),
+        TextContribution(text_id=second.id, person_id=coauthor.id, role="author"),
+        TextContribution(text_id=second.id, person_id=composer.id, role="composer"),
+        SourceRecord(source_id=source.id, entity_type=EntityType.TEXT, entity_id=second.id, record_key="work:2"),
+    )
+    ids = [author.id, typo.id]
+    if merge_path == "case":
+        approve(queue_duplicate("person", *ids, reason="Spelling correction"), author.id, fields=[])
+    else:
+        preview = preview_people_merge(ids, target_id=author.id)
+        if merge_path == "people":
+            merge_people(ids, target_id=author.id, revision=preview["revision"], actor_id="test")
+        else:
+            merge_entities(
+                "person",
+                ids,
+                target_id=author.id,
+                revision=preview["revision"],
+                actor_id="test",
+                choices={"name": str(author.id)},
+            )
+    with Session(db) as session:
+        survivor = session.exec(select(Text)).one()
+        assert survivor.title == "Helges Leben" and survivor.languages == ["de"]
+        assert resolve_id(session, "text", second.id) == survivor.id
+        staging = session.get(Production, production.id)
+        assert staging is not None and staging.text_id == survivor.id
+        assert session.exec(select(SourceRecord)).one().entity_id == survivor.id
+        assert {(row.person_id, canonical_role(row.role)) for row in session.exec(select(TextContribution))} == {
+            (author.id, "author"),
+            (coauthor.id, "author"),
+            (composer.id, "composer"),
+        }
+        case = session.exec(select(ReconciliationCase).where(ReconciliationCase.entity_type == EntityType.TEXT)).one()
+        assert case.status == "approved" and case.actor_id == "test"
+        assert case.decision_note is not None and "automatisch" in case.decision_note
+        assert session.exec(
+            select(SCD2History).where(
+                SCD2History.entity_name == "text",
+                SCD2History.operation == "delete",
+            )
+        ).one().entity_id == str(second.id)
+
+
+@pytest.mark.parametrize("difference", ["coauthor", "role", "title", "metadata", "unaffected"])
+def test_person_merge_keeps_nonmatching_or_conflicting_texts(db, difference, caplog) -> None:
+    author, typo, other, first, second = save(
+        db,
+        Person(name="Author"),
+        Person(name="Typo"),
+        Person(name="Other"),
+        Text(title="Work", genre="play"),
+        Text(
+            title="Different" if difference == "title" else "Work",
+            genre="novel" if difference == "metadata" else "play",
+        ),
+    )
+    save(
+        db,
+        TextContribution(
+            text_id=first.id, person_id=other.id if difference == "unaffected" else author.id, role="author"
+        ),
+        TextContribution(
+            text_id=second.id,
+            person_id=other.id if difference == "unaffected" else typo.id,
+            role="composer" if difference == "role" else "author",
+        ),
+    )
+    if difference == "coauthor":
+        save(db, TextContribution(text_id=second.id, person_id=other.id, role="author"))
+    approve(queue_duplicate("person", author.id, typo.id, reason="Same identity"), author.id, fields=[])
+    assert count(db, Text) == 2
+    if difference == "metadata":
+        assert "still have conflicting fields" in caplog.text
+
+
+def test_cascaded_text_merge_failure_rolls_back_person_merge(db, source) -> None:
+    author, typo, first, second, unrelated = save(
+        db,
+        Person(name="Author"),
+        Person(name="Typo"),
+        Text(id=uuid.UUID(int=1), title="Work"),
+        Text(id=uuid.UUID(int=2), title="Work"),
+        Text(title="Other"),
+    )
+    save(
+        db,
+        TextContribution(text_id=first.id, person_id=author.id, role="author"),
+        TextContribution(text_id=second.id, person_id=typo.id, role="author"),
+        EntitySource(source_id=source.id, entity_type=EntityType.TEXT, entity_id=second.id, external_id="2"),
+        SourceRecord(
+            source_id=source.id, entity_type=EntityType.TEXT, entity_id=unrelated.id, record_key="id:2", external_id="2"
+        ),
+    )
+    case = queue_duplicate("person", author.id, typo.id, reason="Same identity")
+    with pytest.raises(ValueError, match="third entity"):
+        approve(case, author.id, fields=[])
+    assert count(db, Person) == 2
+    assert count(db, Text) == 3
+    assert count(db, EntityRedirect) == 0
+    assert count(db, SCD2History) == 0
+    with Session(db) as session:
+        pending = session.get(ReconciliationCase, case.id)
+        assert pending is not None and pending.status == "pending"
+        assert {row.person_id for row in session.exec(select(TextContribution))} == {author.id, typo.id}
+
+
 def test_merge_survivor_can_be_swapped(db) -> None:
     left, right = save(db, Person(name="Left"), Person(name="Right"))
     case = queue_duplicate("person", left.id, right.id, reason="Manual")
