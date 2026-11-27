@@ -10,6 +10,8 @@ from backend.entity_management import catalog_page, catalog_suggestions, catalog
 from backend.models import Organization, Person, Production, ProductionMembership, Text, TextContribution, TextTitle
 from backend.taxonomy import set_production_tags, sync_vocabulary
 from backend.user_management import get_session
+from frontend.management import filters
+from frontend.management.filters import field_value_options
 from frontend.views import catalog
 from frontend.views.helpers import theatre_label
 
@@ -53,9 +55,9 @@ def catalog_db(monkeypatch, tmp_path):
             ]
         )
         session.commit()
-    catalog._tag_options.clear()
+    field_value_options.clear()
     yield
-    catalog._tag_options.clear()
+    field_value_options.clear()
     engine.dispose()
 
 
@@ -192,7 +194,7 @@ def test_catalog_does_not_repeat_city_in_results(monkeypatch, kind):
     monkeypatch.setattr(catalog, "catalog_page", lambda *args, **kwargs: (rows, len(rows)))
     monkeypatch.setattr(catalog, "catalog_suggestions", lambda *args: [])
     monkeypatch.setattr(catalog, "_summary", lambda *args: [])
-    monkeypatch.setattr(catalog, "_tag_options", lambda *args: [])
+    monkeypatch.setattr(filters, "field_value_options", lambda *args: [])
     monkeypatch.setattr(catalog, "_facet_fields", list)
     file = "catalog_productions.py" if kind == "production" else "catalog_theater.py"
     app = AppTest.from_file(VIEWS / file)

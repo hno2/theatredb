@@ -5,10 +5,11 @@ from datetime import datetime
 from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
-from sqlalchemy import case, extract
+from sqlalchemy import JSON, case, extract, literal, true
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstrumentedAttribute, Mapper, raiseload, selectinload
 from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import TableValuedAlias
 from sqlmodel import Session, SQLModel, col, func, or_, select
 from sqlmodel.sql.expression import SelectOfScalar
 
@@ -274,31 +275,45 @@ def organization_coverage(*, verified_only: bool = False) -> tuple[int, int, int
     return total, positioned, places, top
 
 
-def get_unique_field_values[ModelT: SQLModel](model_cls: type[ModelT], field_name: str) -> list[Any]:
-    """Get a list of unique values for a specified field across all entities of the given type."""
+def _json_field_values(session: Session, column: InstrumentedAttribute) -> TableValuedAlias:
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        array = case((func.json_typeof(column) == "array", column), else_=literal([], type_=JSON))
+        return func.json_array_elements_text(array).table_valued("value")
+    if dialect == "sqlite":
+        return func.json_each(column).table_valued("value")
+    raise ValueError(f"JSON field values do not support {dialect}")
+
+
+def get_unique_field_values[ModelT: SQLModel](
+    model_cls: type[ModelT], field_name: str, *, limit: int | None = None
+) -> list[str]:
+    """Return distinct nonblank scalar or JSON-array values, optionally bounded in SQL."""
     with get_session() as session:
-        col = getattr(model_cls, field_name)
-        values = session.exec(select(col).where(col.isnot(None))).all()
-        unique: set[Any] = set()
-    for value in values:
-        if isinstance(value, list):
-            unique.update(v for v in value if v is not None)
+        column = getattr(model_cls, field_name)
+        if isinstance(column.type, JSON):
+            values = _json_field_values(session, column)
+            value = values.c.value
+            stmt = select(value).select_from(model_cls).join(values, true())
         else:
-            unique.add(value)
-    return sorted(unique, key=str)
+            value = column
+            stmt = select(value)
+        stmt = stmt.where(value.is_not(None), func.length(func.trim(value)) > 0).distinct().order_by(value)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list(session.exec(stmt).all())
+
+
+def json_field_filter(model: type[SQLModel], field_name: str, selected: list[str]) -> ColumnElement[bool]:
+    """Match any selected value as an exact JSON array member."""
+    with get_session() as session:
+        values = _json_field_values(session, getattr(model, field_name))
+    return select(1).select_from(values).where(values.c.value.in_(selected)).exists()
 
 
 def tag_filter(model: type[Organization | Production], tags: list[str]) -> ColumnElement[bool]:
     """Match any selected tag as an exact JSON array value."""
-    with get_session() as session:
-        dialect = session.get_bind().dialect.name
-    if dialect == "postgresql":
-        values = func.json_array_elements_text(col(model.tags)).table_valued("value")
-    elif dialect == "sqlite":
-        values = func.json_each(col(model.tags)).table_valued("value")
-    else:
-        raise ValueError(f"Tag filters do not support {dialect}")
-    return select(1).select_from(values).where(values.c.value.in_(tags)).exists()
+    return json_field_filter(model, "tags", tags)
 
 
 def get_entity_graph[ModelT: SQLModel](

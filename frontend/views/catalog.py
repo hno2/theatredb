@@ -15,7 +15,6 @@ from backend.entity_management import (
     catalog_page,
     catalog_suggestions,
     catalog_summary,
-    get_unique_field_values,
     verified_organization_filter,
 )
 from backend.models import Organization, Person, Production, Text
@@ -92,12 +91,6 @@ def _summary(kind: str, query: str, filter_key: str, _filters: list[SqlFilter]) 
     return catalog_summary(CATALOGS[kind][0], query, _filters)
 
 
-@st.cache_data(ttl=60, max_entries=2, show_spinner=False)
-def _tag_options(kind: str) -> list[str]:
-    model = Organization if kind == "organization" else Production
-    return get_unique_field_values(model, "tags")
-
-
 @st.cache_data(ttl=300, max_entries=1, show_spinner=False)
 def _facet_fields() -> list[_FieldUI]:
     with get_session() as session:
@@ -118,7 +111,7 @@ def _facet_fields() -> list[_FieldUI]:
 def _extra_filter_fields(kind: str) -> list[_FieldUI]:
     if kind not in {"organization", "production"}:
         return []
-    tags = _FieldUI("tags", "Schlagworte", "tags", True, options=_tag_options(kind))
+    tags = _FieldUI("tags", "Schlagworte", "tags", True)
     return [tags, *_facet_fields()] if kind == "production" else [tags]
 
 

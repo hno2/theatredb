@@ -11,14 +11,34 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import SQLModel, col, select
 
-from backend.entity_management import tag_filter
-from backend.models import Organization, Production
+from backend.entity_management import get_unique_field_values, json_field_filter
+from backend.models import Award, Organization, Person, Production, Text
 from backend.taxonomy import facet_filters
 
 if TYPE_CHECKING:
     from frontend.management.uifactory import _FieldUI
 
 SqlFilter = ColumnElement[bool]
+
+CATEGORY_FIELDS: dict[type[SQLModel], set[str]] = {
+    Person: {"type", "nationality"},
+    Organization: {"type", "tags", "address_locality", "address_country", "region"},
+    Production: {"tags"},
+    Text: {"genre", "languages"},
+    Award: {"country"},
+}
+MAX_FILTER_OPTIONS = 200
+# Controlled vocabularies (e.g. Theapolis role types) stay choosable even beyond the free-text cap.
+VOCABULARY_FIELDS: set[tuple[type[SQLModel], str]] = {(Person, "type")}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def field_value_options(model_cls: type[SQLModel], field_name: str) -> list[str] | None:
+    """Cache bounded category choices; None means the field needs text search."""
+    if (model_cls, field_name) in VOCABULARY_FIELDS:
+        return get_unique_field_values(model_cls, field_name)
+    values = get_unique_field_values(model_cls, field_name, limit=MAX_FILTER_OPTIONS + 1)
+    return values if len(values) <= MAX_FILTER_OPTIONS else None
 
 
 def _contains(column: Any, value: str) -> SqlFilter:  # ruff: ignore[any-type]
@@ -97,16 +117,6 @@ def _render_field_filter(
     column = getattr(model_cls, field.name, None)
     if column is None or not hasattr(column, "type") or field.kind == "uuid":
         return [], None
-    if field.kind == "tags" and model_cls in (Organization, Production):
-        selected = st.multiselect(
-            field.label,
-            field.options or [],
-            key=key,
-            bind=bind,
-            placeholder="Schlagworte wählen",
-            help="Ein Treffer muss mindestens eines der gewählten Schlagworte haben.",
-        )
-        return ([tag_filter(model_cls, selected)] if selected else []), selected or None
     if field.kind == "fk_select" and field.fk_model is not None:
         value = st.text_input(
             f"{field.label} enthält",
@@ -138,17 +148,29 @@ def _render_field_filter(
     if field.kind in {"int", "float"}:
         low, high = _render_range(field, key, years=False, shareable=shareable)
         return _number_range(column, low, high), [low, high] if low is not None or high is not None else None
-    if field.options and not isinstance(column.type, JSON):
+    options = (
+        field_value_options(model_cls, field.name)
+        if field.name in CATEGORY_FIELDS.get(model_cls, set())
+        else field.options
+        if field.options is not None and len(field.options) <= MAX_FILTER_OPTIONS
+        else None
+    )
+    if options is not None:
         labels = field.option_labels or {}
         values = st.multiselect(
             field.label,
-            field.options,
+            options,
             format_func=lambda v: labels.get(v, v),
             key=key,
             bind=bind,
-            placeholder="Werte wählen",
+            placeholder="Schlagworte wählen" if field.kind == "tags" else "Werte wählen",
         )
-        return ([col(column).in_(values)] if values else []), values or None
+        clause = (
+            json_field_filter(model_cls, field.name, values)
+            if isinstance(column.type, JSON)
+            else col(column).in_(values)
+        )
+        return ([clause] if values else []), values or None
     value = st.text_input(
         f"{field.label} enthält",
         key=key,
