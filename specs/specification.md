@@ -115,11 +115,38 @@ administrative tools for imports, review, and data maintenance.
   mapping; source rows follow the legacy tags; model rows are suggestions until
   reviewed. Merges keep the manual row when both productions have the code.
 - Public filters and badges only use `published` rows.
+- Codes whose meaning matches a GND subject heading carry its URI in `Tag.uri`
+  (`GND_CONCEPTS`); codes without an exact equivalent stay local.
 
 ## Optional integrations
 
-- Wikidata lookup is read-only. Choosing an item creates an explicitly
-  identified stub; enrichment adds supported metadata.
+- GND (`backend/gnd.py`, lobid-gnd API, CC0) and Wikidata (`backend/wikidata.py`)
+  are the authorities for people, texts and theatres, behind one provider
+  interface (`backend/authority_match.py`). Selecting a person, theatre or
+  family-root text in management looks both up automatically (linked record,
+  else name search, cached for a day) and shows them side by side: a selectbox
+  per authority (with "— nicht übernehmen —") and an "Eintrag öffnen" link. The
+  chosen GND record's Wikidata link preselects that item. If the two records
+  name each other they are shown as matching; if one names a different ID,
+  applying is blocked. One click ("Bestätigen & übernehmen") links both IDs as
+  reviewed `EntitySource`s in one transaction and fills blank fields only: person
+  life dates, gender and up to 10 Latin-script same-surname variants; text
+  creation/publication dates, genre (GND work form), titles, authors/composers
+  and selected direct predecessors (`based_on`, one hop, one list for both);
+  theatre founding and closing dates (GND predecessor/successor bodies are only
+  reported); a blank description from Wikidata. Dates keep the most precise
+  agreeing value whatever the source order (1749 and 1749-08-28 give the day);
+  other differences are reported as conflicts. Same-name local records are reported, never merged.
+- High confidence needs evidence beyond the name: a GND↔Wikidata cross-link
+  (GND `sameAs`, Wikidata P227), or an exact name/title plus a matching life
+  year, an author already linked to the same authority, or the theatre's city
+  as GND place of business — and exactly one hit may pass. The panel marks
+  such a hit; **Normdaten-Abgleich** runs this in bulk (batches, resumable),
+  lets editors untick proposals, and applies them without lineage. Run people
+  first so texts can use linked authors.
+- The lineage form can still create a text stub from a Wikidata search hit.
+- `Person.gender` is `m`, `f`, `none` (explicitly none), `div` or empty
+  (unknown).
 - AI is off unless `AI_BASE_URL`, `AI_API_KEY`, and `AI_MODEL` are all set.
   Each AI action requires opt-in. Suggestions go through review and cannot
   create candidate IDs. Suggested titles stay unverified until a database or

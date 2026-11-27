@@ -6,16 +6,29 @@ import datetime as dt
 import json
 import re
 import uuid
+from collections.abc import Collection
 from operator import itemgetter
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from sqlmodel import Session, col, select
 
+from backend.authority import (
+    attach_identity,
+    external_source,
+    fill,
+    fold,
+    latin,
+    linked_entity,
+    same_name_person,
+    same_title_text,
+)
+from backend.authority import identity as _identity
 from backend.date_precision import DatePrecision
-from backend.models import EntitySource, EntityType, Person, Source, Text, TextContribution, TextLineage, TextTitle
-from backend.reconciliation import resolve_id
+from backend.models import EntityType, Organization, Person, Source, Text, TextContribution, TextLineage, TextTitle
+from backend.reconciliation import normalize
 from backend.texts import FAMILY_RELATIONS, add_lineage, add_title
 
 API_URL = "https://www.wikidata.org/w/api.php"
@@ -108,14 +121,128 @@ def search_texts(query: str, language: str = "de", limit: int = 10) -> list[dict
     ]
 
 
+WIKI_URL = "https://www.wikidata.org/wiki/"
+ENTITY_URI = "http://www.wikidata.org/entity/"
+HUMAN = "Q5"
+GENDERS = {"Q6581097": "m", "Q6581072": "f", "Q48270": "div"}  # male, female, non-binary; others stay unknown
+_QID_REF = re.compile(r"\s*(?:https?://(?:www\.)?wikidata\.org/(?:wiki|entity)/)?(Q[1-9]\d*)/?\s*")
+# shortcut: fixed cap keeps the first matching aliases; add ranking if editors miss important spellings.
+MAX_VARIANTS = 10
+
+
+def parse_qid(value: str) -> str:
+    """Accept a QID or a Wikidata item URL."""
+    match = _QID_REF.fullmatch(value or "")
+    if match is None:
+        raise ValueError(f"Invalid Wikidata QID: {value!r}")
+    return match.group(1)
+
+
+def fetch_entities(qids: list[str]) -> dict[str, dict]:
+    """Labels, descriptions, aliases and claims of up to 50 validated items in one request."""
+    ids = [validate_qid(qid) for qid in qids]
+    if not ids:
+        return {}
+    if len(ids) > 50:
+        raise ValueError("At most 50 Wikidata items per request")
+    response = _request_json(
+        {"action": "wbgetentities", "ids": "|".join(ids), "props": "labels|descriptions|aliases|claims"}
+    )
+    entities = response.get("entities", {})
+    return {
+        qid: entities[qid]
+        for qid in ids
+        if isinstance(entities.get(qid), dict) and "missing" not in entities[qid] and entities[qid].get("id") == qid
+    }
+
+
 def fetch_entity(qid: str) -> dict:
-    """Fetch all labels, aliases and claims of a validated item."""
-    qid = validate_qid(qid)
-    response = _request_json({"action": "wbgetentities", "ids": qid, "props": "labels|aliases|claims"})
-    entity = response.get("entities", {}).get(qid)
-    if not isinstance(entity, dict) or "missing" in entity or entity.get("id") != qid:
+    """Fetch labels, descriptions, aliases and claims of a validated item."""
+    entity = fetch_entities([qid]).get(validate_qid(qid))
+    if entity is None:
         raise WikidataError(f"Wikidata item not found: {qid}")
     return entity
+
+
+def search(query: str, kind: EntityType, limit: int = 10) -> list[dict]:
+    """Candidates with full entities; people are limited to humans. Never writes."""
+    hits = search_texts(query, limit=limit)
+    entities = fetch_entities([hit["id"] for hit in hits])
+    results = []
+    for hit in hits:
+        entity = entities.get(hit["id"])
+        if entity is None:
+            continue
+        # shortcut: only people are type-filtered; works and theatres have too many classes to whitelist.
+        if kind == EntityType.PERSON and HUMAN not in {v.get("id") for v in _claims(entity, "P31")}:
+            continue
+        results.append({**hit, "description": summary(entity), "record": entity})
+    return results
+
+
+record_id = itemgetter("id")
+
+
+def description(entity: dict) -> str:
+    """German, else English short description."""
+    descriptions = entity.get("descriptions", {})
+    return next((descriptions[lang].get("value", "") for lang in ("de", "en") if descriptions.get(lang)), "")
+
+
+def summary(entity: dict) -> str:
+    """Description plus life or creation years for disambiguation."""
+    span = " - ".join(str(y) for y in years(entity).values())
+    return " · ".join(filter(None, [description(entity), span]))
+
+
+def names(entity: dict) -> list[str]:
+    """German/English label first, then all labels and aliases; for exact-name matching, never as identity."""
+    found = [_label(entity)] if entity.get("labels") else []
+    found += [label["value"] for label in entity.get("labels", {}).values() if label.get("value")]
+    for aliases in entity.get("aliases", {}).values():
+        found += [alias["value"] for alias in aliases if alias.get("value")]
+    return list(dict.fromkeys(found))
+
+
+def _year(value: object) -> int | None:
+    match = re.match(r"\+(\d{4,})-", value.get("time", "")) if isinstance(value, dict) else None
+    return int(match.group(1)) if match else None
+
+
+def years(entity: dict) -> dict[str, int]:
+    """Life years of a person, first stated value each."""
+    found = {}
+    for prop, key in (("P569", "born"), ("P570", "died")):
+        if (year := next(filter(None, map(_year, _claims(entity, prop))), None)) is not None:
+            found[key] = year
+    return found
+
+
+def author_ids(entity: dict) -> set[str]:
+    """QIDs of authors (P50) and composers (P86)."""
+    return {value["id"] for prop in ("P50", "P86") for value in _claims(entity, prop) if isinstance(value, dict)}
+
+
+def places(_entity: dict) -> list[str]:
+    """Wikidata places are item IDs; resolving labels would cost a request per hit, so none are offered."""
+    return []
+
+
+def gnd_ids(entity: dict) -> set[str]:
+    """GND IDs Wikidata states for this item (P227)."""
+    return {value for value in _claims(entity, "P227") if isinstance(value, str)}
+
+
+def refs(entity: dict, prop: str) -> list[tuple[str, str]]:
+    """(QID, label) of linked items, labels fetched in one batch request."""
+    qids = [v["id"] for v in _claims(entity, prop) if isinstance(v, dict) and v.get("id")][:50]
+    linked = fetch_entities(qids)
+    return [(qid, _label(linked[qid]) if qid in linked else qid) for qid in qids]
+
+
+def identity(session: Session, kind: EntityType, entity_id: uuid.UUID) -> str | None:
+    """The selected QID of an entity; read-only."""
+    return _identity(session, "Wikidata", kind, entity_id)
 
 
 def _entity(qid: str, entity: dict | None) -> dict:
@@ -140,54 +267,15 @@ def _title_language(code: str) -> str | None:
 
 
 def _source(session: Session) -> Source:
-    source = session.exec(select(Source).where(col(Source.name).ilike("wikidata"))).first()
-    if source is None:
-        source = Source(name="Wikidata", base_url="https://www.wikidata.org")
-        session.add(source)
-        session.flush()
-    return source
+    return external_source(session, "Wikidata", "https://www.wikidata.org")
 
 
 def _linked(session: Session, source: Source, kind: EntityType, qid: str) -> uuid.UUID | None:
-    links = session.exec(
-        select(EntitySource).where(
-            EntitySource.source_id == source.id,
-            EntitySource.entity_type == kind,
-            EntitySource.external_id == qid,
-        )
-    ).all()
-    ids = {resolve_id(session, kind, link.entity_id) for link in links}
-    if len(ids) > 1:
-        raise ValueError(f"Conflicting Wikidata identity: {qid}")
-    return next(iter(ids), None)
+    return linked_entity(session, source, kind, qid)
 
 
 def _attach(session: Session, source: Source, kind: EntityType, entity_id: uuid.UUID, qid: str) -> None:
-    owner = _linked(session, source, kind, qid)
-    if owner is not None and owner != entity_id:
-        raise ValueError(f"Wikidata item {qid} is already linked to another {kind}")
-    link = session.exec(
-        select(EntitySource).where(
-            EntitySource.source_id == source.id,
-            EntitySource.entity_type == kind,
-            EntitySource.entity_id == entity_id,
-        )
-    ).first()
-    if link:
-        if link.external_id != qid:
-            raise ValueError("Entity already has a different Wikidata identity")
-        return
-    session.add(
-        EntitySource(
-            source_id=source.id,
-            entity_type=kind,
-            entity_id=entity_id,
-            external_id=qid,
-            external_url=f"https://www.wikidata.org/wiki/{qid}",
-            reviewed=True,
-        )
-    )
-    session.flush()
+    attach_identity(session, source, kind, entity_id, qid, f"https://www.wikidata.org/wiki/{qid}")
 
 
 def create_text_stub(
@@ -271,18 +359,28 @@ def _enrich_titles(session: Session, text: Text, entity: dict) -> int:
     return len(session.exec(select(TextTitle).where(TextTitle.text_id == text.id)).all()) - before
 
 
-def _enrich_authors(session: Session, source: Source, text: Text, entity: dict) -> int:
+def _author_id(session: Session, source: Source, author_qid: str, report: dict) -> uuid.UUID | None:
+    if person_id := _linked(session, source, EntityType.PERSON, author_qid):
+        return person_id
+    author_entity = fetch_entity(author_qid)
+    name = _label(author_entity)
+    if candidate := same_name_person(session, name):
+        # Names are not identities: the editor confirms by giving that person this QID.
+        report["unlinked_people"].append({"qid": author_qid, "label": name, "candidate_id": str(candidate.id)})
+        return None
+    person = Person(name=name, type=["author"])
+    session.add(person)
+    session.flush()
+    enrich_person(session, person, author_qid, entity=author_entity)
+    return person.id
+
+
+def _enrich_authors(session: Session, source: Source, text: Text, entity: dict, report: dict) -> int:
     added = 0
     for author in _claims(entity, "P50"):
-        author_qid = validate_qid(author["id"])
-        person_id = _linked(session, source, EntityType.PERSON, author_qid)
+        person_id = _author_id(session, source, validate_qid(author["id"]), report)
         if person_id is None:
-            author_entity = fetch_entity(author_qid)
-            person = Person(name=_label(author_entity), type=["author"])
-            session.add(person)
-            session.flush()
-            person_id = person.id
-            _attach(session, source, EntityType.PERSON, person_id, author_qid)
+            continue
         if (
             session.exec(
                 select(TextContribution).where(
@@ -327,17 +425,120 @@ def _enrich_publication(text: Text, entity: dict, warnings: list[str]) -> None:
         text.published, text.published_precision = min(dates, key=itemgetter(0))
 
 
+def _date(entity: dict, prop: str, warnings: list[str]) -> tuple[dt.datetime, DatePrecision] | None:
+    for value in _claims(entity, prop):
+        try:
+            return parse_publication(value)
+        except (ValueError, TypeError, OverflowError) as exc:
+            warnings.append(f"{prop}: {exc}")
+    return None
+
+
+def _fill_date(target: object, field: str, entity: dict, prop: str, report: dict) -> None:
+    if parsed := _date(entity, prop, report["warnings"]):
+        fill(target, field, parsed[0], report, parsed[1])
+
+
+def _fill_description(target: Person | Organization | Text, entity: dict, report: dict) -> None:
+    """Blank descriptions only; differing free text is not a conflict worth reporting."""
+    if not target.description:
+        fill(target, "description", description(entity) or None, report)
+
+
+def _report(qid: str) -> dict:
+    return {"qid": qid, "filled": [], "conflicts": [], "added_names": [], "warnings": []}
+
+
+def _resolve(session: Session, kind: EntityType, entity_id: uuid.UUID, qid: str | None, entity: dict | None) -> dict:
+    source = _source(session)
+    if qid is None:
+        qid = identity(session, kind, entity_id)
+        if qid is None:
+            raise ValueError(f"{kind} has no selected Wikidata identity")
+    entity = _entity(qid, entity)
+    _attach(session, source, kind, entity_id, qid)
+    return entity
+
+
+def _person_names(person: Person, entity: dict, report: dict) -> None:
+    """German/English label and aliases in Latin script sharing the surname of the label."""
+    label = _label(entity)
+    surname = fold(label.rsplit(" ", 1)[-1])
+    known = {normalize(name) for name in [person.name, *(person.alt_names or [])]}
+    candidates = [label]
+    for lang in ("de", "en"):
+        candidates += [a["value"] for a in entity.get("aliases", {}).get(lang, []) if a.get("value")]
+    added = []
+    for name in candidates:
+        if (
+            latin(name)
+            and fold(name.rsplit(" ", 1)[-1]) == surname
+            and normalize(name) not in known
+            and len(added) < MAX_VARIANTS
+        ):
+            known.add(normalize(name))
+            added.append(name)
+    if added:
+        person.alt_names = [*(person.alt_names or []), *added]
+        report["added_names"] = added
+
+
+def enrich_person(session: Session, person: Person, qid: str | None = None, *, entity: dict | None = None) -> dict:
+    """Life dates, gender, alternative names and description; fills blanks only."""
+    entity = _resolve(session, EntityType.PERSON, person.id, qid, entity)
+    report = _report(entity["id"])
+    _fill_date(person, "born", entity, "P569", report)
+    _fill_date(person, "died", entity, "P570", report)
+    genders = {GENDERS.get(str(v.get("id"))) for v in _claims(entity, "P21") if isinstance(v, dict)}
+    if len(genders) == 1:
+        fill(person, "gender", genders.pop(), report)
+    _person_names(person, entity, report)
+    _fill_description(person, entity, report)
+    session.add(person)
+    session.flush()
+    return report
+
+
+def enrich_organization(
+    session: Session, organization: Organization, qid: str | None = None, *, entity: dict | None = None
+) -> dict:
+    """Inception (P571) and dissolution (P576) dates plus description; fills blanks only."""
+    entity = _resolve(session, EntityType.ORGANIZATION, organization.id, qid, entity)
+    report = _report(entity["id"])
+    _fill_date(organization, "founded", entity, "P571", report)
+    _fill_date(organization, "closed", entity, "P576", report)
+    _fill_description(organization, entity, report)
+    session.add(organization)
+    session.flush()
+    return report
+
+
+def _parent(session: Session, parent_qid: str, report: dict) -> Text | None:
+    source = _source(session)
+    if text_id := _linked(session, source, EntityType.TEXT, parent_qid):
+        return session.get(Text, text_id)
+    parent_entity = fetch_entity(parent_qid)
+    if candidate := same_title_text(session, _label(parent_entity)):
+        report["unlinked_texts"].append(
+            {"qid": parent_qid, "label": _label(parent_entity), "candidate_id": str(candidate.id)}
+        )
+        return None
+    return create_text_stub(session, parent_qid, entity=parent_entity)
+
+
 def enrich_text(
     session: Session,
     text: Text,
     qid: str | None = None,
     *,
     entity: dict | None = None,
+    parent_qids: Collection[str] | None = None,
 ) -> dict:
     """Enrich the identified work only; never copy root credits to translations/adaptations.
 
-    Writes belong to the caller's transaction. Unknown language IDs and unsupported
-    dates remain explicit in the report instead of inventing ISO codes or precision.
+    ``parent_qids`` selects which direct P144 items become ``based_on`` lineage; None takes all,
+    an empty collection none. Writes belong to the caller's transaction. Unknown language IDs and
+    unsupported dates remain explicit in the report instead of inventing ISO codes or precision.
     """
     derived = session.exec(
         select(TextLineage).where(
@@ -347,38 +548,50 @@ def enrich_text(
     ).first()
     if derived is not None:
         raise ValueError("Text is a translation/adaptation; select its family root for Wikidata enrichment")
-    source = _source(session)
-    if qid is None:
-        link = session.exec(
-            select(EntitySource).where(
-                EntitySource.source_id == source.id,
-                EntitySource.entity_type == EntityType.TEXT,
-                EntitySource.entity_id == text.id,
-            )
-        ).first()
-        if link is None or link.external_id is None:
-            raise ValueError("Text has no selected Wikidata identity")
-        qid = link.external_id
-    entity = _entity(qid, entity)
-    _attach(session, source, EntityType.TEXT, text.id, qid)
-    report = {
+    entity = _resolve(session, EntityType.TEXT, text.id, qid, entity)
+    report: dict[str, Any] = {
+        **_report(entity["id"]),
         "titles_added": 0,
         "authors_added": 0,
+        "unlinked_people": [],
         "based_on_ids": [],
+        "unlinked_texts": [],
         "languages": [],
         "unknown_language_qids": [],
-        "warnings": [],
     }
     report["titles_added"] = _enrich_titles(session, text, entity)
-    report["authors_added"] = _enrich_authors(session, source, text, entity)
+    report["authors_added"] = _enrich_authors(session, _source(session), text, entity, report)
     for parent in _claims(entity, "P144"):
         parent_qid = validate_qid(parent["id"])
-        parent_text = create_text_stub(session, parent_qid)
-        add_lineage(session, parent_text.id, text.id, "based_on", notes="Wikidata P144")
-        report["based_on_ids"].append(str(parent_text.id))
+        if parent_qids is not None and parent_qid not in parent_qids:
+            continue
+        if (parent_text := _parent(session, parent_qid, report)) is not None:
+            add_lineage(session, parent_text.id, text.id, "based_on", notes="Wikidata P144")
+            report["based_on_ids"].append(str(parent_text.id))
+    _fill_date(text, "created", entity, "P571", report)
     _enrich_languages(entity, report)
     text.languages = list(dict.fromkeys([*(text.languages or []), *report["languages"]]))
     _enrich_publication(text, entity, report["warnings"])
+    _fill_description(text, entity, report)
     session.add(text)
     session.flush()
     return report
+
+
+def enrich(
+    session: Session,
+    kind: EntityType,
+    entity_id: uuid.UUID,
+    qid: str,
+    *,
+    record: dict | None = None,
+    predecessor_ids: Collection[str] | None = None,
+) -> dict:
+    """Dispatch to the entity-specific enrichment; ``predecessor_ids`` applies to texts only."""
+    if kind == EntityType.PERSON and (person := session.get(Person, entity_id)):
+        return enrich_person(session, person, qid, entity=record)
+    if kind == EntityType.TEXT and (text := session.get(Text, entity_id)):
+        return enrich_text(session, text, qid, entity=record, parent_qids=predecessor_ids)
+    if kind == EntityType.ORGANIZATION and (organization := session.get(Organization, entity_id)):
+        return enrich_organization(session, organization, qid, entity=record)
+    raise ValueError(f"No {kind} {entity_id} for Wikidata enrichment")

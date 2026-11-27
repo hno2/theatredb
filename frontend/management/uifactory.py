@@ -354,6 +354,15 @@ def _render_field(field: _FieldUI, defaults: dict[str, Any], *, form_key: str, e
             val = _render_json(field, d, key)
         case "fk_select":
             val = _render_fk_select(field, d, form_key=form_key)
+        case "choice":
+            options = [None, *(field.options or [])]
+            val = st.selectbox(
+                field.label,
+                options,
+                index=options.index(d) if d in options else 0,
+                format_func=lambda v: "—" if v is None else (field.option_labels or {}).get(v, v),
+                key=key,
+            )
         case _:
             val = _render_text(field, d, key)
 
@@ -971,11 +980,22 @@ def _render_table(
     return [df.iloc[index].to_dict() for index in sel_rows if 0 <= index < len(df)]
 
 
+def _edit_revision_key(entity_id: object) -> str:
+    return f"_edit_revision_{entity_id}"
+
+
+def refresh_edit_form(entity_id: object) -> None:
+    """Re-key the edit form after an out-of-form write; the browser would otherwise resend the old values."""
+    key = _edit_revision_key(entity_id)
+    st.session_state[key] = st.session_state.get(key, 0) + 1
+
+
 def _render_edit_form(
     model_cls: type[SQLModel], fields: list[_FieldUI], sel_row: dict[str, Any], actor: str | None
 ) -> None:
     st.subheader(":material/edit: Edit")
-    edit_form_key = f"edit_{model_cls.__name__.lower()}_{sel_row['id']}"
+    revision = st.session_state.get(_edit_revision_key(sel_row["id"]), 0)
+    edit_form_key = f"edit_{model_cls.__name__.lower()}_{sel_row['id']}" + (f"_r{revision}" if revision else "")
     edit_errors: _FormErrors = _FormErrors.load(edit_form_key)
     with st.form(edit_form_key, clear_on_submit=False):
         vals = {f.name: _render_field(f, sel_row, form_key=edit_form_key, errors=edit_errors.fields) for f in fields}

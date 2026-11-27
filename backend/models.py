@@ -537,6 +537,10 @@ class ProductionRole(StrEnum):
     #    "author",
 
 
+# NULL = unknown/not recorded; "none" = explicitly no gender; "div" = diverse.
+PERSON_GENDERS = ("m", "f", "none", "div")
+
+
 class Person(SourceMixin, DomainModel, table=True):
     """Represents a person involved in theater productions (e.g., actor, director, author, ...)."""
 
@@ -551,12 +555,25 @@ class Person(SourceMixin, DomainModel, table=True):
     born_precision: DatePrecision | None = None
     died: dt.datetime | None = Field(default=None, sa_type=DateTime)
     died_precision: DatePrecision | None = None
+    gender: str | None = None
     nationality: str | None = None
     description: str | None = None
     urls: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     text_contributions: list[TextContribution] = Relationship(back_populates="person")
     production_memberships: list[ProductionMembership] = Relationship(back_populates="person")
     organization_memberships: list[OrganizationMembership] = Relationship(back_populates="person")
+
+    __table_args__ = (CheckConstraint("gender IN ('m', 'f', 'none', 'div')", name="ck_person_gender"),)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_gender(cls, value: object) -> object:
+        """Reject genders outside the m/f/none/div vocabulary; empty input means unknown."""
+        if isinstance(value, dict) and "gender" in value:
+            value = {**value, "gender": value["gender"] or None}
+            if value["gender"] not in {None, *PERSON_GENDERS}:
+                raise ValueError(f"Gender must be one of {', '.join(PERSON_GENDERS)}")
+        return value
 
 
 class OrganizationMembership(DomainModel, table=True):
@@ -581,12 +598,14 @@ class Text(SourceMixin, DomainModel, table=True):
     """Represents a text, such as a play, that can be used in productions."""
 
     _entity_type: ClassVar[EntityType] = EntityType.TEXT
-    date_fields: ClassVar[tuple[str, ...]] = ("published",)
+    date_fields: ClassVar[tuple[str, ...]] = ("created", "published")
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     title: str
     languages: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     genre: str | None = None
+    created: dt.datetime | None = Field(default=None, sa_type=DateTime)  # start of writing, e.g. GND dateOfProduction
+    created_precision: DatePrecision | None = None
     published: dt.datetime | None = Field(default=None, sa_type=DateTime)
     published_precision: DatePrecision | None = None
     description: str | None = None
@@ -746,6 +765,7 @@ class Tag(SQLModel, table=True):
     aliases: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     position: int = 0
     active: bool = True
+    uri: str | None = None  # equivalent concept in an external vocabulary (GND), None if no exact match
 
 
 class TagStatus(StrEnum):
