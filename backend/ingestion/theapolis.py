@@ -36,14 +36,23 @@ from backend.ingestion.theapolis_import import (
     ImportRecord,
     accept_records,
     add_credits_batch,
-    merge_scoped_people,
+    merge_scoped_entities,
     migrate_pending_cases,
     normalize_character,
 )
 from backend.locations import split_country
-from backend.models import EntityType, Source, SourceRecord, TheapolisImportCheckpoint, TheapolisProfileCache
+from backend.models import (
+    EntityType,
+    Person,
+    Source,
+    SourceRecord,
+    Text,
+    TextContribution,
+    TheapolisImportCheckpoint,
+    TheapolisProfileCache,
+)
 from backend.production_import import author_name
-from backend.reconciliation import canonical_url, merge_entities, preview_entity_merge, validate_payload
+from backend.reconciliation import canonical_url, merge_entities, normalize, preview_entity_merge, validate_payload
 from backend.user_management import get_session, init_db
 
 SITE = "https://www.theapolis.de"
@@ -1459,55 +1468,126 @@ def _import_productions(
         add_credits_batch(session, kind, links, actor_id=ACTOR)
 
 
-def _merge_people_by_name(session: Session, source_id: uuid.UUID, names: set[str]) -> dict[uuid.UUID, uuid.UUID]:
-    groups: dict[str, dict[str, set[uuid.UUID]]] = {}
-    LOG.info("Loading Theapolis people for cross-role matching")
-    records = session.exec(
-        select(
-            SourceRecord.external_id, SourceRecord.entity_id, col(SourceRecord.payload)["incoming"]["name"].as_string()
-        ).where(SourceRecord.source_id == source_id, SourceRecord.entity_type == EntityType.PERSON)
-    )
-    for external_id, identity, name in records:
-        group, _, source_id_part = (external_id or "").partition(":")
-        if group in {"directors", "creators"} and source_id_part and name in names:
-            groups.setdefault(name, {}).setdefault(group, set()).add(identity)
-    session.commit()
-    # Connected name groups can share an identity after an earlier manual merge.
-    selections: dict[str, set[uuid.UUID]] = {}
-    owners: dict[uuid.UUID, str] = {}
-    for name, roles in groups.items():
-        if {"directors", "creators"} <= roles.keys():
-            identities = set().union(*roles.values())
-            if len(identities) < 2:
-                continue
-            related = {owners[identity] for identity in identities if identity in owners}
-            for previous in related:
-                identities.update(selections.pop(previous))
-            selections[name] = identities
-            owners.update(dict.fromkeys(identities, name))
-    redirects = {}
-    with tqdm(total=len(selections), desc="Matching people", unit="name") as progress:
+def _merge_groups(
+    session: Session, source_id: uuid.UUID, kind: EntityType, selections: dict[str, set[uuid.UUID]], label: str
+) -> dict[uuid.UUID, uuid.UUID]:
+    redirects: dict[uuid.UUID, uuid.UUID] = {}
+    skipped: list[str] = []
+    with tqdm(total=len(selections), desc=label, unit="group") as progress:
         for number, batch in enumerate(batched(selections.items(), BATCH_SIZE, strict=False), 1):
-            with _import_batch(session, "matching people", number):
-                merged, deferred = merge_scoped_people(session, source_id, dict(batch), actor_id=ACTOR)
+            with _import_batch(session, label.lower(), number):
+                merged, deferred, conflicting = merge_scoped_entities(
+                    session, source_id, kind, dict(batch), actor_id=ACTOR
+                )
                 redirects.update(merged)
+            skipped.extend(conflicting)
             for name, identities in deferred.items():
-                preview = preview_entity_merge(EntityType.PERSON, identities)
-                if any(field["conflict"] for field in preview["fields"]):
-                    raise ValueError(
-                        f"Conflicting fields for Theapolis person {name!r}; merge manually before reimporting"
-                    )
+                preview = preview_entity_merge(kind, identities)
+                conflicts = {field["field"] for field in preview["fields"] if field["conflict"]}
+                if conflicts - {"title"}:
+                    skipped.append(name)
+                    continue
                 target = merge_entities(
-                    EntityType.PERSON,
+                    kind,
                     identities,
                     target_id=preview["target_id"],
                     revision=preview["revision"],
                     actor_id=ACTOR,
+                    choices={
+                        "title": next(
+                            option["entity_id"]
+                            for field in preview["fields"]
+                            if field["field"] == "title"
+                            for option in field["options"]
+                            if option["value"] == preview["result"]["title"]
+                        )
+                    }
+                    if "title" in conflicts
+                    else {},
                 )
                 redirects.update(dict.fromkeys(identities, target))
             progress.update(len(batch))
+    if skipped:
+        LOG.warning(
+            "Theapolis: %s %s groups have conflicting fields; merge them manually: %s",
+            len(skipped),
+            kind.value,
+            sorted(skipped)[:20],
+        )
     session.expire_all()
     return redirects
+
+
+def _merge_people_by_name(
+    session: Session, source_id: uuid.UUID, names: set[str] | None = None
+) -> dict[uuid.UUID, uuid.UUID]:
+    """Merge Theapolis people sharing an exact name unless several Theapolis profiles prove homonyms."""
+    LOG.info("Loading Theapolis people for name matching")
+    groups: dict[str, set[uuid.UUID]] = {}
+    profiles: dict[str, set[str]] = {}
+    for identity, name, external_id in session.exec(
+        select(Person.id, Person.name, SourceRecord.external_id)
+        .join(SourceRecord, col(SourceRecord.entity_id) == Person.id)
+        .where(SourceRecord.source_id == source_id, SourceRecord.entity_type == EntityType.PERSON)
+    ):
+        if names is None or name in names:
+            groups.setdefault(name, set()).add(identity)
+            if external_id is not None and external_id.startswith("detail:profile:"):
+                profiles.setdefault(name, set()).add(external_id)
+    session.commit()
+    selections = {
+        name: identities
+        for name, identities in groups.items()
+        if len(identities) > 1 and len(profiles.get(name, ())) <= 1
+    }
+    return _merge_groups(session, source_id, EntityType.PERSON, selections, "Matching people")
+
+
+def _merge_texts(
+    session: Session, source_id: uuid.UUID, text_ids: set[uuid.UUID] | None = None
+) -> dict[uuid.UUID, uuid.UUID]:
+    """Merge Theapolis texts with the same normalized title and the same non-empty author set."""
+    LOG.info("Loading Theapolis texts for title and author matching")
+    titles = dict(
+        session.exec(
+            select(Text.id, Text.title)
+            .join(SourceRecord, col(SourceRecord.entity_id) == Text.id)
+            .where(SourceRecord.source_id == source_id, SourceRecord.entity_type == EntityType.TEXT)
+            .distinct()
+        ).all()
+    )
+    authors: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for text_id, person_id in session.exec(select(TextContribution.text_id, TextContribution.person_id)):
+        if text_id in titles:
+            authors.setdefault(text_id, set()).add(person_id)
+    session.commit()
+    groups: dict[str, set[uuid.UUID]] = {}
+    for text_id, title in titles.items():
+        if people := authors.get(text_id):
+            key = f"{normalize(title)} | {', '.join(sorted(map(str, people)))}"
+            groups.setdefault(key, set()).add(text_id)
+    selections = {
+        key: identities
+        for key, identities in groups.items()
+        if len(identities) > 1 and (text_ids is None or identities & text_ids)
+    }
+    return _merge_groups(session, source_id, EntityType.TEXT, selections, "Matching texts")
+
+
+def merge_duplicates() -> dict[str, int]:
+    """Backfill: merge all existing same-name Theapolis people and same-title/author texts."""
+    init_db()
+    with _import_lock(), get_session() as session:
+        source = session.exec(select(Source).where(Source.name == "theapolis.de")).first()
+        if source is None:
+            return {"person": 0, "text": 0}
+        source_id = source.id
+        people = _merge_people_by_name(session, source_id)
+        texts = _merge_texts(session, source_id)
+    return {
+        kind: sum(identity != target for identity, target in redirects.items())
+        for kind, redirects in (("person", people), ("text", texts))
+    }
 
 
 def _dach_import(
@@ -1532,8 +1612,6 @@ def _apply_import(
     people: dict[str, dict],
     productions: list[PreparedProduction],
     captured_at: dt.datetime | None,
-    *,
-    legacy: bool,
 ) -> dict[str, list[str]]:
     with get_session() as session:
         source = session.exec(select(Source).where(Source.name == "theapolis.de")).first()
@@ -1590,20 +1668,23 @@ def _apply_import(
                         identities, _ = accept(kind, [value for _, value in batch])
                         mapping.update(zip((key for key, _ in batch), identities, strict=True))
                     progress.update(len(batch))
-        if legacy:
-            redirects = _merge_people_by_name(session, source_id, {payload["name"] for payload in people.values()})
-            person_ids = {key: redirects.get(identity, identity) for key, identity in person_ids.items()}
+        redirects = _merge_people_by_name(session, source_id, {payload["name"] for payload in people.values()})
+        person_ids = {key: redirects.get(identity, identity) for key, identity in person_ids.items()}
         result["person"] = list(dict.fromkeys(str(person_ids[key]) for key in people))
         with tqdm(total=len(productions), desc="Productions", unit="production") as progress:
             for batch_number, batch in enumerate(batched(productions, BATCH_SIZE, strict=False), 1):
                 with _import_batch(session, "productions", batch_number):
                     _import_productions(session, batch, org_ids, person_ids, people, accept)
                 progress.update(len(batch))
+        text_redirects = _merge_texts(session, source_id, set(map(uuid.UUID, result["text"])))
+        result["text"] = list(
+            dict.fromkeys(str(text_redirects.get(uuid.UUID(i), uuid.UUID(i))) for i in result["text"])
+        )
     return result
 
 
 def import_all(json_path: Path | None = None, *, dach_only: bool = True) -> dict[str, list[str]]:
-    """Replay a legacy export, preserving the legacy matching behavior."""
+    """Replay a legacy export."""
     organizations, people, productions, captured_at = _prepare_import(
         _read_import_snapshot(json_path if json_path is not None else _latest_export())
     )
@@ -1611,7 +1692,7 @@ def import_all(json_path: Path | None = None, *, dach_only: bool = True) -> dict
         organizations, people, productions = _dach_import(organizations, people, productions)
     init_db()
     with _import_lock():
-        return _apply_import(organizations, people, productions, captured_at, legacy=True)
+        return _apply_import(organizations, people, productions, captured_at)
 
 
 @contextmanager
@@ -1643,7 +1724,6 @@ def import_archive(path: Path, *, dach_only: bool = True) -> dict[str, list[str]
         else:
             result = _apply_import(
                 *_prepare_import({"items": chain((first,), rows), "captured_at": archive.captured(run)}, archived=True),
-                legacy=False,
             )
         if since != run:
             with get_session() as session:
@@ -1708,6 +1788,9 @@ def main() -> None:
     )
     scope.add_argument("--all", dest="dach_only", action="store_false", help="Import all organizations and productions")
     sub.add_parser("migrate-cases", help="Explicitly accept stored pending Theapolis import cases")
+    sub.add_parser(
+        "merge-duplicates", help="Merge existing same-name Theapolis people and same-title/author Theapolis texts"
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if args.command == "download":
@@ -1739,6 +1822,8 @@ def main() -> None:
         print(json.dumps({"run": run}))
     elif args.command == "images":
         asyncio.run(download_images(args.output, concurrency=args.concurrency, limit=args.limit))
+    elif args.command == "merge-duplicates":
+        print(json.dumps(merge_duplicates()))
     elif args.command == "migrate-cases":
         print(json.dumps({kind: len(cases) for kind, cases in migrate_pending_cases().items()}))
     else:

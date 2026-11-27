@@ -950,7 +950,7 @@ def test_accepted_import_is_idempotent_and_preserves_source_only_urls(db, tmp_pa
     assert {key: len(value) for key, value in result.items()} == {
         "organization": 1,
         "person": 2,
-        "text": 2,
+        "text": 1,
         "production": 2,
     }
     with Session(db) as session:
@@ -1155,7 +1155,61 @@ def test_same_name_cross_role_merge_preserves_credits_and_source_ids(
         }
 
 
-def test_cross_role_merge_rejects_conflicting_person_fields(db, monkeypatch, tmp_path, item):
+@pytest.mark.parametrize("profiles", [1, 2])
+def test_same_name_merges_profiled_and_unprofiled_people_unless_profiles_differ(db, tmp_path, item, profiles):
+    url = f"{theapolis.SITE}/de/profil/sibylle-berg"
+    items = [
+        {
+            **item,
+            "id": 200 + number,
+            "directors": [],
+            "creators": [{"id": 8308, "name": "Sibylle Berg"}],
+            "theapolis_detail_status": "parsed",
+            "theapolis_detail": {
+                "credits": [
+                    {
+                        "person_id": f"profile:{130688 + number}",
+                        "name": "Sibylle Berg",
+                        "role": "Regie",
+                        "profile_url": f"{url}-{number}" if number else url,
+                    }
+                ]
+            },
+        }
+        for number in range(profiles)
+    ]
+    path = tmp_path / "profiles.json"
+    path.write_text(json.dumps({"items": items}))
+    theapolis.import_all(path, dach_only=False)
+    with Session(db) as session:
+        people = session.exec(select(Person).where(Person.name == "Sibylle Berg")).all()
+        assert len(people) == (1 if profiles == 1 else profiles + 1)
+        if profiles == 1:
+            assert [link.external_url for link in people[0].sources] == [url]
+
+
+def test_merge_duplicates_backfills_people_and_texts_by_title_and_authors(db, monkeypatch, tmp_path, item):
+    items = [
+        {**item, "id": 1, "creators": [{"id": 1, "name": "Alex"}]},
+        {**item, "id": 2, "name": " hamlet", "directors": [], "creators": [{"id": 2, "name": "Alex"}]},
+        {**item, "id": 3, "directors": [], "creators": [{"id": 3, "name": "Other"}]},
+    ]
+    path = tmp_path / "backfill.json"
+    path.write_text(json.dumps({"items": items}))
+    with monkeypatch.context() as patch:
+        patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
+        patch.setattr(theapolis, "_merge_texts", lambda *args: {})
+        theapolis.import_all(path, dach_only=False)
+    assert theapolis.merge_duplicates() == {"person": 2, "text": 1}
+    assert theapolis.merge_duplicates() == {"person": 0, "text": 0}
+    with Session(db) as session:
+        assert sorted(person.name for person in session.exec(select(Person))) == ["Alex", "Other"]
+        texts = session.exec(select(Text)).all()
+        assert sorted(text.title for text in texts) == ["Hamlet", "Hamlet"]
+        assert len({production.text_id for production in session.exec(select(Production))}) == 2
+
+
+def test_name_merge_skips_conflicting_person_fields(db, monkeypatch, tmp_path, item, caplog):
     item["creators"] = [{"id": 77, "name": "Alex", "profile": {"birthDate": "1980"}}]
     item["directors"][0]["profile"] = {"birthDate": "1970"}
     path = tmp_path / "conflicting-person.json"
@@ -1163,8 +1217,8 @@ def test_cross_role_merge_rejects_conflicting_person_fields(db, monkeypatch, tmp
     with monkeypatch.context() as patch:
         patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
         theapolis.import_all(path, dach_only=False)
-    with pytest.raises(ValueError, match="Conflicting fields for Theapolis person 'Alex'"):
-        theapolis.import_all(path, dach_only=False)
+    theapolis.import_all(path, dach_only=False)
+    assert "1 person groups have conflicting fields" in caplog.text
     with Session(db) as session:
         assert {person.born for person in session.exec(select(Person))} == {
             dt.datetime(1970, 1, 1),
@@ -1321,7 +1375,7 @@ def test_import_reports_cross_role_matching_before_productions(db, tmp_path, ite
     path.write_text(json.dumps({"items": [item]}))
     with caplog.at_level("INFO", logger=theapolis.__name__):
         theapolis.import_all(path, dach_only=False)
-    assert "Loading Theapolis people for cross-role matching" in caplog.text
+    assert "Loading Theapolis people for name matching" in caplog.text
     progress = capsys.readouterr().err
     assert progress.index("Matching people") < progress.index("Productions")
 
@@ -1489,6 +1543,7 @@ def test_reimport_after_people_and_text_merge_reuses_survivors(db, monkeypatch, 
     path.write_text(json.dumps({"items": [item, {**item, "id": 124}]}))
     with monkeypatch.context() as patch:
         patch.setattr(theapolis, "_merge_people_by_name", lambda *args: {})
+        patch.setattr(theapolis, "_merge_texts", lambda *args: {})
         result = theapolis.import_all(path, dach_only=False)
     targets = {}
     for kind, ids in (("person", result["person"][:2]), ("text", result["text"])):
@@ -1702,7 +1757,7 @@ def test_newer_export_adds_only_delta_preserving_missing_records_and_conflicts(d
     changed = copy.deepcopy(item)
     changed["name"] = "Source title change"
     changed["directors"][0]["profile"] = {"birthDate": "1980"}
-    changed["creators"].append({"id": 11, "name": "Other Alex"})
+    changed["creators"].append({"id": 11, "name": "Third Alex"})
     path.write_text(
         json.dumps(
             {

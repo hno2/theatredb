@@ -54,10 +54,11 @@ administrative tools for imports, review, and data maintenance.
   observations do not rewrite entities or credits; newer snapshots still
   advance observation timestamps. Embedded NULs are removed from text values
   with warnings, but NULs in source IDs reject the import.
-- Theapolis intentionally merges director and creator records with exactly
-  matching names, including records from earlier imports. This can merge
-  different people who share a name; conflicting fields stop import for manual
-  resolution. Compatible Theapolis-only groups merge in bounded transactions
+- Theapolis intentionally merges people with exactly matching names,
+  including records from earlier imports, unless the group has several distinct
+  Theapolis profiles. This can merge different people who share a name. Texts
+  merge on normalized title plus identical non-empty author set. Groups with
+  conflicting fields are logged and left for manual resolution. Compatible Theapolis-only groups merge in bounded transactions
   with references, source identities, redirects, decisions, and audit history
   preserved; groups involving other sources retain the reviewed merge path.
   Other-source matching uses its own review workflow.

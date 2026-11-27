@@ -15,6 +15,7 @@ from backend.models import (
     EntityRedirect,
     EntitySource,
     EntityType,
+    LibraryEntry,
     Organization,
     Person,
     Production,
@@ -24,6 +25,8 @@ from backend.models import (
     SourceRecord,
     Text,
     TextContribution,
+    TextLineage,
+    TextTitle,
 )
 from backend.reconciliation import (
     EMPTY,
@@ -54,21 +57,29 @@ class ImportRecord(TypedDict):
     context: dict
 
 
-def _check_merge_identities(session: Session, source_id: uuid.UUID, rows: list, redirects: dict) -> None:
+MERGE_REASONS = {
+    EntityType.PERSON: "Theapolis: gleicher Name",
+    EntityType.TEXT: "Theapolis: gleicher Titel und gleiche Autor:innen",
+}
+
+
+def _check_merge_identities(
+    session: Session, source_id: uuid.UUID, kind: EntityType, rows: list, redirects: dict
+) -> None:
     external_ids = {row.external_id for row in rows if row.entity_id in redirects and row.external_id}
     owners: dict[str, set[uuid.UUID]] = {}
     for model in (SourceRecord, EntitySource):
         matches = session.exec(
             select(model.external_id, model.entity_id).where(
                 model.source_id == source_id,
-                model.entity_type == EntityType.PERSON,
+                model.entity_type == kind,
                 col(model.external_id).in_(external_ids),
             )
         ).all()
         for external_id, identity in matches:
             if external_id is not None:
                 owners.setdefault(external_id, set()).add(identity)
-    resolved = resolve_ids(session, EntityType.PERSON, set().union(*owners.values()))
+    resolved = resolve_ids(session, kind, set().union(*owners.values()))
     if any(
         len({redirects.get(resolved[identity], resolved[identity]) for identity in group}) > 1
         for group in owners.values()
@@ -76,12 +87,12 @@ def _check_merge_identities(session: Session, source_id: uuid.UUID, rows: list, 
         raise ValueError("Theapolis source identity collision with a third entity; resolve it first")
 
 
-def _person_merge_states(
-    session: Session, people: dict, links: list, mappings: list, selected: set
+def _merge_states(
+    session: Session, model: type[SQLModel], entities: dict, links: list, mappings: list, selected: set
 ) -> tuple[dict, list]:
     states = {
         identity: {
-            "record": entity_snapshot(people[identity]),
+            "record": entity_snapshot(entities[identity]),
             "references": {},
             "sources": [],
             "source_records": [],
@@ -89,19 +100,19 @@ def _person_merge_states(
         for identity in selected
     }
     references = []
-    target_table = sa_inspect(Person).local_table
-    for mapper in sa_inspect(Person).registry.mappers:
+    target_table = sa_inspect(model).local_table
+    for mapper in sa_inspect(model).registry.mappers:
         for column in mapper.columns:
             if any(fk.column.table is target_table for fk in column.foreign_keys):
-                model = mapper.class_
+                referencing = mapper.class_
                 rows = session.exec(
-                    select(model).where(getattr(model, column.key).in_(selected)).with_for_update()
+                    select(referencing).where(getattr(referencing, column.key).in_(selected)).with_for_update()
                 ).all()
-                references.append((model, column.key, rows))
+                references.append((referencing, column.key, rows))
                 for identity in selected:
-                    states[identity]["references"][f"{model.__tablename__}.{column.key}"] = []
+                    states[identity]["references"][f"{referencing.__tablename__}.{column.key}"] = []
                 for row in rows:
-                    states[getattr(row, column.key)]["references"][f"{model.__tablename__}.{column.key}"].append(
+                    states[getattr(row, column.key)]["references"][f"{referencing.__tablename__}.{column.key}"].append(
                         entity_snapshot(row)
                     )
     for rows, key in ((links, "sources"), (mappings, "source_records")):
@@ -112,15 +123,21 @@ def _person_merge_states(
     return states, references
 
 
-def _person_merge_decisions(people: dict, groups: dict, states: dict, actor_id: str) -> tuple[list, list, list]:
+def _merge_conflicts(kind: EntityType, members: list, entities: dict) -> bool:
+    """Best-formatted title wins for texts; any other differing single value needs manual review."""
+    _, fields = merge_entity_fields(kind, [{"record": entity_snapshot(entities[identity])} for identity in members])
+    return any(field["conflict"] and field["field"] != "title" for field in fields)
+
+
+def _merge_decisions(
+    kind: EntityType, entities: dict, groups: dict, targets: dict, states: dict, actor_id: str
+) -> tuple[list, list, list]:
     updated, deleted, decisions = [], [], []
     for name, members in groups.items():
-        target_id = min(members)
-        ordered = [states[identity] for identity in sorted(members)]
-        result, fields = merge_entity_fields(EntityType.PERSON, ordered)
-        if any(field["conflict"] for field in fields):
-            raise ValueError(f"Conflicting fields for Theapolis person {name!r}; merge manually before reimporting")
-        target = people[target_id]
+        target_id = targets[name]
+        ordered = [states[identity] for identity in sorted(members, key=lambda value: (value != target_id, value))]
+        result, _ = merge_entity_fields(kind, ordered)
+        target = entities[target_id]
         validated = revalidate(target, result)
         before = entity_snapshot(target)
         for field in result.keys() - {"id"}:
@@ -128,15 +145,17 @@ def _person_merge_decisions(people: dict, groups: dict, states: dict, actor_id: 
         if entity_snapshot(target) != before:
             updated.append(target)
         for identity in sorted(members - {target_id}):
-            duplicate = people[identity]
+            duplicate = entities[identity]
             deleted.append(duplicate)
             decisions.append(
                 ReconciliationCase(
-                    key=stable_digest(["duplicate", EntityType.PERSON, sorted([str(target_id), str(identity)])]),
-                    entity_type=EntityType.PERSON,
+                    key=stable_digest(["duplicate", kind, sorted([str(target_id), str(identity)])]),
+                    entity_type=kind,
                     operation="merge",
-                    reason="Theapolis: gleicher Name in Regie und Urheberschaft",
-                    incoming={"name": duplicate.name},
+                    reason=MERGE_REASONS[kind],
+                    incoming={
+                        field: getattr(duplicate, field) for field in ("name", "title") if hasattr(duplicate, field)
+                    },
                     target_id=target_id,
                     duplicate_id=identity,
                     status="approved",
@@ -152,7 +171,7 @@ def _person_merge_decisions(people: dict, groups: dict, states: dict, actor_id: 
     return updated, deleted, decisions
 
 
-def _deduplicate_person_links(session: Session, model: type[SQLModel], rows: list, touched: dict) -> list:
+def _deduplicate_merged_links(session: Session, model: type[SQLModel], rows: list, touched: dict) -> list:
     fields = LINK_IDENTITY_FIELDS.get(model)
     if not fields:
         return []
@@ -171,7 +190,7 @@ def _deduplicate_person_links(session: Session, model: type[SQLModel], rows: lis
     return deleted
 
 
-def _move_person_references(session: Session, references: list, redirects: dict) -> tuple[list, list]:
+def _move_references(session: Session, references: list, redirects: dict) -> tuple[list, list]:
     touched = {}
     deleted = []
     for model, field, rows in references:
@@ -180,17 +199,19 @@ def _move_person_references(session: Session, references: list, redirects: dict)
             if redirects[current] != current:
                 setattr(row, field, redirects[current])
                 touched[model, row.id] = row
-        deleted.extend(_deduplicate_person_links(session, model, rows, touched))
+        deleted.extend(_deduplicate_merged_links(session, model, rows, touched))
     return list(touched.values()), deleted
 
 
 def _move_scoped_sources(session: Session, links: list, mappings: list, by_key: dict, redirects: dict) -> None:
     surviving_links = set()
     payloads: dict[uuid.UUID, dict] = {}
+    # Texts have no external IDs; archive their link snapshot on any observation of the same entity.
+    by_entity = {(row.source_id, row.entity_id): row for row in sorted(mappings, key=lambda row: row.record_key)}
     for row in sorted(links, key=lambda row: (row.entity_id != redirects.get(row.entity_id), row.id)):
         if row.entity_id not in redirects:
             continue
-        record = by_key[row.source_id, f"id:{row.external_id}"]
+        record = by_key.get((row.source_id, f"id:{row.external_id}")) or by_entity[row.source_id, row.entity_id]
         payload = payloads.get(record.id, record.payload)
         archived = payload.get("merged_sources", [])
         snapshot = entity_snapshot(row)
@@ -213,11 +234,9 @@ def _move_scoped_sources(session: Session, links: list, mappings: list, by_key: 
         )
 
 
-def _record_person_merges(session: Session, redirects: dict, decisions: list, actor_id: str) -> None:
+def _record_merges(session: Session, kind: EntityType, redirects: dict, decisions: list, actor_id: str) -> None:
     aliases = session.exec(
-        select(EntityRedirect).where(
-            EntityRedirect.entity_type == EntityType.PERSON, col(EntityRedirect.target_id).in_(redirects)
-        )
+        select(EntityRedirect).where(EntityRedirect.entity_type == kind, col(EntityRedirect.target_id).in_(redirects))
     ).all()
     review_ids = redirects.keys() | {row.old_id for row in aliases}
     for row in aliases:
@@ -225,7 +244,7 @@ def _record_person_merges(session: Session, redirects: dict, decisions: list, ac
     alias_targets = {row.old_id: redirects.get(row.target_id, row.target_id) for row in aliases}
     for case in session.exec(
         select(ReconciliationCase).where(
-            ReconciliationCase.entity_type == EntityType.PERSON,
+            ReconciliationCase.entity_type == kind,
             ReconciliationCase.operation == "merge",
             ReconciliationCase.status == "pending",
             col(ReconciliationCase.target_id).in_(review_ids),
@@ -233,7 +252,7 @@ def _record_person_merges(session: Session, redirects: dict, decisions: list, ac
         )
     ):
         if case.target_id is None or case.duplicate_id is None:
-            raise ValueError("Pending person merge requires two identities")
+            raise ValueError("Pending merge requires two identities")
         target = redirects.get(case.target_id, alias_targets.get(case.target_id))
         duplicate = redirects.get(case.duplicate_id, alias_targets.get(case.duplicate_id))
         if target is not None and target == duplicate:
@@ -257,75 +276,114 @@ def _record_person_merges(session: Session, redirects: dict, decisions: list, ac
             inserted.append(case.model_dump())
     if inserted:
         session.execute(insert(ReconciliationCase), inserted)
-    session.execute(
-        insert(EntityRedirect),
-        [
-            EntityRedirect(entity_type=EntityType.PERSON, old_id=identity, target_id=target).model_dump()
-            for identity, target in redirects.items()
-            if identity != target
-        ],
-    )
+    redirect_rows = [
+        EntityRedirect(entity_type=kind, old_id=identity, target_id=target).model_dump()
+        for identity, target in redirects.items()
+        if identity != target
+    ]
+    if redirect_rows:
+        session.execute(insert(EntityRedirect), redirect_rows)
 
 
-def merge_scoped_people(
+def _scoped_unsupported(
+    session: Session, source_id: uuid.UUID, kind: EntityType, ids: set, rows: list, by_key: dict
+) -> set[uuid.UUID]:
+    """Entities with other sources or rows the bulk path cannot move go to the reviewed merge."""
+    if kind == EntityType.PERSON:
+        return {
+            row.entity_id
+            for row in rows
+            if row.source_id != source_id
+            or not (row.external_id or "").startswith(("directors:", "creators:", "detail:profile:"))
+            or (row.source_id, f"id:{row.external_id}") not in by_key
+        }
+    unsupported = {
+        row.entity_id
+        for row in rows
+        if row.source_id != source_id
+        or (isinstance(row, SourceRecord) and not row.record_key.startswith("work:production:"))
+    }
+    for model, fields in (
+        (TextTitle, ("text_id",)),
+        (TextLineage, ("source_text_id", "derived_text_id")),
+        (LibraryEntry, ("text_id",)),
+    ):
+        for field in fields:
+            unsupported.update(
+                session.exec(select(getattr(model, field)).where(getattr(model, field).in_(ids)).distinct())
+            )
+    return unsupported
+
+
+def merge_scoped_entities(
     session: Session,
     source_id: uuid.UUID,
+    kind: EntityType,
     groups: dict[str, set[uuid.UUID]],
     *,
     actor_id: str,
-) -> tuple[dict[uuid.UUID, uuid.UUID], dict[str, set[uuid.UUID]]]:
-    """Batch compatible Theapolis-only identities; leave mixed-source groups for reviewed merging."""
+) -> tuple[dict[uuid.UUID, uuid.UUID], dict[str, set[uuid.UUID]], list[str]]:
+    """Batch-merge Theapolis-only people or texts.
+
+    Returns redirects, groups deferred to the reviewed merge (other sources or dependent rows)
+    and names of groups skipped because their field values conflict.
+    """
+    model = ENTITY_MODELS[kind]
     ids = set().union(*groups.values())
     if not ids:
-        return {}, {}
-    people = {
+        return {}, {}, []
+    entities = {
         row.id: row
-        for row in session.exec(
-            select(Person).where(col(Person.id).in_(ids)).order_by(col(Person.id)).with_for_update()
-        )
+        for row in session.exec(select(model).where(col(model.id).in_(ids)).order_by(col(model.id)).with_for_update())
     }
-    if people.keys() != ids:
-        raise ValueError("Selected Theapolis people no longer exist; rerun the import")
+    if entities.keys() != ids:
+        raise ValueError("Selected Theapolis records no longer exist; rerun the import")
     mappings = list(
         session.exec(
             select(SourceRecord)
-            .where(SourceRecord.entity_type == EntityType.PERSON, col(SourceRecord.entity_id).in_(ids))
+            .where(SourceRecord.entity_type == kind, col(SourceRecord.entity_id).in_(ids))
             .with_for_update()
         )
     )
     links = list(
         session.exec(
             select(EntitySource)
-            .where(EntitySource.entity_type == EntityType.PERSON, col(EntitySource.entity_id).in_(ids))
+            .where(EntitySource.entity_type == kind, col(EntitySource.entity_id).in_(ids))
             .with_for_update()
         )
     )
     by_key = {(row.source_id, row.record_key): row for row in mappings}
-    unsupported = {
-        row.entity_id
-        for row in [*mappings, *links]
-        if row.source_id != source_id
-        or not (row.external_id or "").startswith(("directors:", "creators:"))
-        or (row.source_id, f"id:{row.external_id}") not in by_key
-    }
+    unsupported = _scoped_unsupported(session, source_id, kind, ids, [*mappings, *links], by_key)
     deferred = {name: members for name, members in groups.items() if members & unsupported}
-    groups = {name: members for name, members in groups.items() if name not in deferred}
+    conflicting = [
+        name
+        for name, members in groups.items()
+        if name not in deferred and _merge_conflicts(kind, sorted(members), entities)
+    ]
+    groups = {name: members for name, members in groups.items() if name not in deferred and name not in conflicting}
     if not groups:
-        return {}, deferred
-    redirects = {identity: min(members) for members in groups.values() for identity in members}
-    _check_merge_identities(session, source_id, [*mappings, *links], redirects)
-    states, references = _person_merge_states(session, people, links, mappings, set(redirects))
-    updated, deleted, decisions = _person_merge_decisions(people, groups, states, actor_id)
+        return {}, deferred, conflicting
+    # Prefer the record carrying the Theapolis profile link so its public URL stays visible.
+    profiled = {row.entity_id for row in links if (row.external_id or "").startswith("detail:")}
+    linked = {row.entity_id for row in links if row.external_url}
+    targets = {
+        name: min(members, key=lambda value: (value not in profiled, value not in linked, value))
+        for name, members in groups.items()
+    }
+    redirects = {identity: targets[name] for name, members in groups.items() for identity in members}
+    _check_merge_identities(session, source_id, kind, [*mappings, *links], redirects)
+    states, references = _merge_states(session, model, entities, links, mappings, set(redirects))
+    updated, deleted, decisions = _merge_decisions(kind, entities, groups, targets, states, actor_id)
     removed = {row.id for row in deleted}
-    changed_links, deleted_links = _move_person_references(session, references, redirects)
+    changed_links, deleted_links = _move_references(session, references, redirects)
     _move_scoped_sources(session, links, mappings, by_key, redirects)
-    _record_person_merges(session, redirects, decisions, actor_id)
+    _record_merges(session, kind, redirects, decisions, actor_id)
     session.flush()
     add_scd2_events(
         session, inserted=[], updated=[*updated, *changed_links], deleted=[*deleted, *deleted_links], actor_id=actor_id
     )
-    session.execute(delete(Person).where(col(Person.id).in_(removed)))
-    return redirects, deferred
+    session.execute(delete(model).where(col(model.id).in_(removed)))
+    return redirects, deferred, conflicting
 
 
 def resolve_ids(session: Session, kind: EntityType, identities: set[uuid.UUID]) -> dict[uuid.UUID, uuid.UUID]:

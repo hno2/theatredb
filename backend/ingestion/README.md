@@ -174,8 +174,8 @@ uv run python -m backend.ingestion.theapolis seed --json path/to/full.source.jso
 ```
 
 `download --json path.json` and `import --json path.json` retain the legacy
-format. Archive imports preserve existing stable source mappings; they do not
-merge director and creator records solely by name.
+format. Both import paths preserve stable source mappings and then apply the
+name and text matching described below.
 
 ### Cast and crew
 
@@ -200,9 +200,9 @@ an imported main name can change only while it still matches its previous
 source observation. The importer logs name variants rather than aborting.
 Archive imports link a legacy director/creator ID to a numeric profile ID when
 both feeds agree on the production, credit name, role and Theapolis profile URL
-without ambiguity. Explicit feed aliases take precedence. Existing separate
-people are logged for a reviewed merge, not automatically merged. No new
-download is needed for this matching when the archive already has both feeds.
+without ambiguity. Explicit feed aliases take precedence. Remaining separate
+people are merged by exact name (see below). No new download is needed for
+this matching when the archive already has both feeds.
 The legacy `download --json` interchange export remains director/creator-only;
 use the archive workflow for full API credits.
 
@@ -298,10 +298,26 @@ positive profile-cache entries are refreshed once to include biography data.
 Old exports remain importable and gain premiere tags from their raw source
 metadata; new exports validate those tags and descriptions against staged JSON.
 
-Cross-role matching batches compatible Theapolis-only people, their foreign-key
-references, source mappings, redirects, review decisions, and audit history.
-Mixed-source identities retain the reviewed merge path. Schema migration `0006`
-indexes person references so matching does not scan every credit table per name.
+Every import merges Theapolis people with the exact same name (director,
+creator and profile records alike), unless the group contains two or more
+distinct Theapolis profiles: those are treated as homonyms and left apart.
+The survivor is the record linked to the Theapolis profile, so its URL stays.
+Texts are merged when their normalized title (case, whitespace and punctuation
+ignored) and their non-empty author set match; the merged text keeps the best
+formatted title (heading case preferred, with deterministic tie-breaking).
+Groups with other conflicting field values are skipped and logged for a manual
+merge instead of aborting the import. Compatible Theapolis-only groups merge in
+batches with their foreign-key references, source mappings, redirects, review
+decisions, and audit history. Mixed-source identities, and texts with title
+variants, lineage or library entries, use the reviewed merge path. Schema
+migration `0006` indexes person references so matching does not scan every
+credit table per name.
+
+To apply this matching to an existing database without importing:
+
+```bash
+uv run python -m backend.ingestion.theapolis merge-duplicates
+```
 
 To merge records manually, use **Verwaltung → Personen / Texte → Zusammenführen**.
 

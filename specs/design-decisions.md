@@ -7,8 +7,9 @@ Short record of current design choices and constraints.
 - Keep each source record and its provenance. Apply unambiguous import changes;
   send ambiguous matches to review rather than guessing.
 - Theapolis IDs keep director and creator namespaces separate. Its deliberate
-  exact-name cross-role merge is an exception, not a general identity rule;
-  conflicting fields require a human merge.
+  exact-name person merge (skipped when several distinct Theapolis profiles
+  share the name) and title-plus-authors text merge are exceptions, not general
+  identity rules; conflicting fields require a human merge.
 - Productions with different known premiere years are separate, even when
   titles match. Unknown years still use normal matching checks.
 - Text versions are separate from works. Resolve lineage and translator
