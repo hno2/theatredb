@@ -81,6 +81,29 @@ based on available width. Personal actions on text and production pages stack
 at full width on viewports up to 640 pixels. Check theatre production previews
 for compact spacing between tags and the next entry.
 
+Management and catalog category filters share five-minute cached, distinct
+database choices. Fields with more than 200 choices retain text search,
+except controlled vocabularies such as person types (`VOCABULARY_FIELDS`);
+free-text fields such as URLs and descriptions never become dropdowns.
+Person details use Edit, Productions and Text Contributions tabs with link
+counts. Relation tables support header sorting, editing and row deletion;
+changes persist on Save. Add links using the form below the table.
+Text Contributions use an `Auswahl` checkbox column (built-in row ticks never
+reach Python in `st.data_editor`). With two or more ticked, Zusammenführen
+(next to the green Save) opens a dialog asking which text survives and reuses
+the regular text merge; Entfernen deletes the ticked links only. Text
+Contributions sort alphabetically by title. Foreign-key pickers share a
+five-minute `_fk_choices` cache, cleared after any management save or merge.
+Productions include theatre and premiere year, newest premiere first.
+Selected people are stored as repeated `person=<UUID>` URL parameters and
+restored on reload. Selected rows outside the current results page remain
+visible until deselected; unrelated URL parameters are preserved.
+The production add form searches after two typed characters (500 ms debounce)
+instead of loading all productions. Up to 50 suggestions, including theatre
+and year, appear newest first with a loading spinner. Suggestions and linked
+production context share a five-minute cache; production edits and link saves invalidate it.
+Current person types remain selectable even when cached category choices are stale.
+
 ## Production deployments
 
 The **Deploy production** workflow runs on every push to `main` and can also be

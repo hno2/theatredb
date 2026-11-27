@@ -9,10 +9,11 @@ from uuid import UUID
 import pandas as pd
 import streamlit as st
 from pydantic import ValidationError
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import InstrumentedAttribute
-from sqlmodel import SQLModel, col, select
+from sqlmodel import SQLModel, col, func, select
 from streamlit import session_state
 
 from backend.config import ENTITY_LABELS, FORM_FIELD_KINDS, canonical_role
@@ -38,6 +39,40 @@ from frontend.management.merge import render_merge_action
 from frontend.views.organization import web_url
 
 FormValue = str | int | float | bool | dt.date | dt.datetime | list[str] | dict | None
+ProductionChoice = tuple[str, str | None, dt.datetime | None]
+
+
+@st.cache_data(ttl=300, max_entries=128, show_spinner="Produktionen werden geladen …")
+def _production_choices(query: str = "", *, ids: tuple[str, ...] = ()) -> dict[str, ProductionChoice]:
+    if not ids and len(query.strip()) < 2:
+        return {}
+    stmt = (
+        select(Production.id, Production.name, Organization.name, Production.premiere)
+        .outerjoin(Organization, col(Organization.id) == col(Production.organization_id))
+        .order_by(col(Production.premiere).desc().nulls_last(), col(Production.name), col(Production.id))
+    )
+    if ids:
+        stmt = stmt.where(col(Production.id).in_([UUID(value) for value in ids]))
+    else:
+        stmt = stmt.where(col(Production.name).icontains(query.strip(), autoescape=True)).limit(50)
+    with get_session() as session:
+        return {
+            str(identifier): (name, theatre, premiere) for identifier, name, theatre, premiere in session.exec(stmt)
+        }
+
+
+@st.cache_data(ttl=300, show_spinner="Auswahl wird geladen …")
+def _fk_choices(model_cls: type[SQLModel], display: str) -> dict[str, str]:
+    """Cached id → label map for foreign-key pickers (e.g. ~65k texts)."""
+    column = getattr(model_cls, display)
+    with get_session() as session:
+        rows = session.exec(select(sa_inspect(model_cls).primary_key[0], column).order_by(column))
+        return {str(identifier): label for identifier, label in rows}
+
+
+def _clear_choice_caches() -> None:
+    _production_choices.clear()
+    _fk_choices.clear()
 
 
 @dataclass(slots=True)
@@ -181,13 +216,23 @@ def _render_fk_select(field: _FieldUI, d: FormValue, *, form_key: str) -> FormVa
     if field.fk_model is None:
         v = st.text_input(field.label, value="" if d is None else str(d))
         return v.strip() or None
-    entities = list_entities(field.fk_model, order_by=_order_expr(field.fk_model, field.fk_display))
-    labels = (
-        field.fk_labels(entities)
-        if field.fk_labels
-        else {_id_of(e): str(getattr(e, field.fk_display, str(e))) for e in entities}
-    )
-    id_by_label = {labels[_id_of(e)]: _id_of(e) for e in entities}
+    if field.fk_model is Production:
+        query = st.session_state.get(f"{form_key}_fk_search_{field.name}", "").strip()
+        choices = _production_choices(query) if len(query) >= 2 else {}
+        if d:
+            choices.update(_production_choices(ids=(str(d),)))
+        labels = {
+            identifier: f"{name} · {theatre or 'Theater unbekannt'} · "
+            f"{premiere.year if premiere else 'Jahr unbekannt'} [{identifier[:8]}]"
+            for identifier, (name, theatre, premiere) in choices.items()
+        }
+    else:
+        labels = (
+            field.fk_labels(list_entities(field.fk_model, order_by=_order_expr(field.fk_model, field.fk_display)))
+            if field.fk_labels
+            else _fk_choices(field.fk_model, field.fk_display)
+        )
+    id_by_label = {label: identifier for identifier, label in labels.items()}
     options = list(id_by_label)
     default_choice: list[str] = []
     if d:
@@ -283,10 +328,11 @@ def _domain_date_input(value: object, precision: object) -> str:
 
 
 def _render_multiselect(field: _FieldUI, d: list[str] | None, key: str, accept_new: bool = True) -> FormValue:
+    defaults = d if isinstance(d, list) else []
     return st.multiselect(
         field.label,
-        options=field.options or [],
-        default=d if isinstance(d, list) else [],
+        options=list(dict.fromkeys([*(field.options or []), *defaults])),
+        default=defaults,
         key=key,
         accept_new_options=accept_new,
     )
@@ -494,6 +540,17 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
     actor: str | None,
 ) -> None:
     """Render editable table for child relation and persist full table on save."""
+    production_context: dict[str, ProductionChoice] = {}
+    if relation.get("production_context"):
+        ids = tuple(sorted({str(member.production_id) for member in members}))
+        production_context = _production_choices(ids=ids) if ids else {}
+        members = sorted(
+            members,
+            key=lambda member: (
+                production_context.get(str(member.production_id), ("", None, None))[2] or dt.datetime.min
+            ),
+            reverse=True,
+        )
     rows: list[dict] = []
     for member in members:
         m_dict = member.model_dump(mode="python")
@@ -507,15 +564,25 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
             if f.kind == "select" and f.option_labels and isinstance(val, str):
                 val = f.option_labels.get(val, val)
             entry[f.name] = val
+        if relation.get("production_context"):
+            _, theatre, premiere = production_context.get(str(m_dict["production_id"]), ("", None, None))
+            entry["theatre"] = theatre
+            entry["year"] = premiere.year if premiere else None
         rows.append(entry)
-    if not rows:
+    if sort_by := relation.get("sort_by"):
+        rows.sort(key=lambda row: str(row.get(sort_by) or "").casefold())
+    if not rows and not relation.get("sortable"):
         rows.append({"__id": "", **{f.name: None for f in fields}})
 
     column_config: dict = {
         "__id": None,
     }
     for f in fields:
-        if f.kind == "select" and f.options:
+        if f.kind == "fk_select" and not relation.get("fk_autocreate", {}).get(f.name):
+            column_config[f.name] = st.column_config.SelectboxColumn(
+                f.label, options=sorted(set(fk_lookups.get(f.name, {}).values())), required=True
+            )
+        elif f.kind == "select" and f.options:
             labels = f.option_labels or {}
             options = [labels.get(value, value) for value in f.options]
             options += [str(row[f.name]) for row in rows if row[f.name] and row[f.name] not in options]
@@ -525,16 +592,69 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
         else:
             column_config[f.name] = st.column_config.TextColumn(f.label)
 
+    df = pd.DataFrame(rows, columns=["__id", *(f.name for f in fields)])
+    if relation.get("production_context"):
+        df["theatre"] = [row["theatre"] for row in rows]
+        df["year"] = pd.array([row["year"] for row in rows], dtype="Int64")
+        column_config.update(
+            theatre=st.column_config.TextColumn("Theatre", disabled=True),
+            year=st.column_config.NumberColumn("Production year", format="%d", disabled=True),
+        )
+    editor_key = f"table_editor_{relation_key}_{parent_id}"
+    revision_key = f"{editor_key}_revision"
+    merge = cast(dict | None, relation.get("merge"))
+    epoch = st.session_state.get(f"table_epoch_{merge['kind']}", 0) if merge else 0
+    if merge:
+        # Built-in row ticks never reach Python before trash is pressed, so merge tables
+        # use one rerunning checkbox column instead (num_rows="fixed" hides the built-in ones).
+        df.insert(0, "Auswahl", False)
+        column_config["Auswahl"] = st.column_config.CheckboxColumn("Auswahl", width="small")
     edited = st.data_editor(
-        pd.DataFrame(rows),
-        num_rows="dynamic",
+        df,
+        num_rows="fixed" if merge else "delete" if relation.get("sortable") else "dynamic",
         hide_index=True,
-        key=f"table_editor_{relation_key}_{parent_id}",
+        key=f"{editor_key}_{st.session_state.get(revision_key, 0)}_{epoch}",
         column_config=column_config,
+        disabled=["__id"],
+        alt=f"{relation.get('title', child_name)} for the selected record",
     )
+    save_key = f"save_{relation_key}_{parent_id}"
+    st.html(f"<style>.st-key-{save_key} button {{background-color: #2e7d32; border-color: #2e7d32;}}</style>")
+    with st.container(horizontal=True):
+        save = st.button(
+            f"Save {relation.get('title', child_name)}", key=save_key, type="primary", icon=":material/save:"
+        )
+        if merge:
+            selected = [row_id for row_id in edited.loc[edited["Auswahl"], "__id"] if row_id]
+            targets = {_id_of(m): str(getattr(m, merge["field"])) for m in members}
+            ids = dict.fromkeys(targets[row_id] for row_id in selected if row_id in targets)
+            render_merge_action(merge["kind"], [{"id": value} for value in ids], actor, confirm=True)
+            if st.button(
+                "Entfernen",
+                key=f"remove_{relation_key}_{parent_id}",
+                icon=":material/delete:",
+                disabled=not selected,
+                help="Ausgewählte Verknüpfungen löschen; die Texte selbst bleiben erhalten.",
+            ):
+                for row_id in selected:
+                    delete_entity(child_model, entity_id=row_id, actor_id=actor)
+                st.session_state["_flash"] = f"{len(selected)} Verknüpfung(en) entfernt."
+                st.session_state[revision_key] = st.session_state.get(revision_key, 0) + 1
+                _clear_choice_caches()
+                st.rerun()
+    if merge:
+        st.caption("Zeilen ankreuzen: Zusammenführen führt die Texte zusammen, Entfernen löscht nur die Verknüpfungen.")
 
-    if st.button(f"Save {relation.get('title', child_name)}", key=f"save_{relation_key}_{parent_id}"):
+    if save:
         for f in fields:
+            if (
+                relation.get("sortable")
+                and f.kind == "fk_select"
+                and not relation.get("fk_autocreate", {}).get(f.name)
+                and any(row.get(f.name) not in fk_lookups.get(f.name, {}).values() for _, row in edited.iterrows())
+            ):
+                st.error(f"{f.label}: Bitte einen gültigen Eintrag wählen.")
+                return
             if f.kind == "select" and f.options:
                 allowed = {((f.option_labels or {}).get(value, value)) for value in f.options}
                 if any(
@@ -559,6 +679,11 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
                     if not label:
                         payload[f.name] = None
                     else:
+                        if existing_member is not None:
+                            existing_fk = str(getattr(existing_member, f.name))
+                            if label == fk_lookups.get(f.name, {}).get(existing_fk):
+                                payload[f.name] = existing_fk
+                                continue
                         auto_cfg = cast(dict | None, fk_autocreate.get(f.name))
                         renamed_id = _rename_existing_fk_if_changed(
                             f,
@@ -633,10 +758,12 @@ def _render_inline_relation_table_editor(  # ruff: ignore[complex-structure]
                 )
 
         st.session_state["_flash"] = f"{relation.get('title', child_name)} saved."
+        st.session_state[revision_key] = st.session_state.get(revision_key, 0) + 1
+        _clear_choice_caches()
         st.rerun()
 
 
-def _render_inline_relations(
+def _render_inline_relations(  # ruff: ignore[complex-structure]
     parent_id: str,
     relations: list[dict],
     actor: str | None,
@@ -653,58 +780,112 @@ def _render_inline_relations(
         merged_overrides = {fk_field: {"exclude": True}, **relation.get("field_overrides", {})}
         fields = _build_fields(child_model, field_overrides=merged_overrides)
 
+        members = list_entities_where(
+            child_model, filter_field=fk_field, filter_value=UUID(parent_id), order_by=order_by
+        )
         # build FK display lookup dicts
         fk_lookups: dict[str, dict[str, str]] = {}
         for f in fields:
             if f.kind == "fk_select" and f.fk_model is not None:
-                fk_lookups[f.name] = {
-                    _id_of(e): getattr(e, f.fk_display, "?")
-                    for e in list_entities(f.fk_model, order_by=_order_expr(f.fk_model, f.fk_display))
-                }
+                if f.fk_model is Production:
+                    ids = tuple(sorted({str(getattr(member, f.name)) for member in members}))
+                    fk_lookups[f.name] = {
+                        identifier: info[0]
+                        for identifier, info in (_production_choices(ids=ids) if ids else {}).items()
+                    }
+                else:
+                    fk_lookups[f.name] = dict(_fk_choices(f.fk_model, f.fk_display))
 
         st.subheader(f":material/group: {title}")
 
-        members = list_entities_where(
-            child_model, filter_field=fk_field, filter_value=UUID(parent_id), order_by=order_by
-        )
-
         if relation.get("editable_table", False):
             relation_key = f"{child_name}_{fk_field}"
-            _render_inline_relation_table_editor(
-                parent_id=parent_id,
-                relation=relation,
-                child_model=child_model,
-                child_name=child_name,
-                relation_key=relation_key,
-                fk_field=fk_field,
-                fields=fields,
-                fk_lookups=fk_lookups,
-                members=members,
-                actor=actor,
-            )
-            continue
+            try:
+                _render_inline_relation_table_editor(
+                    parent_id=parent_id,
+                    relation=relation,
+                    child_model=child_model,
+                    child_name=child_name,
+                    relation_key=relation_key,
+                    fk_field=fk_field,
+                    fields=fields,
+                    fk_lookups=fk_lookups,
+                    members=members,
+                    actor=actor,
+                )
+            except (ValueError, TypeError, SQLAlchemyError) as exc:
+                st.error(f"{title} konnte nicht gespeichert werden: {exc}")
+            if not relation.get("sortable"):
+                continue
 
-        if members:
+        elif members:
             _render_member_rows(members, fields, fk_lookups, child_model, child_name, actor)
         else:
             st.caption("None yet.")
 
         add_form_key = f"add_{child_name}_{parent_id}"
         add_errors = _FormErrors.load(add_form_key)
+        for field in fields:
+            if field.fk_model is Production:
+                st.text_input(
+                    f"{field.label} suchen",
+                    key=f"{add_form_key}_fk_search_{field.name}",
+                    type="search",
+                    live="500ms",
+                    help="Mindestens zwei Zeichen eingeben. Bis zu 50 Treffer, neueste Produktionen zuerst.",
+                    on_change=_clear_form_widget_state,
+                    args=(add_form_key, [field]),
+                )
         with st.form(add_form_key, clear_on_submit=False):
             new_vals = {f.name: _render_field(f, {}, form_key=add_form_key, errors=add_errors.fields) for f in fields}
             if add_errors.global_error:
                 st.error(add_errors.global_error)
-            if st.form_submit_button(f"Add to {title}", icon=":material/add_circle:", use_container_width=False):
+            if st.form_submit_button(f"Add to {title}", icon=":material/add_circle:", width="content"):
                 try:
                     new_vals[fk_field] = parent_id
                     resolved = _resolve_new_entities(new_vals, actor)
                     create_entity(child_model, payload=resolved, actor_id=actor)
-                    add_errors.clear(add_form_key)
-                    _clear_form_widget_state(add_form_key, fields)
                 except Exception as exc:  # ruff: ignore[blind-except]
                     _FormErrors(*_extract_validation_errors(exc)).save(add_form_key)
+                else:
+                    add_errors.clear(add_form_key)
+                    _clear_form_widget_state(add_form_key, fields)
+                    _clear_choice_caches()
                 st.rerun()
+
+
+def _render_selected_tabs(
+    model_cls: type[SQLModel],
+    fields: list[_FieldUI],
+    row: dict,
+    actor: str | None,
+    relations: list[dict],
+    selected_callback: Callable[[dict], None] | None,
+) -> None:
+    parent_id = str(row["id"])
+    labels = ["Edit"]
+    with get_session() as session:
+        for relation in relations:
+            count = session.exec(
+                select(func.count())
+                .select_from(relation["model"])
+                .where(getattr(relation["model"], relation["fk_field"]) == UUID(parent_id))
+            ).one()
+            labels.append(f"{relation['title']} :grey-badge[{count}]")
+    key = f"detail_tabs_{model_cls.__name__}_{parent_id}"
+    active = st.session_state.get(key, "Edit").split(" :grey-badge[")[0]
+    st.session_state[key] = next(label for label in labels if label.split(" :grey-badge[")[0] == active)
+    tabs = st.tabs(labels, key=key, on_change="rerun")
+    if tabs[0].open:
+        with tabs[0]:
+            _render_edit_form(model_cls, fields, row, actor)
+            if selected_callback:
+                selected_callback(row)
+            _render_sources_for_selected(model_cls, row)
+    for tab, relation in zip(tabs[1:], relations, strict=True):
+        if tab.open:
+            with tab:
+                _render_inline_relations(parent_id, [relation], actor)
 
 
 def _entity_to_row(e: SQLModel) -> dict:
@@ -725,6 +906,18 @@ def _load_df(
     if model_cls is Person:
         matches = count_people_for_merge(search, filters)
         rows = search_people_for_merge(search, limit=PAGE_SIZE, offset=offset, filters=filters)
+        if st.session_state.get("table_selection_epoch_person") == st.session_state.get("table_epoch_person", 0):
+            selected = set(st.session_state.get("table_selected_person", []))
+            missing = selected - {row["id"] for row in rows}
+            if missing:
+                extra = search_people_for_merge(
+                    "", limit=None, filters=[col(Person.id).in_([UUID(value) for value in missing])]
+                )
+                if missing - {row["id"] for row in extra}:
+                    st.warning("Einige ausgewählte Personen existieren nicht mehr und wurden abgewählt.")
+                rows = extra + rows
+                if extra:
+                    st.caption("Ausgewählte Personen außerhalb der aktuellen Trefferseite werden zusätzlich angezeigt.")
         for row in rows:
             row["Produktionen · Theater"] = "; ".join(row.pop("productions"))
     else:
@@ -1006,13 +1199,16 @@ def _render_edit_form(
             try:
                 resolved = _resolve_new_entities(vals, actor)
                 update_entity(model_cls, entity_id=str(sel_row["id"]), payload=resolved, actor_id=actor)
-                st.session_state["_flash"] = "Saved."
-                edit_errors.clear(edit_form_key)
             except Exception as exc:  # ruff: ignore[blind-except]
                 _FormErrors(*_extract_validation_errors(exc)).save(edit_form_key)
+            else:
+                _clear_choice_caches()
+                st.session_state["_flash"] = "Saved."
+                edit_errors.clear(edit_form_key)
             st.rerun()
         if delete.form_submit_button("Delete", icon=":material/delete:", width="stretch", type="secondary"):
             delete_entity(model_cls, entity_id=str(sel_row["id"]), actor_id=actor)
+            _clear_choice_caches()
             st.session_state["_flash"] = "Deleted."
             st.rerun()
 
@@ -1029,11 +1225,13 @@ def _render_add_form(model_cls: type[SQLModel], fields: list[_FieldUI], actor: s
             try:
                 resolved = _resolve_new_entities(vals, actor)
                 create_entity(model_cls, payload=resolved, actor_id=actor)
+            except Exception as exc:  # ruff: ignore[blind-except]
+                _FormErrors(*_extract_validation_errors(exc)).save(add_form_key)
+            else:
+                _clear_choice_caches()
                 st.session_state["_flash"] = "Added."
                 add_errors.clear(add_form_key)
                 _clear_form_widget_state(add_form_key, fields)
-            except Exception as exc:  # ruff: ignore[blind-except]
-                _FormErrors(*_extract_validation_errors(exc)).save(add_form_key)
             st.rerun()
 
 
@@ -1079,8 +1277,37 @@ def _render_item_count(model_cls: type[SQLModel], count: int) -> None:
     st.caption(f"{count} {label} insgesamt")
 
 
+def _restore_person_url_selection() -> None:
+    values = st.query_params.get_all("person")
+    if st.session_state.get("_person_selection_url") == values:
+        return
+    if "_person_selection_url" in st.session_state:
+        st.session_state["table_epoch_person"] = st.session_state.get("table_epoch_person", 0) + 1
+    selected = []
+    for value in values:
+        try:
+            selected.append(str(UUID(value)))
+        except ValueError:
+            st.warning("Ungültige Personen-ID in der URL; dieser Eintrag wurde nicht ausgewählt.")
+    st.session_state["table_selected_person"] = list(dict.fromkeys(selected))
+    st.session_state["table_selection_epoch_person"] = st.session_state.get("table_epoch_person", 0)
+    st.session_state["_person_selection_url"] = values
+
+
+def _sync_person_url_selection(selected: list[str]) -> None:
+    # data_editor does not support bind="query-params".
+    if st.query_params.get_all("person") != selected:
+        if selected:
+            st.query_params["person"] = selected
+        else:
+            st.query_params.pop("person", None)
+    st.session_state["_person_selection_url"] = selected
+
+
 def _render_crud_page(model_cls: type[SQLModel], fields: list[_FieldUI]) -> pd.DataFrame:
     kind = model_cls.__name__.lower()
+    if model_cls is Person:
+        _restore_person_url_selection()
     query = st.text_input(
         "Alle Einträge durchsuchen",
         key=f"crud_search_{kind}",
@@ -1123,6 +1350,7 @@ def render_sqlmodel_crud(
     inline_relations: list[dict] | None = None,
     merge_kind: str | None = None,
     selected_callback: Callable[[dict], None] | None = None,
+    tabbed_relations: bool = False,
 ) -> None:
     """Render a CRUD UI for a given SQLModel class.
 
@@ -1131,6 +1359,7 @@ def render_sqlmodel_crud(
         title: Optional title for the page. Defaults to the model class name.
         merge_kind: Enable native people/text table merges for this entity type.
         selected_callback: Render additional detail for the selected entity.
+        tabbed_relations: Put editing and each relation in lazy tabs with relation counts.
         field_overrides: Optional dict of field overrides, keyed by field name. Each override can specify:
             - kind: Optional explicit kind (e.g. "multiselect", "datetime", "list_text", etc.)
             - label: Optional explicit label for the field
@@ -1150,6 +1379,8 @@ def render_sqlmodel_crud(
     if merge_kind == "text" and not df.empty:
         df["Autoren"] = _page_authors(df)
     selected = [] if df.empty else _render_table(df, fields, model_cls, merge_kind=merge_kind, actor=actor)
+    if model_cls is Person:
+        _sync_person_url_selection([str(row["id"]) for row in selected])
     if merge_kind:
         st.caption(
             "Einträge auf dieser Seite zum Bearbeiten oder Zusammenführen auswählen. "
@@ -1159,6 +1390,9 @@ def render_sqlmodel_crud(
         render_merge_action(merge_kind, selected, actor)
     if len(selected) == 1:
         sel_row = selected[0]
+        if tabbed_relations:
+            _render_selected_tabs(model_cls, fields, sel_row, actor, inline_relations or [], selected_callback)
+            return
         if selected_callback:
             selected_callback(sel_row)
         _render_edit_form(model_cls, fields, sel_row, actor)
