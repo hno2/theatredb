@@ -21,6 +21,7 @@ from backend.entity_management import entities_by_ids, get_organization_profile
 from backend.models import Source
 from backend.orif import orif_document
 from frontend.views.helpers import entity_link, has_coordinates, render_orif_download, render_tags, theatre_city
+from frontend.views.mentions import render_description
 
 LOG = logging.getLogger(__name__)
 
@@ -225,7 +226,7 @@ def render_location(data: dict) -> None:
         else:
             st.info("Für dieses Theater sind noch keine gültigen Standortkoordinaten hinterlegt.")
     if data.get("description"):
-        st.write(data["description"])
+        render_description(data["description"], "organization", data.get("id"))
 
 
 def render_production_card(production: dict, *, compact: bool = False, show_organization: bool = True) -> None:
@@ -242,9 +243,9 @@ def render_production_card(production: dict, *, compact: bool = False, show_orga
         if production.get("description"):
             if compact:
                 with st.expander("Beschreibung"):
-                    st.write(production["description"])
+                    render_description(production["description"], "production", production.get("id"))
             else:
-                st.write(production["description"])
+                render_description(production["description"], "production", production.get("id"))
         if production.get("critics"):
             with st.expander("Kritiken"):
                 for critic in production["critics"]:

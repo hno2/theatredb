@@ -44,6 +44,7 @@ from backend.reconciliation import (
     queue_duplicate,
     search_entities,
 )
+from frontend.management.mentions import render as render_mentions
 from frontend.management.merge import format_value as _format
 from frontend.management.merge import styled as _styled
 from frontend.management.uifactory import _actor_id
@@ -788,7 +789,7 @@ def _review_tab() -> None:
         kind=None if kind == "all" else kind,
         query=query,
         offset=(page - 1) * 200,
-        exclude_operations=[OPERATION, "link_text", "text_lineage"],
+        exclude_operations=[OPERATION, "link_text", "text_lineage", "description_mention"],
         exclude_source_ids=[source.id for source in list_entities(Source) if source.name == "theapolis.de"],
     )
     if not cases:
@@ -846,6 +847,7 @@ def _render_tabs() -> None:
         IMPORT_TAB,
         "Andere Quellen & gemeldete Duplikate",
         "Duplikate suchen / melden",
+        "Erwähnungen in Beschreibungen",
     ]
     key = "reconciliation_tab"
     selected = st.session_state.get(key, labels[0])
@@ -857,7 +859,7 @@ def _render_tabs() -> None:
         st.session_state[key] = selected
     for tab, render_tab in zip(
         st.tabs(labels, key=key, on_change="rerun"),
-        (_conflict_tab, _import_tab, _review_tab, _duplicates_tab),
+        (_conflict_tab, _import_tab, _review_tab, _duplicates_tab, render_mentions),
         strict=True,
     ):
         if tab.open:

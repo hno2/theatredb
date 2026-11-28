@@ -4,6 +4,7 @@ from backend.config import DISCOVERY_KINDS
 from backend.entity_management import catalog_page, verified_organization_filter
 from backend.models import Production
 from frontend.views.helpers import entity_link, theatre_city
+from frontend.views.mentions import render_description
 from frontend.views.organization import render_production_card
 from frontend.views.settings import verified_only
 
@@ -95,5 +96,5 @@ def render_discovery(initial_kind: str = "organization") -> None:
                 st.text(" · ".join(filter(None, context)))
             if entry.get("description"):
                 with st.expander("Beschreibung"):
-                    st.write(entry["description"])
+                    render_description(entry["description"], kind, entry.get("id"))
     render_pagination(page, pages, page_key, "bottom")

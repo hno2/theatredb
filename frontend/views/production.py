@@ -10,6 +10,7 @@ from backend.models import TagLayer, TagStatus
 from backend.orif import orif_documents
 from backend.taxonomy import FACETS, LAYER_LABELS, ORIGIN_LABELS
 from frontend.views.helpers import entity_anchor, render_orif_download, render_tags, theatre_label
+from frontend.views.mentions import render_description
 from frontend.views.organization import (
     domain_date_interval,
     domain_date_label,
@@ -318,7 +319,7 @@ def _render_overview(data: dict, memberships: list[dict]) -> None:
     with overview:
         if description:
             st.subheader("Beschreibung")
-            st.markdown(description)
+            render_description(description, "production", data.get("id"))
     with cast:
         _render_cast(memberships, data.get("text") or {})
 
