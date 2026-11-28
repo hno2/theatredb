@@ -23,7 +23,6 @@ from backend.reconciliation import decide_case, normalize
 from backend.texts import (
     add_lineage,
     add_title,
-    credit_line,
     labels_for_texts,
     resolve_text_case,
     save_text_credit,
@@ -115,7 +114,7 @@ def _titles(session: Session, text: Text) -> None:  # ruff: ignore[complex-struc
 def _family(session: Session, text: Text) -> tuple[set[UUID], bool]:
     view = text_family_view(session, text.id)
     st.subheader("Werkfamilie")
-    st.write(credit_line(session, text.id))
+    st.write(view.credit_line)
     if view.ancestors:
         st.write(
             "Vorlage: "

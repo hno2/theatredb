@@ -38,6 +38,7 @@ class TextFamilyView:
 
     member_ids: set[uuid.UUID]
     is_root: bool
+    credit_line: str
     labels: dict[str, str]
     ancestors: set[uuid.UUID]
     descendants: set[uuid.UUID]
@@ -213,6 +214,7 @@ def text_family_view(session: Session, text_id: uuid.UUID) -> TextFamilyView:
     return TextFamilyView(
         member_ids=member_ids,
         is_root=text_id not in derived_ids,
+        credit_line=_detail_credit_line(text, upstream, credits),
         labels=labels,
         ancestors=ancestors,
         descendants=descendants,

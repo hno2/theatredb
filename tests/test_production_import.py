@@ -48,10 +48,7 @@ REVIEW_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "
 
 def test_equal_namesake_scores_choose_stable_person_id(db, theatre) -> None:
     people = [Person(name="Same Name"), Person(name="Same Name")]
-    productions = [
-        Production(name=f"Play {index}", organization_id=theatre.id)
-        for index in range(len(people))
-    ]
+    productions = [Production(name=f"Play {index}", organization_id=theatre.id) for index in range(len(people))]
     memberships = [
         ProductionMembership(person_id=person.id, production_id=production.id, role_name="actor")
         for person, production in zip(people, productions, strict=True)
