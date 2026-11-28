@@ -19,14 +19,14 @@ from backend.data_quality import (
     season_label,
 )
 from backend.entity_management import (
-    browse_entities,
+    catalog_page,
     create_entity,
     delete_entity,
     get_organization_profile,
     get_people_productions,
     update_entity,
 )
-from backend.models import EntityType, Organization, Person, Production, ProductionMembership
+from backend.models import EntitySource, EntityType, Organization, Person, Production, ProductionMembership, Source
 from backend.reconciliation import approve_case, preview_case, queue_duplicate, validate_payload
 from backend.scd2 import SCD2History
 
@@ -110,7 +110,7 @@ def test_nested_public_productions_do_not_expose_organization_reviewers(db: Engi
         session.add(ProductionMembership(person_id=person.id, production_id=production.id, role_name="actor"))
         session.commit()
         person_id = str(person.id)
-    discovery, _ = browse_entities(Production)
+    discovery, _ = catalog_page(Production, "", [], limit=100)
     for data in (discovery, get_people_productions([person_id])):
         assert data[0]["organization"]["general_verified_at"]
         assert "general_verified_by" not in data[0]["organization"]
@@ -184,6 +184,26 @@ def test_actions_validate_and_audit_full_snapshots(db: Engine) -> None:
         assert current_org and current_org.history_verified_by == "editor"
         assert current_org.general_verified_by == "editor"
         assert current_org.update_scope is None
+
+
+def test_get_if_exists_rejects_ambiguous_source_attachment(db: Engine) -> None:
+    with Session(db) as session:
+        source = Source(name="Publisher")
+        session.add_all([source, Person(name="Twin"), Person(name="Twin")])
+        session.commit()
+        source_id = source.id
+
+    with pytest.raises(ValueError, match="Multiple Person rows match"):
+        create_entity(
+            Person,
+            payload={"name": "Twin"},
+            actor_id="editor",
+            get_if_exists={"name": "Twin"},
+            source_links=[{"source_id": source_id}],
+        )
+
+    with Session(db) as session:
+        assert not session.exec(select(EntitySource)).all()
 
 
 def test_generic_crud_cannot_write_assessments_and_profile_hides_reviewers(db: Engine) -> None:

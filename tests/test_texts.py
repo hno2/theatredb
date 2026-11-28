@@ -26,6 +26,7 @@ from backend.texts import (
     resolve_staged_text,
     resolve_text,
     resolve_text_case,
+    text_family_view,
     work_family,
 )
 
@@ -99,6 +100,28 @@ def test_family_excludes_based_on_and_rejects_cycles(session):
     assert [row.id for row in family_roots(session, german.id)] == [musical.id]
     with pytest.raises(ValueError, match="cycle"):
         add_lineage(session, german.id, novel.id, "based_on")
+
+
+def test_family_view_loads_lineage_and_production_data(session):
+    source, original, translation, child = [
+        Text(title=title) for title in ("Source", "Original", "Translation", "Child")
+    ]
+    session.add_all([source, original, translation, child, Production(name="Stage", text=translation)])
+    session.flush()
+    add_lineage(session, source.id, original.id, LineageRelation.BASED_ON)
+    add_lineage(session, original.id, translation.id, LineageRelation.TRANSLATION)
+    add_lineage(session, translation.id, child.id, LineageRelation.BASED_ON)
+
+    view = text_family_view(session, translation.id)
+
+    assert view.member_ids == {original.id, translation.id}
+    assert not view.is_root
+    assert view.ancestors == {source.id}
+    assert view.descendants == {child.id}
+    assert view.labels[str(source.id)] == "Source"
+    assert view.labels[str(child.id)] == "Child"
+    assert view.children == {original.id: [(translation.id, LineageRelation.TRANSLATION)]}
+    assert view.productions == {translation.id: ["Stage"]}
 
 
 def test_orm_lineage_relationships_are_validated_before_flush(session):

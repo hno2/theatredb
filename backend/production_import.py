@@ -309,7 +309,7 @@ def _find_person(
             .group_by(col(ProductionMembership.person_id))
         ).all()
     )
-    return max(rows, key=lambda row: (local.get(row.id, 0), len(row.production_memberships)))
+    return min(rows, key=lambda row: (-local.get(row.id, 0), -len(row.production_memberships), str(row.id)))
 
 
 def _people_rows(

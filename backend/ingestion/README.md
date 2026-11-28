@@ -132,12 +132,11 @@ description only. `UA` is retained verbatim as
 `world_premiere`, not mistaken for a text publication date. Names may be lists
 or a single unsplit string; dates and language codes must use the staging format.
 
-This entry point makes **no network requests**. For supplied HTML,
-`extract_metadata(html, url=..., rules=...)` reuses the configurable crawler's
-validated CSS `FieldRule` and extraction helpers. No publisher-specific selectors
-are bundled for the other publishers: verified page fixtures and source permissions
-are still needed before configuring their crawls. The existing managed
-crawler's production/person pipeline is not silently repurposed as a text crawler.
+This entry point makes **no network requests** and accepts normalized publisher
+metadata only. No publisher-specific selectors are bundled for the other publishers:
+verified page fixtures and source permissions are still needed before configuring
+their crawls. The existing managed crawler's production/person pipeline is not
+silently repurposed as a text crawler.
 
 ### Rowohlt downloader
 
@@ -167,8 +166,9 @@ idempotently; conflicting metadata waits for text-link review.
 
 Like the other API downloader, Rowohlt uses module-level `download`, `_fetch`,
 and `_download_pages` helpers; `parse_detail` verifies and normalizes one API
-response. `normalize_play` remains available for offline metadata normalization.
-It does not inherit the HTML/production-oriented `TheaterScraper` base class.
+response. `normalize_play` remains available for offline metadata normalization. Rowohlt
+consumes structured API responses and remains separate from the configurable
+theatre HTML pipeline.
 The shared `ingest_text_metadata` accepts optional `progress`; existing non-CLI
 callers remain silent by default.
 

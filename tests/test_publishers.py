@@ -6,7 +6,6 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from backend.ingestion.publishers import (
     PUBLISHERS,
-    extract_metadata,
     ingest_text_metadata,
     normalize_metadata,
     resolve_publisher_observations,
@@ -249,18 +248,6 @@ def test_publisher_replay_url_identity_can_fill_blanks_without_overwriting(sessi
         save_publisher_observation(session, other, {"source_id": str(source_record.source_id), **metadata})
 
 
-def test_offline_publisher_extraction_reuses_configurable_field_rules() -> None:
-    metadata = extract_metadata(
-        "<h1>Play</h1><p class='author'>Author</p><p class='original'>Original</p>",
-        url="https://www.theatertexte.de/play",
-        rules={
-            "Titel": {"selector": "h1", "required": True},
-            "Autoren": {"selector": ".author", "many": True},
-            "Originaltitel": {"selector": ".original"},
-        },
-    )
-    assert metadata.title == "Play"
-    assert metadata.original_title == "Original"
-    assert metadata.authors == ["Author"]
+def test_publisher_metadata_rejects_conflicting_aliases() -> None:
     with pytest.raises(ValueError, match="Conflicting metadata"):
-        normalize_metadata({"title": "One", "Titel": "Two", "url": metadata.url})
+        normalize_metadata({"title": "One", "Titel": "Two", "url": "https://www.theatertexte.de/play"})

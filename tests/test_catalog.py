@@ -6,7 +6,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 from streamlit.testing.v1 import AppTest
 
-from backend.entity_management import catalog_page, catalog_suggestions, catalog_summary, tag_filter
+from backend.entity_management import catalog_page, catalog_suggestions, catalog_summary, json_field_filter
 from backend.models import Organization, Person, Production, ProductionMembership, Text, TextContribution, TextTitle
 from backend.taxonomy import set_production_tags, sync_vocabulary
 from backend.user_management import get_session
@@ -69,6 +69,11 @@ def test_catalog_ranks_before_pagination_and_counts_each_production_once(catalog
         assert first[0]["production_count"] == count
         assert second[0]["production_count"] == 0
     assert catalog_suggestions(Text, "Vari", []) == ["Variante", "Z Text"]
+
+
+def test_catalog_name_sort_is_available_for_discovery(catalog_db):
+    rows, _ = catalog_page(Organization, "", [], limit=10, sort_by="name", descending=False)
+    assert [row["name"] for row in rows] == ["A Bühne", "Z Bühne"]
 
 
 def test_text_detail_keeps_catalog_metadata_and_personal_actions(catalog_db):
@@ -207,18 +212,18 @@ def test_catalog_does_not_repeat_city_in_results(monkeypatch, kind):
 
 
 @pytest.mark.parametrize("kind", ["organization", "production"])
-def test_tag_filter_uses_own_tags_and_exact_values(catalog_db, kind):
+def test_json_tag_filter_uses_own_tags_and_exact_values(catalog_db, kind):
     model = Organization if kind == "organization" else Production
-    partial, count = catalog_page(model, "", [tag_filter(model, ["Dram"])], limit=12)
+    partial, count = catalog_page(model, "", [json_field_filter(model, "tags", ["Dram"])], limit=12)
     assert not partial and count == 0
     tags = ["Oper", "Drama"]
-    rows, total = catalog_page(model, "", [tag_filter(model, tags)], limit=12)
+    rows, total = catalog_page(model, "", [json_field_filter(model, "tags", tags)], limit=12)
     assert total == (1 if kind == "organization" else 2)
     assert all(set(row["tags"]).intersection(tags) for row in rows)
     if kind == "organization":
-        assert catalog_page(model, "", [tag_filter(model, ["Drama"])], limit=12)[1] == 0
+        assert catalog_page(model, "", [json_field_filter(model, "tags", ["Drama"])], limit=12)[1] == 0
     else:
-        assert catalog_page(model, "", [tag_filter(model, ["Bühne"])], limit=12)[1] == 1
+        assert catalog_page(model, "", [json_field_filter(model, "tags", ["Bühne"])], limit=12)[1] == 1
 
 
 @pytest.mark.parametrize(
