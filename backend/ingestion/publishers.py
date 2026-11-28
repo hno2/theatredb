@@ -14,6 +14,7 @@ from backend.ingestion.staging import HttpURL, NonEmptyText, StagedText
 from backend.models import (
     EntitySource,
     EntityType,
+    IngestionRun,
     Person,
     ReconciliationCase,
     Source,
@@ -328,4 +329,14 @@ def ingest_text_metadata(
             _save_publisher_observation(session, result, source.id, record, stored)
         if progress is not None:
             progress.update()
+    session.add(
+        IngestionRun(
+            source_name=publisher,
+            kind="publisher",
+            stats={
+                "observations": len(results),
+                "review": sum(isinstance(item, ReconciliationCase) for item in results),
+            },
+        )
+    )
     return results

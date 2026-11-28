@@ -7,13 +7,14 @@ from urllib.parse import parse_qs, urlsplit
 
 import aiohttp
 import pytest
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, SQLModel, col, create_engine, select
 from streamlit.testing.v1 import AppTest
 
 from backend import user_management
 from backend.ingestion import theapolis
 from backend.ingestion.theapolis_archive import open_archive
 from backend.models import (
+    IngestionRun,
     Organization,
     Person,
     Production,
@@ -405,6 +406,11 @@ def test_archive_import_checkpoint_skips_unchanged_and_retains_manual_descriptio
     result = theapolis.import_archive(path)
     assert len(result["production"]) == 1
     with Session(engine) as session:
+        history = session.exec(select(IngestionRun).order_by(col(IngestionRun.imported_at))).all()
+        assert len(history) == 3
+        assert history[-1].source_name == "theapolis.de"
+        assert history[-1].stats["production"] == 1
+        assert history[-1].scope == "dach"
         assert session.exec(select(Person)).one().description == "Edited biography"
         assert {p.name: p.description for p in session.exec(select(Production))} == {
             "Hamlet": None,
@@ -439,6 +445,26 @@ def test_archive_import_checkpoint_skips_unchanged_and_retains_manual_descriptio
         archive.write_page(refresh, 1, {"items": rows}, ready=True)
         archive.seal(refresh, carry_details=True)
         assert list(archive.items(refresh, since=detail_run)) == []
+    engine.dispose()
+
+
+def test_failed_archive_import_does_not_record_success_or_advance_checkpoint(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'fixture-db.sqlite3'}")
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(user_management, "_get_engine", lambda: engine)
+    path = tmp_path / "archive.sqlite3"
+    with open_archive(path, write=True) as archive:
+        write_run(archive, [production(1), production(2)])
+
+    def fail(*args: object, **kwargs: object):
+        raise ValueError("import failed")
+
+    monkeypatch.setattr(theapolis, "_apply_import", fail)
+    with pytest.raises(ValueError, match="import failed"):
+        theapolis.import_archive(path)
+    with Session(engine) as session:
+        assert not session.exec(select(IngestionRun)).all()
+        assert not session.exec(select(TheapolisImportCheckpoint)).all()
     engine.dispose()
 
 

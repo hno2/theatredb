@@ -242,6 +242,11 @@ def test_production_tags_and_profile_birthday_preserve_source_identity(db, tmp_p
     assert staged["memberships"][0]["born_precision"] == "day"
     result = theapolis.import_all(path, dach_only=False)
     with Session(db) as session:
+        from backend.models import IngestionRun  # ruff: ignore[import-outside-top-level]
+
+        history = session.exec(select(IngestionRun)).one()
+        assert history.file_name == path.name and history.stats["production"] == 1
+        assert history.scope == "all"
         record = session.exec(select(SourceRecord).where(SourceRecord.external_id == "directors:9")).one()
         person = session.get(Person, record.entity_id)
         assert person is not None
@@ -1365,7 +1370,9 @@ def test_cross_role_matching_uses_bounded_queries(db, monkeypatch, tmp_path, ite
         assert sum(statement.startswith("SELECT ") for statement in statements) < 60
         statements.clear()
         assert theapolis.import_all(path, dach_only=False) == result
-        assert not any(statement.startswith(("INSERT ", "UPDATE ", "DELETE ")) for statement in statements)
+        assert [s for s in statements if s.startswith(("INSERT ", "UPDATE ", "DELETE "))] == [
+            next(s for s in statements if s.startswith("INSERT INTO ingestionrun "))
+        ]
     finally:
         event.remove(db, "before_cursor_execute", record_statement)
 
@@ -1712,7 +1719,9 @@ def test_newer_unchanged_observations_advance_freshness_without_domain_writes(db
     writes = []
 
     def record_write(connection, cursor, statement, parameters, context, executemany):
-        if statement.startswith(("INSERT ", "UPDATE ", "DELETE ")):
+        if statement.startswith(("INSERT ", "UPDATE ", "DELETE ")) and not statement.startswith(
+            "INSERT INTO ingestionrun "
+        ):
             writes.append(statement)
 
     event.listen(db, "before_cursor_execute", record_write)
@@ -1813,7 +1822,9 @@ def test_import_queries_scale_with_batches_not_records(db, tmp_path, item, size)
         assert theapolis.import_all(path, dach_only=False) == result
         assert sum(statement.startswith("SELECT ") for statement in statements) < 100
         assert len(statements) < 200
-        assert not any(statement.startswith(("INSERT ", "UPDATE ", "DELETE ")) for statement in statements)
+        assert [s for s in statements if s.startswith(("INSERT ", "UPDATE ", "DELETE "))] == [
+            next(s for s in statements if s.startswith("INSERT INTO ingestionrun "))
+        ]
     finally:
         event.remove(db, "before_cursor_execute", record_statement)
 

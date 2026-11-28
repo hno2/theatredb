@@ -12,7 +12,16 @@ from backend.ingestion.publishers import (
     save_publisher_observation,
 )
 from backend.ingestion.staging import staging_schema, validate_records
-from backend.models import EntitySource, Person, ReconciliationCase, Source, SourceRecord, Text, TextContribution
+from backend.models import (
+    EntitySource,
+    IngestionRun,
+    Person,
+    ReconciliationCase,
+    Source,
+    SourceRecord,
+    Text,
+    TextContribution,
+)
 from backend.texts import add_title, resolve_text_case
 
 
@@ -73,6 +82,15 @@ def test_publisher_import_is_idempotent_and_preserves_url_and_ua(session, publis
     observation = session.exec(select(SourceRecord)).one()
     assert observation.payload["world_premiere"] == metadata["UA"]
     assert first.published is None
+
+
+def test_publisher_history_rolls_back_with_import(session) -> None:
+    ingest_text_metadata(session, "Rowohlt", [{"title": "Play", "url": "https://example.org/play"}])
+    session.flush()
+    assert len(session.exec(select(IngestionRun)).all()) == 1
+    session.rollback()
+    assert not session.exec(select(IngestionRun)).all()
+    assert not session.exec(select(SourceRecord)).all()
 
 
 def test_publisher_import_and_replay_reuse_source_record_lookup(session) -> None:

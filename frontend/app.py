@@ -38,6 +38,12 @@ pages = {
     ],
     # Pages left out of st.navigation cannot be opened, so this is the access check for management.
     "Verwaltung": [
+        st.Page(
+            "management/overview.py",
+            title="Übersicht",
+            icon=":material/dashboard:",
+            url_path="verwaltung-uebersicht",
+        ),
         st.Page("management/reconciliation.py", title="Datenabgleich & Duplikate", icon=":material/merge:"),
         st.Page("management/authority_bulk.py", title="Normdaten-Abgleich", icon=":material/verified:"),
         st.Page("management/organizations.py", title="Organisationen", icon=":material/event_seat:"),

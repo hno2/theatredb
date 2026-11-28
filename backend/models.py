@@ -351,6 +351,19 @@ class ImportRun(SQLModel, table=True):
     unchanged: int = 0
 
 
+class IngestionRun(SQLModel, table=True):
+    """Successful non-theatre import, committed with its final checkpoint where possible."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    source_name: str
+    kind: str
+    imported_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC), index=True)
+    captured_at: dt.datetime | None = None
+    file_name: str | None = None
+    scope: str | None = None
+    stats: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+
+
 class EntityRedirect(SQLModel, table=True):
     """Retain the identity of an entity after an approved duplicate merge."""
 

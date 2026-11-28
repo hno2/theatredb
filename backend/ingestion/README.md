@@ -115,7 +115,8 @@ metadata starts from the linked text's title, not the production display title.
 
 `backend.ingestion.publishers.ingest_text_metadata(session, source_name, records)`
 imports a list of normalized text metadata dictionaries with a required `url`
-and optional publisher `external_id`. The caller commits the transaction.
+and optional publisher `external_id`. The caller commits the transaction, including
+the import-history record used by the admin overview.
 The source registry covers **theatertexte.de**, **Rowohlt**, **S. Fischer**,
 **Felix Bloch Erben**, **Henschel**, and **Verlag der Autoren** (`VdA`).
 Source URLs are retained in `EntitySource`; full observations, including `UA`,

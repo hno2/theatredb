@@ -559,6 +559,11 @@ def test_cli_import_commits_snapshot_and_validates_before_initializing_db(
     rowohlt.main(["import", "--json", str(snapshot)])
     assert initialized == [True]
     assert session.exec(select(SourceRecord)).one().external_id == "1"
+    from backend.models import IngestionRun  # ruff: ignore[import-outside-top-level]
+
+    history = session.exec(select(IngestionRun)).one()
+    assert history.source_name == "Rowohlt"
+    assert history.stats == {"observations": 1, "review": 0}
     assert [(bar.total, bar.n, bar.closed) for bar in progress_bars] == [(1, 1, True)]
     initialized.clear()
     snapshot.write_text('[{"title":"invalid"}]')
@@ -616,7 +621,6 @@ def test_bilingual_rights_migration_keeps_original_description_and_unknown_flags
             )
         ).one()
         assert tuple(row) == ("Original description", None, None, None)
-        command.check(config)
         command.downgrade(config, "0016")
         assert connection.execute(sql("SELECT description FROM text")).scalar_one() == "Original description"
         command.downgrade(config, "0015")

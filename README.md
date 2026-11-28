@@ -99,6 +99,13 @@ Organization and production tags appear as pills. Their filters offer all stored
 tags; selecting multiple tags matches any selected value. Organization tags are
 independent of production tags and can be edited in organization management.
 
+Administrators can use **Verwaltung → Übersicht** to see the latest theatre
+import, publisher or Theapolis import, and successful crawl, plus open review
+queues and organizations flagged for updates. Publisher and Theapolis history
+starts when this feature is deployed; older imports cannot be reconstructed.
+History records completed imports only. Theapolis commits batches, so a failed
+run may have applied some changes even though it has no successful history entry.
+
 Productions also carry a two-layer taxonomy: **Profil** (what it is: Sparte,
 Premierenstatus, Arbeitsweise, Publikum, Kontext) and **Inhalt** (what it is
 about: Thema, Handlungszeit, Schauplatz, Vorlage & Bezug). Each facet is a

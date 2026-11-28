@@ -43,6 +43,7 @@ from backend.ingestion.theapolis_import import (
 from backend.locations import split_country
 from backend.models import (
     EntityType,
+    IngestionRun,
     Person,
     Source,
     SourceRecord,
@@ -1739,14 +1740,26 @@ def _apply_import(
 
 def import_all(json_path: Path | None = None, *, dach_only: bool = True) -> dict[str, list[str]]:
     """Replay a legacy export."""
-    organizations, people, productions, captured_at = _prepare_import(
-        _read_import_snapshot(json_path if json_path is not None else _latest_export())
-    )
+    path = json_path if json_path is not None else _latest_export()
+    organizations, people, productions, captured_at = _prepare_import(_read_import_snapshot(path))
     if dach_only:
         organizations, people, productions = _dach_import(organizations, people, productions)
     init_db()
     with _import_lock():
-        return _apply_import(organizations, people, productions, captured_at)
+        result = _apply_import(organizations, people, productions, captured_at)
+        with get_session() as session:
+            session.add(
+                IngestionRun(
+                    source_name="theapolis.de",
+                    kind="theapolis",
+                    file_name=path.name,
+                    scope="dach" if dach_only else "all",
+                    captured_at=captured_at,
+                    stats={key: len(value) for key, value in result.items()},
+                )
+            )
+            session.commit()
+        return result
 
 
 @contextmanager
@@ -1779,14 +1792,24 @@ def import_archive(path: Path, *, dach_only: bool = True) -> dict[str, list[str]
             result = _apply_import(
                 *_prepare_import({"items": chain((first,), rows), "captured_at": archive.captured(run)}, archived=True),
             )
-        if since != run:
-            with get_session() as session:
+        with get_session() as session:
+            if since != run:
                 checkpoint = session.get(TheapolisImportCheckpoint, (identity, scope))
                 if checkpoint is None:
                     session.add(TheapolisImportCheckpoint(archive_id=identity, scope=scope, run=run))
                 else:
                     checkpoint.run = max(checkpoint.run, run)
-                session.commit()
+            session.add(
+                IngestionRun(
+                    source_name="theapolis.de",
+                    kind="theapolis",
+                    file_name=path.name,
+                    scope=scope,
+                    captured_at=dt.datetime.fromisoformat(archive.captured(run)),
+                    stats={key: len(value) for key, value in result.items()},
+                )
+            )
+            session.commit()
         LOG.info(
             "Theapolis archive run %s, delta from %s: %s",
             run,
