@@ -361,9 +361,14 @@ class CreditPeople:
         """Bind the lookup to the caller's session."""
         self._session = session
         self._ids_by_name: dict[str, list[uuid.UUID]] | None = None
+        self.ambiguous_credits: list[tuple[str, str]] = []
 
-    def person_id(self, name: str, role: str) -> uuid.UUID:
-        """Reuse the unique normalized match or create a person for this role."""
+    def person_id(self, name: str, role: str) -> uuid.UUID | None:
+        """Reuse the unique normalized match or create a person for this role.
+
+        Returns None if the credit is ambiguous (matches multiple people);
+        caller should handle via add_credits to create a reconciliation case.
+        """
         if self._ids_by_name is None:
             ids_by_name: dict[str, list[uuid.UUID]] = {}
             for person_id, stored_name in self._session.exec(select(Person.id, Person.name)):
@@ -372,7 +377,8 @@ class CreditPeople:
         key = normalize(name)
         matches = self._ids_by_name.get(key, [])
         if len(matches) > 1:
-            raise ValueError(f"Ambiguous person credit: {name}")
+            self.ambiguous_credits.append((name, role))
+            return None
         if matches:
             self._session.flush()
             return matches[0]
@@ -383,9 +389,15 @@ class CreditPeople:
         return person.id
 
     def add_credits(self, text: Text, names: Iterable[str], role: str) -> None:
-        """Attach credits in input order without duplicating them."""
+        """Attach credits in input order without duplicating them.
+
+        Ambiguous credits (multiple person matches) are tracked but not attached;
+        callers should check ambiguous_credits and create reconciliation cases.
+        """
         for name in dict.fromkeys(name.strip() for name in names if name.strip()):
-            ensure_credit(self._session, text, self.person_id(name, role), role, None, None)
+            person_id = self.person_id(name, role)
+            if person_id is not None:
+                ensure_credit(self._session, text, person_id, role, None, None)
 
 
 def _link_case(session: Session, payload: dict, candidates: list[Text], reason: str) -> Text | ReconciliationCase:
@@ -461,6 +473,20 @@ def resolve_text(
         people.add_credits(text, authors, "author")
     people.add_credits(text, translators, "translator")
     people.add_credits(text, adapters, "adapter")
+    if people.ambiguous_credits:
+        key = f"ambiguous_credits:{stable_digest(payload)}"
+        case = session.exec(select(ReconciliationCase).where(ReconciliationCase.key == key)).first()
+        if case is None:
+            case = ReconciliationCase(
+                key=key,
+                entity_type=EntityType.TEXT,
+                operation="ambiguous_credits",
+                target_id=text.id,
+                incoming=payload,
+                context={"ambiguous_credits": people.ambiguous_credits},
+                reason=f"Ambiguous person credits: {'; '.join(f'{name} ({role})' for name, role in people.ambiguous_credits)}",
+            )
+            session.add(case)
     if source is not None:
         add_lineage(session, source.id, text.id, lineage_relation)
     return text
@@ -469,11 +495,10 @@ def resolve_text(
 def _match_text(
     session: Session, payload: dict, source: Text | None, people: CreditPeople
 ) -> Text | ReconciliationCase | None:
-    matches = list(
-        session.exec(
-            select(Text).join(TextTitle).where(TextTitle.normalized == normalize(payload["title"])).distinct()
-        ).all()
-    )
+    text_ids = session.exec(
+        select(Text.id).join(TextTitle).where(TextTitle.normalized == normalize(payload["title"])).distinct()
+    ).all()
+    matches = list(session.exec(select(Text).where(Text.id.in_(text_ids))).all())
     if genre := payload.get("genre"):
         compatible = {None, genre} | ({"novel", "film"} if genre == "other" else set())
         matches = [match for match in matches if match.genre in compatible]
@@ -741,7 +766,7 @@ def _apply_text_credit(
     production_id: str | None,
     relink: bool,
     actor_id: str | None,
-) -> Text:
+) -> Text | ReconciliationCase:
     if source_id:
         roots = family_roots(session, result.id)
         if len(roots) != 1:
@@ -753,7 +778,24 @@ def _apply_text_credit(
             raise ValueError("Production no longer exists")
         people = CreditPeople(session)
         for name in dict.fromkeys(name.strip() for name in parsed["adapters"] if name.strip()):
-            ensure_credit(session, production, people.person_id(name, "adapter"), "adapter", None, actor_id)
+            person_id = people.person_id(name, "adapter")
+            if person_id is not None:
+                ensure_credit(session, production, person_id, "adapter", None, actor_id)
+        if people.ambiguous_credits:
+            key = f"ambiguous_production_adapters:{stable_digest({'production_id': production_id, 'credits': people.ambiguous_credits})}"
+            case = session.exec(select(ReconciliationCase).where(ReconciliationCase.key == key)).first()
+            if case is None:
+                case = ReconciliationCase(
+                    key=key,
+                    entity_type=EntityType.PRODUCTION,
+                    operation="ambiguous_credits",
+                    target_id=production_id,
+                    incoming={"adapters": parsed["adapters"]},
+                    context={"ambiguous_credits": people.ambiguous_credits, "text_id": str(result.id)},
+                    reason=f"Ambiguous adapter credits: {'; '.join(f'{name} (adapter)' for name, _ in people.ambiguous_credits)}",
+                )
+                session.add(case)
+            return case
         if relink:
             production.text_id = result.id
             session.add(production)
@@ -963,7 +1005,9 @@ def _apply_text_link(session: Session, case: ReconciliationCase, text: Text, act
             session.add(production)
             audit_event(session, production, "update", actor_id)
         for name in adapters.get(str(production.id), []):
-            ensure_credit(session, production, people.person_id(name, "adapter"), "adapter", None, actor_id)
+            person_id = people.person_id(name, "adapter")
+            if person_id is not None:
+                ensure_credit(session, production, person_id, "adapter", None, actor_id)
     _apply_reviewed_sources(session, case, text)
     _apply_publisher_observations(session, case, text)
 
