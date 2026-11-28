@@ -3,6 +3,7 @@ import streamlit as st
 from backend.entity_management import get_people_productions
 from backend.orif import orif_documents
 from frontend.views.helpers import entity_link, production_people, render_orif_download, theatre_label
+from frontend.views.mentions import render_description
 from frontend.views.organization import (
     domain_date_label,
     parse_date,
@@ -49,7 +50,7 @@ def render_person_header(data: dict) -> None:
         render_web_link(f"Website {index}", url)
     if (description := data.get("description")) and description.strip():
         st.subheader("Biografie")
-        st.markdown(description)
+        render_description(description, "person", data.get("id"))
 
 
 def render_person(data: dict) -> None:

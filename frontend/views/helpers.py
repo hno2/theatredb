@@ -62,11 +62,17 @@ def has_coordinates(lat: float | None, lon: float | None) -> bool:
     )
 
 
-def entity_anchor(label: str, kind: str, entity_id: str, *, include_unverified: bool = False, path: str = "") -> str:
-    """Build a same-tab entity link for use within a line of text."""
+def entity_url(kind: str, entity_id: str, *, include_unverified: bool = False, path: str = "") -> str:
+    """Build the shared detail URL with current theatre filters."""
     filters = {"verified_only": "0"} if include_unverified else theatre_filter_link_params()
     query = urlencode({"kind": kind, "id": entity_id, **filters})
-    return f'<a href="{escape(path, quote=True)}?{escape(query, quote=True)}" target="_self">{escape(label)}</a>'
+    return f"{path}?{query}"
+
+
+def entity_anchor(label: str, kind: str, entity_id: str, *, include_unverified: bool = False, path: str = "") -> str:
+    """Build a same-tab entity link for use within a line of text."""
+    url = entity_url(kind, entity_id, include_unverified=include_unverified, path=path)
+    return f'<a href="{escape(url, quote=True)}" target="_self">{escape(label)}</a>'
 
 
 def entity_link(label: str, kind: str, entity_id: str) -> None:

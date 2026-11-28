@@ -10,6 +10,7 @@ from backend import library
 from backend.config import LINEAGE_LABELS, TEXT_GENRES, role_label
 from backend.user_management import get_session
 from frontend.views.helpers import entity_link
+from frontend.views.mentions import render_description
 from frontend.views.organization import domain_date_label
 from frontend.views.personal import render_actions
 
@@ -64,7 +65,7 @@ def render_text_page(data: dict) -> None:
     )
     if data.get("description"):
         st.subheader("Beschreibung")
-        st.markdown(data["description"])
+        render_description(data["description"], "text", data.get("id"))
     if variants := sorted({row["title"] for row in data.get("titles") or [] if row["title"] != data["title"]}):
         st.subheader("Weitere Titel")
         for variant in variants:

@@ -988,6 +988,8 @@ def preview_case(case_id: uuid.UUID | str, *, target_id: uuid.UUID | str | None 
         case = session.get(ReconciliationCase, uuid.UUID(str(case_id)))
         if case is None:
             raise ValueError("Review case not found")
+        if case.operation == "description_mention":
+            _require_general_case(case)
         return _preview(session, case, target_id)
 
 
@@ -1972,6 +1974,8 @@ def _selected_changes(entity: Entity, options: dict, selected: list[str]) -> dic
 
 
 def _require_general_case(case: ReconciliationCase) -> None:
+    if case.operation == "description_mention":
+        raise ValueError("Use the description mention inbox to resolve this case")
     if case.operation in {"link_text", "text_lineage"}:
         raise ValueError("Use the text lineage inbox to resolve this case")
 

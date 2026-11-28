@@ -32,6 +32,43 @@ administrative tools for imports, review, and data maintenance.
   sources. Conflicting person or text fields require an explicit choice.
 - Run source-owned crawls from **Verwaltung → Quellen → Crawler**.
 
+## Description mentions
+
+- Read-only descriptions on person, text, theatre and production pages, directory
+  entries, and production cards can link mentioned existing people, texts and theatres.
+  Stored Markdown, exports, credits, and domain relationships remain unchanged.
+- Matching uses names, person alternate names, and text title variants. Recorded
+  authorship, production credits, theatre memberships and staging relationships
+  disambiguate matches. A named play linked to the displayed person's recorded
+  production can be linked even when several texts share that title.
+- Only uniquely graph-supported, context-compatible matches link automatically.
+  Medium-confidence names, equally connected versions and conflicting role/date
+  evidence remain plain text until reviewed. A year may be writing, publication
+  or staging evidence; ensemble wording does not create a membership.
+- Hover or keyboard focus shows recorded metadata and a short description excerpt.
+  Escape dismisses the preview; click/tap follows the ordinary detail link.
+  Theatre visibility still follows the current verified-theatre filter.
+- **Verwaltung → Datenabgleich & Duplikate → Erwähnungen in Beschreibungen** provides
+  admin-triggered scans in pages of 50 descriptions and a separate review inbox.
+  Choose a candidate or search for another existing record, then approve or reject
+  with a reason. Scanning the same page does not duplicate cases or reset decisions.
+  Public browsing never creates cases or modifies data.
+- Decisions are bound to the description hash and parsed text span. Edited descriptions
+  require a fresh scan; stale cases remain as history and display a warning.
+  Relevant graph/target changes invalidate an open approval preview: refresh the
+  evidence before deciding. Merged targets follow redirects; deleted targets do
+  not produce links.
+- Candidate labels are cached for at most 30 seconds; graph evidence, decisions,
+  target existence and preview metadata are read fresh. Preview reads are batched
+  by target type and repeated mentions reuse the same preview.
+- The inline component renders ordinary source Markdown, including emphasis, lists,
+  headings and tables, with raw HTML disabled and safe link schemes. Existing links,
+  code and embedded HTML are not annotation targets. Streamlit-specific directives
+  use native rendering without previews instead of losing their formatting.
+  Private reviews, critics, rights/source notes and editable fields are not enriched.
+  No external model or API is used; missed mentions and unavailable graph evidence
+  are safer than guessed identities.
+
 ## Ingestion
 
 - Standalone theatre scrapes write staged snapshots, never directly to the
