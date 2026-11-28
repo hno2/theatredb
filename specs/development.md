@@ -2,6 +2,25 @@
 
 Run commands from the repository root.
 
+## Local app reload
+
+Set `THEATERDB_DEV_RELOAD=1` in `.env`, then run:
+
+```bash
+uv run python -m frontend.dev
+```
+
+The development launcher watches Python files under `backend` and `frontend`
+and restarts the entire Streamlit process on edits. Streamlit's own module
+watcher is disabled in this mode: re-importing SQLModel models in the same
+process would register tables twice. Restarts reset in-memory session state.
+Schema changes still require migrations.
+
+With `THEATERDB_DEV_RELOAD=0` (default), the launcher runs Streamlit normally.
+Streamlit flags can be appended, for example `--server.port=8502`.
+Environment variables override `.env`. Docker and production keep their
+existing launch commands and do not use this development flag.
+
 ## Database
 
 ```bash

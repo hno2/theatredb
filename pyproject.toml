@@ -35,6 +35,7 @@ dev = [
     "types-jsonschema>=4.26.0.20261006",
     "types-tqdm>=4.70.0.20261106",
     "httpx>=0.28.1",
+    "watchfiles>=1.1",
 ]
 ingest=[
 	"babel>=2.17",

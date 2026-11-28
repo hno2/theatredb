@@ -12,6 +12,8 @@ POSTGRES_PASSWORD=replace-this
 POSTGRES_DB=theaterdb
 # Local only: act as admin without SSO (see specs/development.md)
 THEATERDB_DEV_AUTH=1
+# Local only: restart the app when backend or frontend Python files change
+THEATERDB_DEV_RELOAD=1
 ```
 
 Install project dependencies, start PostgreSQL, then start the app:
@@ -20,10 +22,13 @@ Install project dependencies, start PostgreSQL, then start the app:
 uv sync --all-groups
 docker compose up -d --wait db
 uv run python -m backend.db migrate
-uv run streamlit run frontend/app.py
+uv run python -m frontend.dev
 ```
 
 Open <http://localhost:8501>.
+The launcher reads `THEATERDB_DEV_RELOAD` from `.env`. With `1`, Python edits
+restart the whole app; in-memory session state resets. With `0` (the default),
+it launches Streamlit normally.
 
 To run the app and crawler worker in Docker instead:
 
