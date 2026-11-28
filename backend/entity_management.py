@@ -580,8 +580,11 @@ def create_entity[ModelT: SQLModel](
             stmt = select(model_cls)
             for key, value in get_if_exists.items():
                 stmt = stmt.where(getattr(model_cls, key) == value)
-            existing = session.exec(stmt.limit(1)).first()
-            if existing is not None:
+            matches = list(session.exec(stmt.limit(2)))
+            if len(matches) > 1:
+                raise ValueError(f"Multiple {model_cls.__name__} rows match get_if_exists fields")
+            if matches:
+                existing = matches[0]
                 _attach_missing_sources(session, model_cls, _entity_id(existing), source_links)
                 session.commit()
                 session.refresh(existing)
