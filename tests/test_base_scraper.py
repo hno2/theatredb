@@ -1,7 +1,7 @@
 import pytest
 
 from backend.config import ROLE_ALIASES, ROLE_CONFIG, canonical_role
-from backend.ingestion.base_scraper import infer_person_type, parse_date_dmy, parse_duration_minutes
+from backend.ingestion.scraper_utils import infer_person_type, parse_date_dmy, parse_duration_minutes
 
 
 @pytest.mark.parametrize(("alias", "expected"), list(ROLE_ALIASES.items()))

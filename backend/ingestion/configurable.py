@@ -24,7 +24,7 @@ from tqdm import tqdm
 from tqdm.asyncio import tqdm as async_tqdm
 
 from backend.config import TEXT_TRANSLATION
-from backend.ingestion.base_scraper import (
+from backend.ingestion.scraper_utils import (
     extract_author_info,
     infer_person_type,
     normalize_person_name,

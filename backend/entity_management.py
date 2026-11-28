@@ -311,11 +311,6 @@ def json_field_filter(model: type[SQLModel], field_name: str, selected: list[str
     return select(1).select_from(values).where(values.c.value.in_(selected)).exists()
 
 
-def tag_filter(model: type[Organization | Production], tags: list[str]) -> ColumnElement[bool]:
-    """Match any selected tag as an exact JSON array value."""
-    return json_field_filter(model, "tags", tags)
-
-
 def get_entity_graph[ModelT: SQLModel](
     model_cls: type[ModelT], entity_id: str, *, max_depth: int = 3
 ) -> dict[str, Any]:

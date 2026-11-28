@@ -6,12 +6,10 @@ import uuid
 from collections.abc import Mapping, Sequence
 
 from pydantic import Field
-from selectolax.lexbor import LexborHTMLParser
 from sqlalchemy import or_
 from sqlmodel import Session, col, select
 from tqdm import tqdm
 
-from backend.ingestion.configurable import FieldRule, extract_field
 from backend.ingestion.staging import HttpURL, NonEmptyText, StagedText
 from backend.models import (
     EntitySource,
@@ -87,16 +85,6 @@ def normalize_metadata(record: Mapping[str, object]) -> PublisherText:
         if isinstance(data.get(field), str):
             data[field] = [data[field]]
     return PublisherText.model_validate(data)
-
-
-def extract_metadata(html: str, *, url: str, rules: Mapping[str, object]) -> PublisherText:
-    """Apply existing declarative CSS field rules to supplied HTML, without fetching it."""
-    root = LexborHTMLParser(html)
-    fields = {
-        field: extract_field(root, rule if isinstance(rule, FieldRule) else FieldRule.model_validate(rule), url)
-        for field, rule in rules.items()
-    }
-    return normalize_metadata({"url": url, **{field: value for field, value in fields.items() if value is not None}})
 
 
 def _source_record(session: Session, source_id: uuid.UUID, record: PublisherText) -> SourceRecord | None:
