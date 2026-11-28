@@ -51,11 +51,13 @@ pages.
     become event `performer` entries.
   - All other memberships become `creator` roles with the German role label.
 - Event:
-  - Only the premiere is exported, as one `Premiere` event with `duration`,
+  - Each timed performance becomes an event; a matching timed premiere is
+    exported once with `eventType: ["Premiere"]`. Events include `duration`,
     `url`, and the theatre as `location`.
-  - It is exported only at day or minute precision.
-  - Stored premieres are local wall time and are exported with the
-    Europe/Berlin offset.
+  - ORIF requires a date-time, so performances and premieres with only a date
+    are stored but omitted rather than assigned a fictitious time.
+  - Stored dates and times are local wall time; timed events are exported with
+    the Europe/Berlin offset.
 
 ## Import
 
@@ -64,7 +66,12 @@ converted to staged records before validation:
 
 - Event URLs are used as production source links. A production without an event
   URL rejects the whole file.
+- Event identifiers and event-specific metadata are not retained; export uses
+  identifiers derived from the production and local performance time.
 - The `Premiere` event provides `premiere` and `duration`.
+- Every event's `startDate` is added to `performance_dates`. Offsets are
+  converted to Europe/Berlin local time; repeat imports add dates without
+  removing existing ones.
 - Performers from all events and creators become memberships. Organization
   agents are skipped.
 - The first `isBasedOn` or `workPerformed` work becomes `text`.
@@ -73,17 +80,16 @@ converted to staged records before validation:
 ## Not mapped
 
 - ORIF fields with no TheatreDB equivalent are never filled:
-  - performance dates other than the premiere, `offers`, `eventStatus`,
-    `subEvent`, and `superEvent`
+  - event `offers`, `eventStatus`, `subEvent`, and `superEvent`
   - images, videos, `logo`
   - accessibility fields, `contentWarning`, `funder`, `sponsor`, `creditText`
   - `dateModified`
 - TheatreDB data that ORIF cannot hold is dropped from exports:
-  - month or year premieres
+  - date-only performances and premieres; month or year premieres
   - critics, sources, `url_plays`, region, venues, founding dates, and quality
     metadata
   - people's biographies and dates
   - text lineage
 - Productions without a theatre cannot be exported.
-- Without a premiere event, character names are lost and actors are listed as
+- Without a timed event, character names are lost and actors are listed as
   creators.

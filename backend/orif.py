@@ -129,8 +129,8 @@ def _credits(production: dict) -> tuple[list[dict], list[dict]]:
 
 
 def _premiere_event(production: dict, organization: dict, performers: list[dict]) -> dict | None:
-    """ORIF events need a date-time, so month/year premieres cannot be exported."""
-    if not production.get("premiere") or production.get("premiere_precision") not in ("day", "minute"):
+    """ORIF requires a time, so premieres with less than minute precision cannot be exported."""
+    if not production.get("premiere") or production.get("premiere_precision") != "minute":
         return None
     start = dt.datetime.fromisoformat(production["premiere"]).replace(tzinfo=LOCAL_TIMEZONE)
     address = _address(organization)
@@ -161,7 +161,22 @@ def production_to_orif(production: dict, organization: dict | None = None) -> di
     text = production.get("text") or {}
     creators, performers = _credits(production)
     event = _premiere_event(production, organization, performers)
-    if event is None:
+    events = [event] if event else []
+    premiere_start = event["startDate"] if event else None
+    for date in sorted(set(production.get("performance_dates") or [])):
+        if len(date) == 10:
+            continue
+        performance = _premiere_event(
+            {**production, "premiere": date, "premiere_precision": "minute"}, organization, performers
+        )
+        if performance is None:
+            raise ValueError(f"Invalid performance date: {date!r}")
+        if performance["startDate"] == premiere_start:
+            continue
+        performance["identifier"] = f"{production['id']}:performance:{date}"
+        del performance["eventType"]
+        events.append(performance)
+    if not events:
         # Without an event, cast can only be listed as production creators (character names are lost).
         creators += [
             {"@type": "Role", "creator": row["performer"], "roleName": row.get("roleName") or role_label("actor")}
@@ -189,7 +204,7 @@ def production_to_orif(production: dict, organization: dict | None = None) -> di
             "audience": {"@type": "PeopleAudience", "suggestedMinAge": age} if age is not None else None,
             "creator": creators,
         }
-    ) | {"events": [event] if event else []}
+    ) | {"events": events}
 
 
 def orif_document(organization: dict, productions: Iterable[dict]) -> dict:
@@ -220,6 +235,8 @@ def _plain(value: object) -> str | None:
 
 def _wall_time(value: str) -> str:
     """Store ORIF's offset date-times as local wall time, matching the export."""
+    if len(value) == 10:
+        return dt.date.fromisoformat(value).isoformat()
     start = dt.datetime.fromisoformat(value)
     if start.tzinfo is not None:
         start = start.astimezone(LOCAL_TIMEZONE).replace(tzinfo=None)
@@ -284,6 +301,7 @@ def _staged_production(production: dict) -> dict:
             "url": url,
             "description": _plain(production.get("description")),
             "premiere": _wall_time(premiere["startDate"]) if premiere else None,
+            "performance_dates": list(dict.fromkeys(_wall_time(event["startDate"]) for event in events)),
             "duration": first.get("duration"),
             "suggested_min_age": audience.get("suggestedMinAge"),
             "tags": [

@@ -76,6 +76,59 @@ def test_shared_staging_year_survives_upload(db, theatre) -> None:
     assert production.premiere_precision == "year"
 
 
+def test_performance_dates_survive_uploads_and_review(db, theatre) -> None:
+    production = save(db, Production(name="Play", organization_id=theatre.id, description="Existing"))[0]
+    record = {
+        "title": "Play",
+        "url": "https://theatre.example/play",
+        "description": "Different",
+        "performance_dates": ["2026-05-01", "2026-05-02T19:30"],
+    }
+    assert upload(theatre, record)["review"] == ["Play"]
+    case = list_production_cases()[0]
+    review = production_review(case["id"])
+    resolve_production_case(case["id"], revision=review["revision"], actor_id="test")
+    assert rows(db, Production)[0].performance_dates == record["performance_dates"]
+
+    updated = {**record, "description": "Existing", "performance_dates": ["2026-05-02T19:30", "2026-05-03T20:00"]}
+    assert upload(theatre, updated)["merged"] == ["Play"]
+    assert rows(db, Production)[0].performance_dates == [*record["performance_dates"], "2026-05-03T20:00"]
+    assert upload(theatre, updated)["unchanged"] == ["Play"]
+    assert rows(db, Production)[0].id == production.id
+
+
+def test_orif_performances_are_persisted_idempotently(db, theatre) -> None:
+    document = {
+        "@context": "https://schema.org",
+        "version": "v2",
+        "productions": [
+            {
+                "name": "Play",
+                "events": [
+                    {"startDate": "2026-07-01T18:00:00Z", "url": "https://theatre.example/play"},
+                    {"startDate": "2026-07-02T19:30:00+02:00", "eventType": ["Premiere"]},
+                ],
+            }
+        ],
+    }
+
+    def ingest():
+        return ingest_records(document, organization_id=theatre.id, source_name="theatre.example", actor_id="test")
+
+    assert ingest()["created"] == ["Play"]
+    production = rows(db, Production)[0]
+    assert production.performance_dates == ["2026-07-01T20:00", "2026-07-02T19:30"]
+    assert production.premiere == dt.datetime(2026, 7, 2, 19, 30)
+    assert ingest()["unchanged"] == ["Play"]
+
+
+def test_database_rejects_invalid_performance_dates(db) -> None:
+    with Session(db) as session:
+        session.add(Production(name="Play", performance_dates=["2026"]))
+        with pytest.raises(ValueError, match="Performance dates"):
+            session.commit()
+
+
 @pytest.fixture
 def db(monkeypatch, tmp_path) -> Iterator[Engine]:
     engine = create_engine(f"sqlite:///{tmp_path / 'import.db'}")

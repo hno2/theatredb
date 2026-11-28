@@ -181,6 +181,7 @@ LINK_IDENTITY_FIELDS: dict[type, tuple[str, ...]] = {
 PRODUCTION_FIELD_LABELS = {
     "name": "Titel",
     "premiere": "Premiere",
+    "performance_dates": "Vorstellungstermine",
     "description": "Beschreibung",
     "duration": "Dauer (Min.)",
     "suggested_min_age": "Altersempfehlung",

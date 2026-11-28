@@ -20,6 +20,7 @@ from pydantic import (
 )
 
 from backend.date_precision import DatePrecision, normalize_dates, parse_date
+from backend.models import PerformanceDate
 from backend.orif import as_staged
 
 type NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, pattern=r"\S")]
@@ -193,6 +194,12 @@ class StagedProduction(StagedDomainModel):
     description: str | None = None
     premiere: DomainDate = None
     premiere_precision: DatePrecision | None = None
+    performance_dates: list[
+        Annotated[
+            PerformanceDate,
+            WithJsonSchema({"type": "string", "pattern": rf"^{_DATE}(?:T(?:[01]\d|2[0-3]):[0-5]\d)?$"}),
+        ]
+    ] = Field(default_factory=list)
     premiere_year: Annotated[StrictInt, Field(ge=1, le=9999)] | None = Field(default=None, exclude=True)
     duration: NonNegativeInt | None = None
     suggested_min_age: NonNegativeInt | None = None

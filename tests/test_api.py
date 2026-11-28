@@ -34,7 +34,13 @@ def api_db(monkeypatch, tmp_path):
     )
     person = Person(name="Test Director")
     text = Text(title="Test Play")
-    production = Production(name="Test Production", organization_id=theatre.id, text_id=text.id, premiere="2020")
+    production = Production(
+        name="Test Production",
+        organization_id=theatre.id,
+        text_id=text.id,
+        premiere="2020",
+        performance_dates=["2026-05-01", "2026-05-02T19:30"],
+    )
     source = Source(name="Public source")
     old_id = uuid4()
     ids = {
@@ -109,6 +115,7 @@ def test_details_preserve_relationships_redaction_and_merged_ids(client, api_db)
     assert "general_verified_by" not in production["organization"]
     assert production["memberships"][0]["person"]["name"] == "Test Director"
     assert production["text"]["title"] == "Test Play"
+    assert production["performance_dates"] == ["2026-05-01", "2026-05-02T19:30"]
     assert len(production["sources"]) == 1
     assert "general_verified_by" not in client.get("/api/organizations").json()["items"][0]
     assert "general_verified_by" not in client.get("/api/productions").json()["items"][0]["organization"]
@@ -124,6 +131,7 @@ def test_open_repertoire_exports_use_orif_documents(client, api_db):
     assert (production["identifier"], production["name"]) == (str(api_db["productions"]), "Test Production")
     assert production["creator"][0]["creator"][0]["name"] == "Test Director"
     assert production["isBasedOn"] == [{"@type": "CreativeWork", "name": "Test Play"}]
+    assert [event["startDate"] for event in production["events"]] == ["2026-05-02T19:30:00+02:00"]
     assert client.get(f"/api/productions/{api_db['productions']}/orif").json() == document
     assert client.get(f"/api/people/{api_db['old_person']}/orif").json() == [document]
     other = client.get("/api/productions", params={"q": "Other"}).json()["items"][0]["id"]

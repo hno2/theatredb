@@ -134,6 +134,39 @@ def test_orif_import_converts_offsets_and_rejects_unusable_documents() -> None:
     assert as_staged([{"title": "Staged"}]) == [{"title": "Staged"}]
 
 
+def test_performance_dates_export_and_round_trip_without_duplicate_premiere() -> None:
+    production = {
+        **TOSCA,
+        "performance_dates": ["2026-03-01T19:30", "2026-07-01T20:00", "2026-07-02", "2026-07-01T15:00"],
+    }
+    document = orif_document(THEATRE, [production])
+    events = document["productions"][0]["events"]
+    assert [event["startDate"] for event in events] == [
+        "2026-03-01T19:30:00+01:00",
+        "2026-07-01T15:00:00+02:00",
+        "2026-07-01T20:00:00+02:00",
+    ]
+    assert events[0]["eventType"] == ["Premiere"]
+    assert all("eventType" not in event for event in events[1:])
+    assert len({event["identifier"] for event in events}) == 3
+    events[-1]["startDate"] = "2026-07-01T18:00:00Z"
+    [record] = validate_records(document)
+    assert record["performance_dates"] == ["2026-03-01T19:30", "2026-07-01T15:00", "2026-07-01T20:00"]
+
+
+def test_date_only_events_are_omitted_without_inventing_a_time() -> None:
+    production = {**TOSCA, "premiere_precision": "day", "performance_dates": ["2026-03-01"]}
+    exported = orif_document(THEATRE, [production])["productions"][0]
+    assert exported["events"] == []
+    assert [role["roleName"] for role in exported["creator"]] == ["Regie", "Schauspiel"]
+
+
+@pytest.mark.parametrize("value", ["2026", "2026-02-30", "2026-03-01T24:00", "2026-03-01T19:30Z"])
+def test_staging_rejects_invalid_performance_dates(value: str) -> None:
+    with pytest.raises(ValidationError):
+        validate_records([{"title": "Play", "url": "https://theatre.example/play", "performance_dates": [value]}])
+
+
 def test_staging_accepts_legacy_field_names_and_rejects_conflicts() -> None:
     record = {"title": "Alt", "url": "https://theatre.example/alt", "age_rating": 12}
     member = {"name": "Alex", "role": "Schauspiel", "character": "Hamlet"}

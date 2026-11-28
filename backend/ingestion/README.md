@@ -76,6 +76,11 @@ to that theatre. Re-uploading is idempotent; unresolved
 conflicts go to **Produktionskonflikte**. Missing credits are not treated as
 deletions.
 
+Optional `performance_dates` are local ISO dates (`2026-03-01`) or
+minute-precision date-times (`2026-03-01T19:30`). Reuploads add dates without
+deleting existing dates. ORIF exports omit date-only performances because ORIF
+requires a time.
+
 Snapshots may include an optional `text` object, independently of the production
 title:
 

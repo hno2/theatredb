@@ -70,7 +70,7 @@ from backend.writes import EntityWriter, SourceObservation, record_source
 OPERATION = "production_upload"
 # Titles at or above this score are treated as "possibly the same production" and reviewed.
 TITLE_THRESHOLD = 0.8
-LIST_FIELDS = frozenset({"tags", "critics"})
+LIST_FIELDS = frozenset({"tags", "critics", "performance_dates"})
 # Every source has its own page; a different URL is stored as source link, never a conflict.
 FILL_ONLY_FIELDS = frozenset({"url"})
 PERSON_FILL_FIELDS = ("description", "born", "born_precision", "died", "died_precision", "nationality")
@@ -161,6 +161,7 @@ def prepare_record(record: dict) -> dict:
             "description": _clean(record.get("description")),
             "premiere": dt.datetime.fromisoformat(premiere).isoformat() if premiere else None,
             "premiere_precision": record.get("premiere_precision"),
+            "performance_dates": record.get("performance_dates", []),
             "duration": record.get("duration"),
             "suggested_min_age": record.get("suggested_min_age"),
             "url": record["url"],
@@ -758,7 +759,7 @@ def _ingest_one(
 
 
 def ingest_records(
-    records: list[dict],
+    records: object,
     *,
     organization_id: uuid.UUID | str,
     source_name: str,
