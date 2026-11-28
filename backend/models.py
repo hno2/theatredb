@@ -860,7 +860,7 @@ class ProductionMembership(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     production_id: uuid.UUID = Field(foreign_key="production.id", index=True)
     person_id: uuid.UUID = Field(foreign_key="person.id", index=True)
-    role_name: str | None = None  # e.g. "Regie", "Schauspieler", "Dramaturgie", etc. # TODO: define somewhere else
+    role_name: str | None = None  # Source labels stay flexible; canonical roles live in backend.config.
     character_name: str | None = None  # for actors
 
     production: Production = Relationship(back_populates="memberships")
