@@ -13,7 +13,6 @@ from collections.abc import Collection, Sequence
 from contextlib import nullcontext
 from difflib import SequenceMatcher
 from operator import itemgetter
-from typing import Any, get_origin
 from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import Boolean, Integer, String, Uuid, and_, cast, func, literal, or_, union_all, values
@@ -46,9 +45,17 @@ from backend.models import (
     TextLineage,
     TextTitle,
 )
-from backend.scd2 import add_scd2_event
 from backend.taxonomy import prepare_production_merge
 from backend.user_management import get_session
+from backend.writes import (  # ruff: ignore[unused-import] -- compatibility exports
+    EntityWriter,
+    SourceObservation,
+    audit_event,
+    entity_snapshot,
+    record_source,
+    resolve_id,
+    revalidate,
+)
 
 type Entity = Organization | Person | Production | Text | Award
 EMPTY = (None, "", [], {})
@@ -79,38 +86,8 @@ def union_values(left: list, right: list) -> list:
     return list({stable_digest(value): value for value in [*left, *right]}.values())
 
 
-def entity_snapshot(entity: SQLModel) -> dict[str, Any]:
-    """Serialize an entity to JSON-compatible values."""
-    return entity.model_dump(mode="json")
-
-
-def revalidate[Model: SQLModel](entity: Model, changes: dict[str, Any]) -> Model:
-    """Validate an existing row with changes; legacy NULL list columns count as empty lists."""
-    model: type[Model] = type(entity)
-    data = {**entity_snapshot(entity), **changes}
-    for name, field in model.model_fields.items():
-        if data.get(name) is None and get_origin(field.annotation) is list:
-            data[name] = []
-    return model.model_validate(data)
-
-
 def _kind(value: EntityType | str) -> EntityType:
     return EntityType(value)
-
-
-def resolve_id(session: Session, kind: EntityType | str, entity_id: uuid.UUID | str) -> uuid.UUID:
-    """Follow persisted redirects, rejecting corrupt cycles."""
-    kind, current = _kind(kind), uuid.UUID(str(entity_id))
-    seen = set()
-    while current not in seen:
-        seen.add(current)
-        redirect = session.exec(
-            select(EntityRedirect).where(EntityRedirect.entity_type == kind, EntityRedirect.old_id == current)
-        ).first()
-        if redirect is None:
-            return current
-        current = redirect.target_id
-    raise ValueError("Entity redirect cycle")
 
 
 def _get(session: Session, kind: EntityType, entity_id: uuid.UUID | str) -> Entity:
@@ -1014,34 +991,6 @@ def preview_case(case_id: uuid.UUID | str, *, target_id: uuid.UUID | str | None 
         return _preview(session, case, target_id)
 
 
-def _apply_reviewed_changes(
-    session: Session, case: ReconciliationCase, entity: Entity, changes: dict, actor_id: str
-) -> bool:
-    before = entity_snapshot(entity)
-    validated = revalidate(entity, changes)
-    for field in changes:
-        setattr(entity, field, getattr(validated, field))
-    changed = entity_snapshot(entity) != before
-    if changed:
-        session.add(entity)
-    defer_audit = case.operation == "merge" and isinstance(entity, Organization)
-    if changed and not defer_audit:
-        audit_event(session, entity, "update", actor_id)
-    return changed and defer_audit
-
-
-def audit_event(session: Session, entity: SQLModel, operation: str, actor_id: str | None) -> None:
-    """Record an SCD2 history event for an entity change."""
-    add_scd2_event(
-        session,
-        entity_name=type(entity).__name__.lower(),
-        entity_id=str(entity.model_dump(mode="python")["id"]),
-        operation=operation,
-        snapshot=entity_snapshot(entity),
-        actor_id=actor_id,
-    )
-
-
 def _save_source(session: Session, case: ReconciliationCase, entity_id: uuid.UUID) -> None:
     if case.source_id is None:
         return
@@ -1071,50 +1020,19 @@ def save_source_record(
     captured_at: dt.datetime | None,
 ) -> None:
     """Persist an accepted source observation without requiring a review case."""
-    if not record_key:
-        raise ValueError("Source record key is required")
-    record = session.exec(
-        select(SourceRecord).where(
-            SourceRecord.source_id == source_id,
-            SourceRecord.entity_type == kind,
-            SourceRecord.record_key == record_key,
-        )
-    ).first()
-    if record is None:
-        record = SourceRecord(source_id=source_id, entity_type=kind, record_key=record_key, entity_id=entity_id)
-    elif resolve_id(session, kind, record.entity_id) != entity_id:
-        raise ValueError("Source identity belongs to another entity")
-    elif record.captured_at and (
-        captured_at is None or record.captured_at.replace(tzinfo=dt.UTC) > captured_at.astimezone(dt.UTC)
-    ):
-        return
-    record.entity_id = entity_id
-    record.external_id = context.get("external_id")
-    record.external_url = context.get("external_url")
-    record.payload = {**record.payload, "incoming": incoming, "context": context}
-    record.captured_at = captured_at
-    session.add(record)
-    source = session.exec(
-        select(EntitySource).where(
-            EntitySource.source_id == source_id,
-            EntitySource.entity_type == kind,
-            EntitySource.entity_id == entity_id,
-        )
-    ).first()
-    if source is None:
-        source = EntitySource(
+    record_source(
+        session,
+        SourceObservation(
+            kind=kind,
             source_id=source_id,
-            entity_type=kind,
+            record_key=record_key,
             entity_id=entity_id,
-            external_id=record.external_id,
-            external_url=record.external_url,
-        )
-    source.reviewed = True
-    if captured_at and (
-        source.sourced_at is None or source.sourced_at.replace(tzinfo=dt.UTC) <= captured_at.astimezone(dt.UTC)
-    ):
-        source.sourced_at = captured_at
-    session.add(source)
+            payload={"incoming": incoming, "context": context},
+            captured_at=captured_at,
+            external_id=context.get("external_id"),
+            external_url=context.get("external_url"),
+        ),
+    )
 
 
 def _archive_source(
@@ -1398,13 +1316,13 @@ def _carry_organization_blocks(
 
 
 def _merge_organization_season_checks(
-    session: Session,
+    writes: EntityWriter,
     target: Organization,
     duplicate: Organization,
     conflicts: set[str],
     choices: dict[str, str],
-    actor_id: str | None,
 ) -> None:
+    session = writes.session
     checks = session.exec(
         select(OrganizationSeasonCheck).where(OrganizationSeasonCheck.organization_id == duplicate.id)
     ).all()
@@ -1420,43 +1338,42 @@ def _merge_organization_season_checks(
             check.organization_id = target.id
             session.add(check)
             session.flush()
-            audit_event(session, check, "update", actor_id)
+            writes.record(check, "update")
             continue
         key = f"season:{check.season_start_year}"
         selected = str(choices.get(key, target.id))
         if selected not in {str(target.id), str(duplicate.id)}:
             raise ValueError(f"Invalid source for assessment conflict {key}")
         if selected == str(duplicate.id) and key in conflicts:
-            audit_event(session, existing, "delete", actor_id)
+            writes.record(existing, "delete")
             session.delete(existing)
             session.flush()
             check.organization_id = target.id
             session.add(check)
             session.flush()
-            audit_event(session, check, "update", actor_id)
+            writes.record(check, "update")
         else:
-            audit_event(session, check, "delete", actor_id)
+            writes.record(check, "delete")
             session.delete(check)
 
 
 def _apply_organization_assessments(
-    session: Session,
+    writes: EntityWriter,
     target: Organization,
     duplicate: Organization,
-    actor_id: str | None,
     choices: dict[str, str] | None,
 ) -> bool:
     conflict_keys, selected = _validate_assessment_choices(
-        _organization_quality_conflicts(session, target, duplicate), choices
+        _organization_quality_conflicts(writes.session, target, duplicate), choices
     )
+    writes.track(target)
     changed = _carry_organization_blocks(target, duplicate, conflict_keys, selected)
-    _merge_organization_season_checks(session, target, duplicate, conflict_keys, selected, actor_id)
-    if changed:
-        audit_event(session, target, "update", actor_id)
+    _merge_organization_season_checks(writes, target, duplicate, conflict_keys, selected)
     return changed
 
 
-def _deduplicate_links(session: Session, actor_id: str | None, touched: set[tuple[type, uuid.UUID]]) -> None:
+def _deduplicate_links(writes: EntityWriter, touched: set[tuple[type, uuid.UUID]]) -> None:
+    session = writes.session
     for model, fields in LINK_IDENTITY_FIELDS.items():
         for touched_model, row_id in touched:
             if touched_model != model:
@@ -1475,51 +1392,36 @@ def _deduplicate_links(session: Session, actor_id: str | None, touched: set[tupl
                     credit_role(getattr(match, f)) if f in {"role", "role_name"} else getattr(match, f) for f in fields
                 )
                 if key in seen or (isinstance(match, TextLineage) and match.source_text_id == match.derived_text_id):
-                    audit_event(session, match, "delete", actor_id)
+                    writes.record(match, "delete")
                     session.delete(match)
                 else:
                     seen.add(key)
     session.flush()
 
 
-def _prepare_organization_merge(
-    session: Session,
-    case: ReconciliationCase,
-    target: Entity,
-    duplicate: Entity,
-    actor_id: str | None,
-    choices: dict[str, str] | None,
-    target_changed: bool,
-) -> None:
-    if case.entity_type != EntityType.ORGANIZATION:
-        return
-    if not isinstance(target, Organization) or not isinstance(duplicate, Organization):
-        raise TypeError("Organization merge target mismatch")
-    quality_changed = _apply_organization_assessments(session, target, duplicate, actor_id, choices)
-    if target_changed and not quality_changed:
-        audit_event(session, target, "update", actor_id)
-
-
-def _merge(
-    session: Session,
-    case: ReconciliationCase,
+def merge_entity(
+    writes: EntityWriter,
+    kind: EntityType,
     target: Entity,
     duplicate_id: str,
-    actor_id: str | None,
     *,
     approved_ids: Collection[uuid.UUID] = (),
     assessment_choices: dict[str, str] | None = None,
-    target_changed: bool = False,
 ) -> None:
-    duplicate = _get(session, case.entity_type, duplicate_id)
-    _prepare_organization_merge(session, case, target, duplicate, actor_id, assessment_choices, target_changed)
-    _prepare_link_merge(session, case.entity_type, target.id, duplicate.id, actor_id)
+    """Move an approved duplicate's graph and provenance into its survivor."""
+    session = writes.session
+    duplicate = _get(session, kind, duplicate_id)
+    if duplicate.id == target.id:
+        raise ValueError("Cannot merge an entity into itself")
+    if isinstance(target, Organization) and isinstance(duplicate, Organization):
+        _apply_organization_assessments(writes, target, duplicate, assessment_choices)
+    _prepare_link_merge(writes, kind, target.id, duplicate.id)
     # Local import: backend.library imports texts, which imports this module.
     from backend.library import merge_target  # ruff: ignore[import-outside-top-level]
 
-    merge_target(session, case.entity_type.value, duplicate.id, target.id)
+    merge_target(session, kind.value, duplicate.id, target.id)
     touched = set()
-    for model, field, rows in _references(session, case.entity_type, duplicate.id):
+    for model, field, rows in _references(session, kind, duplicate.id):
         for row in rows:
             setattr(row, field, target.id)
             session.add(row)
@@ -1528,49 +1430,60 @@ def _merge(
     for model, row_id in touched:
         row = session.get(model, row_id)
         if row is not None:
-            audit_event(session, row, "update", actor_id)
-    _deduplicate_links(session, actor_id, touched)
+            writes.record(row, "update")
+    _deduplicate_links(writes, touched)
+    _merge_provenance(session, kind, target.id, duplicate.id, approved_ids)
+    writes.record(duplicate, "delete")
+    session.delete(duplicate)
+    session.flush()
+    if kind == EntityType.PERSON:
+        _merge_author_texts(writes, target.id)
+
+
+def _merge_provenance(
+    session: Session,
+    kind: EntityType,
+    target_id: uuid.UUID,
+    duplicate_id: uuid.UUID,
+    approved_ids: Collection[uuid.UUID],
+) -> None:
     links = session.exec(
         select(EntitySource).where(
-            EntitySource.entity_type == case.entity_type,
-            col(EntitySource.entity_id).in_([target.id, duplicate.id]),
+            EntitySource.entity_type == kind,
+            col(EntitySource.entity_id).in_([target_id, duplicate_id]),
         )
     ).all()
     by_source = {}
-    for link in sorted(links, key=lambda row: row.entity_id != target.id):
-        _archive_source(session, link, target.id, duplicate.id, approved_ids)
+    for link in sorted(links, key=lambda row: row.entity_id != target_id):
+        _archive_source(session, link, target_id, duplicate_id, approved_ids)
         if link.source_id in by_source:
             session.delete(link)
         else:
-            link.entity_id = target.id
+            link.entity_id = target_id
             session.add(link)
             by_source[link.source_id] = link
     for record in session.exec(
         select(SourceRecord).where(
-            SourceRecord.entity_type == case.entity_type,
-            SourceRecord.entity_id == duplicate.id,
+            SourceRecord.entity_type == kind,
+            SourceRecord.entity_id == duplicate_id,
         )
     ).all():
-        record.entity_id = target.id
+        record.entity_id = target_id
         session.add(record)
     for redirect in session.exec(
         select(EntityRedirect).where(
-            EntityRedirect.entity_type == case.entity_type,
-            EntityRedirect.target_id == duplicate.id,
+            EntityRedirect.entity_type == kind,
+            EntityRedirect.target_id == duplicate_id,
         )
     ).all():
-        redirect.target_id = target.id
+        redirect.target_id = target_id
         session.add(redirect)
-    session.add(EntityRedirect(entity_type=case.entity_type, old_id=duplicate.id, target_id=target.id))
-    audit_event(session, duplicate, "delete", actor_id)
-    session.delete(duplicate)
-    session.flush()
-    if case.entity_type == EntityType.PERSON:
-        _merge_author_texts(session, target.id, actor_id)
+    session.add(EntityRedirect(entity_type=kind, old_id=duplicate_id, target_id=target_id))
 
 
-def _merge_author_texts(session: Session, person_id: uuid.UUID, actor_id: str | None) -> None:
+def _merge_author_texts(writes: EntityWriter, person_id: uuid.UUID) -> None:
     """Consolidate compatible texts whose author identities now coincide."""
+    session = writes.session
     credits = session.exec(
         select(TextContribution).where(
             col(TextContribution.text_id).in_(
@@ -1612,21 +1525,20 @@ def _merge_author_texts(session: Session, person_id: uuid.UUID, actor_id: str | 
             if "title" in conflicts
             else {}
         )
-        _apply_entity_merge(session, preview, actor_id=actor_id, choices=choices, require_choices=True, automatic=True)
+        _apply_entity_merge(writes, preview, choices=choices, require_choices=True, automatic=True)
 
 
-def _prepare_link_merge(
-    session: Session, kind: EntityType, target_id: uuid.UUID, duplicate_id: uuid.UUID, actor_id: str | None
-) -> None:
+def _prepare_link_merge(writes: EntityWriter, kind: EntityType, target_id: uuid.UUID, duplicate_id: uuid.UUID) -> None:
     """Resolve uniquely keyed child rows before foreign keys move to the target."""
     if kind == EntityType.TEXT:
-        _prepare_text_merge(session, target_id, duplicate_id, actor_id)
+        _prepare_text_merge(writes, target_id, duplicate_id)
     elif kind == EntityType.PRODUCTION:
-        prepare_production_merge(session, target_id, duplicate_id)
+        prepare_production_merge(writes.session, target_id, duplicate_id)
 
 
-def _prepare_text_merge(session: Session, target_id: uuid.UUID, duplicate_id: uuid.UUID, actor_id: str | None) -> None:
+def _prepare_text_merge(writes: EntityWriter, target_id: uuid.UUID, duplicate_id: uuid.UUID) -> None:
     """Delete future unique-key collisions before FK updates; retain notes and titles."""
+    session = writes.session
     for model, fields in (
         (TextTitle, ("text_id", "normalized")),
         (TextLineage, ("source_text_id", "derived_text_id", "relation")),
@@ -1639,15 +1551,16 @@ def _prepare_text_merge(session: Session, target_id: uuid.UUID, duplicate_id: uu
                 target_id if getattr(row, field) == duplicate_id else getattr(row, field) for field in fields
             )
             if isinstance(row, TextLineage) and values[0] == values[1]:
-                audit_event(session, row, "delete", actor_id)
+                writes.record(row, "delete")
                 session.delete(row)
             elif values in seen:
                 survivor = seen[values]
+                writes.track(survivor)
                 if isinstance(row, TextLineage) and isinstance(survivor, TextLineage) and row.notes:
                     survivor.notes = "\n".join(dict.fromkeys(filter(None, (survivor.notes, row.notes))))
                 if isinstance(row, TextTitle) and isinstance(survivor, TextTitle) and survivor.language is None:
                     survivor.language = row.language
-                audit_event(session, row, "delete", actor_id)
+                writes.record(row, "delete")
                 session.delete(row)
             else:
                 seen[values] = row
@@ -1789,21 +1702,20 @@ def _merge_choices(preview: dict, choices: dict[str, str] | None, *, require_cho
 
 
 def _apply_entity_merge(
-    session: Session,
+    writes: EntityWriter,
     preview: dict,
     *,
-    actor_id: str | None,
     choices: dict[str, str] | None,
     require_choices: bool,
     automatic: bool = False,
 ) -> uuid.UUID:
+    session, actor_id = writes.session, writes.actor_id
     kind = _kind(preview["kind"])
     result = _merge_choices(preview, choices, require_choices=require_choices)
     target = session.get(ENTITY_MODELS[kind], uuid.UUID(preview["target_id"]))
     if target is None:
         raise ValueError("Merge target no longer exists")
     before = entity_snapshot(target)
-    validated = revalidate(target, result)
     approved_ids = {uuid.UUID(state["record"]["id"]) for state in preview["records"]}
     aliases = session.exec(
         select(EntityRedirect.old_id).where(
@@ -1821,11 +1733,7 @@ def _apply_entity_merge(
             col(ReconciliationCase.duplicate_id).in_(review_ids),
         )
     ).all()
-    for field in result.keys() - {"id"}:
-        setattr(target, field, getattr(validated, field))
-    if entity_snapshot(target) != before:
-        session.add(target)
-        audit_event(session, target, "update", actor_id)
+    writes.update(target, {field: result[field] for field in result.keys() - {"id"}})
     for duplicate in preview["records"][1:]:
         duplicate_id = duplicate["record"]["id"]
         key = stable_digest(["duplicate", kind, sorted([str(target.id), duplicate_id])])
@@ -1850,12 +1758,11 @@ def _apply_entity_merge(
             **case.context,
             "decision": {"before": before, "after": entity_snapshot(target), "duplicate": duplicate},
         }
-        _merge(
-            session,
-            case,
+        merge_entity(
+            writes,
+            kind,
             target,
             duplicate_id,
-            actor_id,
             approved_ids=approved_ids,
         )
         session.add(case)
@@ -1888,14 +1795,39 @@ def _execute_entity_merge(
     require_choices: bool,
 ) -> uuid.UUID:
     with get_session() as session:
-        preview = _entity_merge_preview(session, kind, entity_ids, target_id)
-        if preview["revision"] != revision:
-            raise ValueError("Data changed since preview. Refresh and review again.")
-        target_id = _apply_entity_merge(
-            session, preview, actor_id=actor_id, choices=choices, require_choices=require_choices
+        target_id = merge_entities_in_session(
+            session,
+            kind,
+            entity_ids,
+            target_id=target_id,
+            revision=revision,
+            actor_id=actor_id,
+            choices=choices,
+            require_choices=require_choices,
         )
         session.commit()
         return target_id
+
+
+def merge_entities_in_session(
+    session: Session,
+    kind: EntityType | str,
+    entity_ids: Collection[uuid.UUID | str],
+    *,
+    target_id: uuid.UUID | str,
+    revision: str,
+    actor_id: str,
+    choices: dict[str, str] | None = None,
+    require_choices: bool = True,
+) -> uuid.UUID:
+    """Apply a reviewed selection with history, leaving commit to the caller."""
+    preview = _entity_merge_preview(session, _kind(kind), entity_ids, target_id)
+    if preview["revision"] != revision:
+        raise ValueError("Data changed since preview. Refresh and review again.")
+    writes = EntityWriter(session, actor_id)
+    target_id = _apply_entity_merge(writes, preview, choices=choices, require_choices=require_choices)
+    writes.finish()
+    return target_id
 
 
 def merge_entities(
@@ -1974,6 +1906,21 @@ def ensure_credit(
     actor_id: str | None,
 ) -> bool:
     """Add a production membership or text contribution unless an equivalent credit exists."""
+    writes = EntityWriter(session, actor_id)
+    changed = apply_credit(writes, entity, person_id, role, character)
+    writes.finish()
+    return changed
+
+
+def apply_credit(
+    writes: EntityWriter,
+    entity: Production | Text,
+    person_id: uuid.UUID,
+    role: str | None,
+    character: str | None,
+) -> bool:
+    """Apply a credit as part of a compound write command."""
+    session = writes.session
     role = credit_role(role)
     rows = _credit_rows(session, entity, person_id)
     if role == "actor" and character:
@@ -1986,9 +1933,9 @@ def ensure_credit(
             None,
         )
         if legacy:
+            writes.track(legacy)
             legacy.role_name, legacy.character_name = "actor", character
             session.add(legacy)
-            audit_event(session, legacy, "update", actor_id)
             return True
     if any(_same_credit(row, role, character) for row in rows):
         return False
@@ -1998,11 +1945,12 @@ def ensure_credit(
         else TextContribution(text_id=entity.id, person_id=person_id, role=role)
     )
     session.add(row)
-    audit_event(session, row, "insert", actor_id)
+    writes.record(row, "insert")
     return True
 
 
-def _apply_credits(session: Session, case: ReconciliationCase, entity: Entity, actor_id: str | None) -> None:
+def _apply_credits(writes: EntityWriter, case: ReconciliationCase, entity: Entity) -> None:
+    session = writes.session
     if not isinstance(entity, (Production, Text)):
         if case.context.get("credits"):
             raise ValueError("Credits are supported for productions and texts only")
@@ -2012,7 +1960,7 @@ def _apply_credits(session: Session, case: ReconciliationCase, entity: Entity, a
         if person_case is None or person_case.target_id is None:
             raise ValueError("Approved person case is required")
         person_id = resolve_id(session, EntityType.PERSON, person_case.target_id)
-        ensure_credit(session, entity, person_id, credit.get("role"), credit.get("character"), actor_id)
+        apply_credit(writes, entity, person_id, credit.get("role"), credit.get("character"))
 
 
 def _selected_changes(entity: Entity, options: dict, selected: list[str]) -> dict:
@@ -2045,62 +1993,83 @@ def approve_case(
     unresolved dependency or conflicting source identity aborts the whole operation.
     """
     with get_session() as session:
-        case = session.get(ReconciliationCase, uuid.UUID(str(case_id)), with_for_update=True)
-        if case is None or case.status != "pending":
-            raise ValueError("Case is missing or already decided")
-        _require_general_case(case)
-        preview = _preview(session, case, target_id)
-        if revision != preview["revision"]:
-            raise ValueError("Data changed since preview. Refresh and review again.")
-        if preview["blocked"]:
-            raise ValueError(f"Unresolved dependencies/conflicts: {preview['blocked']}")
-        target_id = preview["target_id"]
-        if not target_id and not allow_create:
-            raise ValueError("Creation requires explicit approval")
-        options = {row["field"]: row for row in preview["fields"]}
-        selected = fields if fields is not None else [f for f, row in options.items() if row["selected"]]
-        if set(selected) - options.keys():
-            raise ValueError("Selected fields are not in the preview")
-        model = ENTITY_MODELS[case.entity_type]
-        defer_merge_audit = False
-        if target_id:
-            entity = _get(session, case.entity_type, target_id)
-            changes = _selected_changes(entity, options, selected)
-            defer_merge_audit = _apply_reviewed_changes(session, case, entity, changes, actor_id)
-        else:
-            entity = model.model_validate(preview["incoming"])
-            session.add(entity)
-            audit_event(session, entity, "insert", actor_id)
-        session.flush()
-        if case.operation == "merge":
-            _merge(
-                session,
-                case,
-                entity,
-                preview["duplicate_state"]["record"]["id"],
-                actor_id,
-                assessment_choices=assessment_choices,
-                target_changed=defer_merge_audit,
-            )
-            case.duplicate_id = uuid.UUID(preview["duplicate_state"]["record"]["id"])
-        else:
-            _save_source(session, case, entity.id)
-            _apply_credits(session, case, entity, actor_id)
-        case.context = {
-            **case.context,
-            "decision": {
-                "before": preview["current"],
-                "after": entity_snapshot(entity),
-                "fields": selected,
-                "duplicate": preview["duplicate_state"],
-            },
-        }
-        case.target_id = entity.id
-        case.status, case.actor_id, case.decision_note = "approved", actor_id, note
-        case.decided_at = dt.datetime.now(dt.UTC)
-        session.add(case)
+        entity_id = approve_case_in_session(
+            session,
+            case_id,
+            revision=revision,
+            actor_id=actor_id,
+            target_id=target_id,
+            fields=fields,
+            allow_create=allow_create,
+            note=note,
+            assessment_choices=assessment_choices,
+        )
         session.commit()
-        return entity.id
+        return entity_id
+
+
+def approve_case_in_session(
+    session: Session,
+    case_id: uuid.UUID | str,
+    *,
+    revision: str,
+    actor_id: str,
+    target_id: uuid.UUID | str | None = None,
+    fields: list[str] | None = None,
+    allow_create: bool = False,
+    note: str = "",
+    assessment_choices: dict[str, str] | None = None,
+) -> uuid.UUID:
+    """Apply a reviewed proposal with history, never committing the caller's session."""
+    case = session.get(ReconciliationCase, uuid.UUID(str(case_id)), with_for_update=True)
+    if case is None or case.status != "pending":
+        raise ValueError("Case is missing or already decided")
+    _require_general_case(case)
+    preview = _preview(session, case, target_id)
+    if revision != preview["revision"]:
+        raise ValueError("Data changed since preview. Refresh and review again.")
+    if preview["blocked"]:
+        raise ValueError(f"Unresolved dependencies/conflicts: {preview['blocked']}")
+    target_id = preview["target_id"]
+    if not target_id and not allow_create:
+        raise ValueError("Creation requires explicit approval")
+    options = {row["field"]: row for row in preview["fields"]}
+    selected = fields if fields is not None else [f for f, row in options.items() if row["selected"]]
+    if set(selected) - options.keys():
+        raise ValueError("Selected fields are not in the preview")
+    writes = EntityWriter(session, actor_id)
+    if target_id:
+        entity = _get(session, case.entity_type, target_id)
+        writes.update(entity, _selected_changes(entity, options, selected))
+    else:
+        entity = writes.create(ENTITY_MODELS[case.entity_type], preview["incoming"])
+    if case.operation == "merge":
+        merge_entity(
+            writes,
+            case.entity_type,
+            entity,
+            preview["duplicate_state"]["record"]["id"],
+            assessment_choices=assessment_choices,
+        )
+        case.duplicate_id = uuid.UUID(preview["duplicate_state"]["record"]["id"])
+    else:
+        _save_source(session, case, entity.id)
+        _apply_credits(writes, case, entity)
+    case.context = {
+        **case.context,
+        "decision": {
+            "before": preview["current"],
+            "after": entity_snapshot(entity),
+            "fields": selected,
+            "duplicate": preview["duplicate_state"],
+        },
+    }
+    case.target_id = entity.id
+    case.status, case.actor_id, case.decision_note = "approved", actor_id, note
+    case.decided_at = dt.datetime.now(dt.UTC)
+    session.add(case)
+    writes.finish()
+    return entity.id
 
 
 def decide_case(case_id: uuid.UUID | str, *, status: str, actor_id: str, note: str) -> None:

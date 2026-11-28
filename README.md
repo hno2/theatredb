@@ -29,10 +29,14 @@ To run the app and crawler worker in Docker instead:
 
 ```bash
 docker network create web  # once, if the network does not exist
-docker compose up -d --build
+THEATERDB_COMMIT="$(git rev-parse HEAD)" docker compose up -d --build
 ```
 
 Open <http://localhost:8501>. Stop Docker services with `docker compose down`.
+The sidebar GitHub link shows the build commit; uncommitted changes are not
+represented by that SHA. When building an image directly, pass
+`--build-arg THEATERDB_COMMIT="$(git rev-parse HEAD)"` to `docker build`.
+Without a build SHA, the link points to the repository and reports an unknown commit.
 
 ### Read-only API
 

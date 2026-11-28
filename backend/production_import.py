@@ -53,20 +53,19 @@ from backend.models import (
 )
 from backend.reconciliation import (
     EMPTY,
-    audit_event,
+    apply_credit,
     canonical_url,
     decide_case,
-    ensure_credit,
     entity_snapshot,
     normalize,
     resolve_id,
-    revalidate,
     stable_digest,
     union_values,
     validate_payload,
 )
 from backend.texts import family_roots, resolve_staged_text
 from backend.user_management import get_session
+from backend.writes import EntityWriter, SourceObservation, record_source
 
 OPERATION = "production_upload"
 # Titles at or above this score are treated as "possibly the same production" and reviewed.
@@ -453,76 +452,27 @@ def _compare(
 # --- applying -------------------------------------------------------------------------------------------------
 
 
-def _link_source(
-    session: Session,
-    *,
-    source_id: uuid.UUID,
-    kind: EntityType,
-    entity_id: uuid.UUID,
-    record_key: str,
-    external_url: str | None,
-    payload: dict,
-    captured_at: dt.datetime | None,
-    reassign: bool,
-) -> bool:
-    """Record the source identity and source link; return whether the entity gained a new source."""
-    record = session.exec(
-        select(SourceRecord).where(
-            SourceRecord.source_id == source_id,
-            SourceRecord.entity_type == kind,
-            SourceRecord.record_key == record_key,
-        )
-    ).first()
-    if record is None:
-        record = SourceRecord(source_id=source_id, entity_type=kind, record_key=record_key, entity_id=entity_id)
-    if record.entity_id == entity_id or reassign:
-        record.entity_id = entity_id
-        record.external_url = external_url
-        record.payload = payload
-        if captured_at or record.captured_at is None:
-            record.captured_at = captured_at
-        session.add(record)
-    link = session.exec(
-        select(EntitySource).where(
-            EntitySource.source_id == source_id,
-            EntitySource.entity_type == kind,
-            EntitySource.entity_id == entity_id,
-        )
-    ).first()
-    created = link is None
-    if link is None:
-        link = EntitySource(source_id=source_id, entity_type=kind, entity_id=entity_id, external_url=external_url)
-    link.external_url = link.external_url or external_url
-    link.reviewed = True
-    if captured_at:
-        link.sourced_at = captured_at
-    session.add(link)
-    return created
-
-
 def _resolve_person(
-    session: Session,
+    writes: EntityWriter,
     credit: dict,
     *,
     production: Production,
     organization_id: uuid.UUID,
     source_id: uuid.UUID,
     captured_at: dt.datetime | None,
-    actor_id: str | None,
 ) -> Person:
+    session = writes.session
     person = _find_person(session, credit, production=production, organization_id=organization_id, source_id=source_id)
     if person is None:
-        person = Person.model_validate(
+        person = writes.create(
+            Person,
             {
                 "name": credit["name"],
                 "type": credit["types"],
                 "urls": credit["urls"],
                 **{field: credit.get(field) for field in PERSON_FILL_FIELDS},
-            }
+            },
         )
-        session.add(person)
-        session.flush()
-        audit_event(session, person, "insert", actor_id)
     else:
         before = entity_snapshot(person)
         updates = {
@@ -536,23 +486,19 @@ def _resolve_person(
                 and (not field.endswith("_precision") or before.get(field.removesuffix("_precision")) in EMPTY)
             },
         }
-        validated = revalidate(person, updates)
-        for field in updates:
-            setattr(person, field, getattr(validated, field))
-        if entity_snapshot(person) != before:
-            session.add(person)
-            audit_event(session, person, "update", actor_id)
+        writes.update(person, updates)
     if credit["urls"]:
-        _link_source(
+        record_source(
             session,
-            source_id=source_id,
-            kind=EntityType.PERSON,
-            entity_id=person.id,
-            record_key=canonical_url(credit["urls"][0]),
-            external_url=canonical_url(credit["urls"][0]),
-            payload={"credit": credit},
-            captured_at=captured_at,
-            reassign=False,
+            SourceObservation(
+                source_id=source_id,
+                kind=EntityType.PERSON,
+                entity_id=person.id,
+                record_key=canonical_url(credit["urls"][0]),
+                external_url=canonical_url(credit["urls"][0]),
+                payload={"credit": credit},
+                captured_at=captured_at,
+            ),
         )
     return person
 
@@ -598,7 +544,7 @@ def _apply_text(session: Session, production: Production, item: dict, *, replace
     return True
 
 
-def _apply(
+def apply_production(
     session: Session,
     production: Production | None,
     item: dict,
@@ -609,64 +555,60 @@ def _apply(
     choices: dict[str, str],
     actor_id: str | None,
 ) -> tuple[Production, bool]:
-    """Merge the upload into a production (or create it); conflicts keep existing values unless chosen."""
+    """Apply prepared theatre evidence with history, never committing the session.
+
+    Matching remains the import adapter's job. Conflicts keep existing values
+    unless explicitly chosen; missing fields and relationships are filled.
+    """
+    writes = EntityWriter(session, actor_id)
     if production is None:
-        production = Production.model_validate({**item["incoming"], "organization_id": organization_id})
-        session.add(production)
-        session.flush()
-        audit_event(session, production, "insert", actor_id)
+        production = writes.create(Production, {**item["incoming"], "organization_id": organization_id})
         changed, text_conflict, director_choice = True, False, "incoming"
     else:
-        before = entity_snapshot(production)
+        if production.organization_id != organization_id:
+            raise ValueError("Only productions of the same theatre can be merged")
         comparison = _compare(session, production, item, organization_id, source_id)
         updates = _production_updates(comparison, item, choices)
-        validated = revalidate(production, updates)
-        for field in updates:
-            setattr(production, field, getattr(validated, field))
-        changed = entity_snapshot(production) != before
-        if changed:
-            session.add(production)
-            audit_event(session, production, "update", actor_id)
+        changed = writes.update(production, updates)
         text_conflict = "text" in comparison["conflicts"]
         director_choice = choices.get("director", "existing") if "director" in comparison["conflicts"] else "incoming"
     if choices.get("director") == "incoming" and director_choice == "incoming":
         # Explicitly chosen: the uploaded direction replaces the existing one.
         for membership, _ in _members(session, production):
             if canonical_role(membership.role_name) == "director":
-                audit_event(session, membership, "delete", actor_id)
+                writes.record(membership, "delete")
                 session.delete(membership)
                 changed = True
         session.flush()
-    persons: dict[str, Person] = {}
     for credit in item["credits"]:
         if canonical_role(credit["role"]) == "director" and director_choice != "incoming":
             continue
         person = _resolve_person(
-            session,
+            writes,
             credit,
             production=production,
             organization_id=organization_id,
             source_id=source_id,
             captured_at=captured_at,
-            actor_id=actor_id,
         )
-        persons[normalize(credit["name"])] = person
-        changed |= ensure_credit(session, production, person.id, credit["role"], credit["character"], actor_id)
+        changed |= apply_credit(writes, production, person.id, credit["role"], credit["character"])
         session.flush()
     if not text_conflict or choices.get("text") == "incoming":
         changed |= _apply_text(session, production, item, replace=text_conflict)
-    changed |= _link_source(
+    changed |= record_source(
         session,
-        source_id=source_id,
-        kind=EntityType.PRODUCTION,
-        entity_id=production.id,
-        record_key=item["record_key"],
-        external_url=item["record_key"],
-        payload={"incoming": item["incoming"], "credits": item["credits"], "text": item.get("text")},
-        captured_at=captured_at,
+        SourceObservation(
+            source_id=source_id,
+            kind=EntityType.PRODUCTION,
+            entity_id=production.id,
+            record_key=item["record_key"],
+            external_url=item["record_key"],
+            payload={"incoming": item["incoming"], "credits": item["credits"], "text": item.get("text")},
+            captured_at=captured_at,
+        ),
         reassign=True,
     )
-    session.flush()
+    writes.finish()
     return production, changed
 
 
@@ -760,7 +702,7 @@ def _ingest_one(
     actor_id: str | None,
 ) -> str:
     def apply(production: Production | None) -> tuple[Production, bool]:
-        return _apply(
+        return apply_production(
             session,
             production,
             item,
@@ -1075,40 +1017,66 @@ def resolve_production_case(
     ``choices`` maps conflicting fields (and ``director``/``text``) to ``"existing"`` or ``"incoming"``;
     conflicts default to the existing value. Gaps are filled and lists are combined automatically.
     """
+    with get_session() as session:
+        production_id = resolve_production_case_in_session(
+            session,
+            case_id,
+            revision=revision,
+            actor_id=actor_id,
+            target_id=target_id,
+            create=create,
+            choices=choices,
+            note=note,
+        )
+        session.commit()
+        return production_id
+
+
+def resolve_production_case_in_session(
+    session: Session,
+    case_id: uuid.UUID | str,
+    *,
+    revision: str,
+    actor_id: str | None,
+    target_id: uuid.UUID | str | None = None,
+    create: bool = False,
+    choices: dict[str, str] | None = None,
+    note: str = "",
+) -> uuid.UUID:
+    """Apply a reviewed theatre upload, leaving commit and rollback to the caller."""
     choices = choices or {}
     if set(choices.values()) - {"existing", "incoming"}:
         raise ValueError("Choices must be 'existing' or 'incoming'")
-    with get_session() as session:
-        case = _load_case(session, case_id, lock=True)
-        if case.status != "pending":
-            raise ValueError("Case is already decided")
-        review = _review(session, case, target_id, create)
-        if review["revision"] != revision:
-            raise ValueError("Data changed since preview. Refresh and review again.")
-        target = session.get(Production, uuid.UUID(review["target"]["id"])) if review["target"] else None
-        before = entity_snapshot(target) if target else None
-        if case.source_id is None:
-            raise ValueError("Upload case without source")
-        production, _ = _apply(
-            session,
-            target,
-            _item(case),
-            organization_id=uuid.UUID(review["organization_id"]),
-            source_id=case.source_id,
-            captured_at=case.captured_at,
-            choices={field: choices[field] for field in review["conflicts"] if field in choices},
-            actor_id=actor_id,
-        )
-        case.context = {
-            **case.context,
-            "decision": {"before": before, "after": entity_snapshot(production), "choices": choices},
-        }
-        case.target_id = production.id
-        case.status, case.actor_id, case.decision_note = "approved", actor_id, note
-        case.decided_at = dt.datetime.now(dt.UTC)
-        session.add(case)
-        session.commit()
-        return production.id
+    case = _load_case(session, case_id, lock=True)
+    if case.status != "pending":
+        raise ValueError("Case is already decided")
+    review = _review(session, case, target_id, create)
+    if review["revision"] != revision:
+        raise ValueError("Data changed since preview. Refresh and review again.")
+    target = session.get(Production, uuid.UUID(review["target"]["id"])) if review["target"] else None
+    before = entity_snapshot(target) if target else None
+    if case.source_id is None:
+        raise ValueError("Upload case without source")
+    production, _ = apply_production(
+        session,
+        target,
+        _item(case),
+        organization_id=uuid.UUID(review["organization_id"]),
+        source_id=case.source_id,
+        captured_at=case.captured_at,
+        choices={field: choices[field] for field in review["conflicts"] if field in choices},
+        actor_id=actor_id,
+    )
+    case.context = {
+        **case.context,
+        "decision": {"before": before, "after": entity_snapshot(production), "choices": choices},
+    }
+    case.target_id = production.id
+    case.status, case.actor_id, case.decision_note = "approved", actor_id, note
+    case.decided_at = dt.datetime.now(dt.UTC)
+    session.add(case)
+    session.flush()
+    return production.id
 
 
 def reject_production_case(case_id: uuid.UUID | str, *, actor_id: str, note: str = "") -> None:

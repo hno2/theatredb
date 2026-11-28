@@ -1,6 +1,37 @@
 # Write API and bulk ingestion
 
-Status: proposed, not implemented.
+Status: API and jobs proposed; import/reconciliation persistence boundary extracted.
+
+## Extracted write boundary
+
+[EntityWriter](../backend/writes.py) binds validation and SCD2 history to a caller's
+session. Commands create or update rows through it, track direct domain mutations,
+and finish only after relationship changes and ORM normalization. History is batched
+once per changed identity, including person-to-text merge cascades; true no-ops
+produce no update event. No command commits.
+
+Session-bound entry points:
+
+- [approve_case_in_session and merge_entities_in_session](../backend/reconciliation.py)
+  retain reviewed-field choices, stale-preview checks, source collision checks,
+  organization assessments, graph rewiring and redirects.
+- [apply_production and resolve_production_case_in_session](../backend/production_import.py)
+  retain theatre-scoped matching, fill-gaps/list-union policy and explicit conflict
+  choices. `apply_production` consumes the existing prepared staging contract.
+- [SourceObservation / record_source](../backend/writes.py) share accepted source
+  persistence. Reconciliation rejects identity reassignment; theatre production
+  application explicitly permits it. Older or undated observations cannot replace
+  dated evidence or regress source timestamps. New observations retain archived
+  merge provenance.
+
+Existing approval/merge wrappers still own sessions and commit for current callers.
+`ingest_records(session=...)` still leaves the entire import and `ImportRun` in the
+caller's transaction, including crawler checkpoints. A caller must roll back the
+whole action on a command failure; flushed changes are not a successful commit.
+
+These are trusted in-process commands, not public CRUD or authorization boundaries.
+Verified principals, resource-specific API schemas, row revisions, cross-writer
+locking and durable import jobs remain prerequisites before exposing HTTP writes.
 
 ## Recommendation
 

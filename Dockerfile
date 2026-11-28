@@ -18,12 +18,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM python:3.14-slim-bookworm
 
+ARG THEATERDB_COMMIT=""
 RUN groupadd --system --gid 999 nonroot \
  && useradd --system --gid 999 --uid 999 --create-home nonroot
 WORKDIR /app
 COPY --from=builder /app /app
 RUN mkdir -p /app/data/crawls && chown nonroot:nonroot /app/data/crawls
 
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/app/.venv/bin:$PATH" THEATERDB_COMMIT="${THEATERDB_COMMIT}"
 USER nonroot
 CMD ["sh", "-c", "python -m backend.db migrate && exec streamlit run frontend/app.py"]

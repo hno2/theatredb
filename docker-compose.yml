@@ -18,7 +18,10 @@ services:
       start_period: 10s
 
   app:
-    build: .
+    build:
+      context: .
+      args:
+        THEATERDB_COMMIT: ${THEATERDB_COMMIT:-}
     restart: always
     ports:
       - 8501:8501

@@ -33,9 +33,11 @@ from backend.production_import import (
     production_review,
     reject_production_case,
     resolve_production_case,
+    resolve_production_case_in_session,
     scrape_scope,
     title_similarity,
 )
+from backend.scd2 import SCD2History
 from backend.texts import add_title, resolve_staged_text
 from frontend.management import reconciliation as review_ui
 
@@ -145,6 +147,83 @@ def test_same_title_without_conflict_is_merged_with_people_text_and_second_sourc
     assert not rows(db, ReconciliationCase)
     assert upload(theatre, HAMLET)["unchanged"] == ["Hamlet"]
     assert len(rows(db, ProductionMembership)) == 3
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_application_audits_final_graph_once_and_skips_unchanged_reimport(db, theatre, existing) -> None:
+    if existing:
+        save(db, Production(name="Hamlet", organization_id=theatre.id))
+    record = {
+        **HAMLET,
+        "memberships": [
+            {"name": "One Person", "type": "director"},
+            {"name": "One Person", "type": "actor"},
+        ],
+    }
+    upload(theatre, record)
+    production = rows(db, Production)[0]
+    assert production.text_id is not None
+    history = rows(db, SCD2History, SCD2History.entity_id == str(production.id))
+    assert len(history) == 1
+    assert history[0].operation == ("update" if existing else "insert")
+    assert history[0].snapshot == production.model_dump(mode="json")
+    assert history[0].actor_id == "test"
+    person = next(row for row in rows(db, Person) if row.name == "One Person")
+    person_history = rows(db, SCD2History, SCD2History.entity_id == str(person.id))
+    assert len(person_history) == 1
+    assert person_history[0].operation == "insert"
+    assert person_history[0].snapshot == person.model_dump(mode="json")
+    total = len(rows(db, SCD2History))
+    assert upload(theatre, record)["unchanged"] == ["Hamlet"]
+    assert len(rows(db, SCD2History)) == total
+
+
+@pytest.mark.parametrize("captured_at", [None, CAPTURE - dt.timedelta(days=1)])
+def test_stale_upload_fills_gaps_without_regressing_source_evidence(db, theatre, captured_at) -> None:
+    upload(theatre, {**HAMLET, "description": None})
+    with Session(db) as session:
+        record = session.exec(select(SourceRecord).where(SourceRecord.entity_type == EntityType.PRODUCTION)).one()
+        record.external_id = "retained-id"
+        record.payload = {**record.payload, "merged_sources": [{"external_id": "archived"}]}
+        session.add(record)
+        session.commit()
+    assert upload(theatre, HAMLET, captured_at=captured_at)["merged"] == ["Hamlet"]
+    production = rows(db, Production)[0]
+    assert production.description == HAMLET["description"]
+    record = rows(db, SourceRecord, SourceRecord.entity_type == EntityType.PRODUCTION)[0]
+    link = rows(db, EntitySource, EntitySource.entity_type == EntityType.PRODUCTION)[0]
+    assert record.captured_at == CAPTURE
+    assert link.sourced_at == CAPTURE
+    assert record.payload["incoming"]["description"] is None
+    assert record.payload["merged_sources"] == [{"external_id": "archived"}]
+    upload(theatre, HAMLET, captured_at=CAPTURE + dt.timedelta(days=1))
+    record = rows(db, SourceRecord, SourceRecord.entity_type == EntityType.PRODUCTION)[0]
+    assert record.payload["incoming"]["description"] == HAMLET["description"]
+    assert record.payload["merged_sources"] == [{"external_id": "archived"}]
+    assert record.external_id == "retained-id"
+
+
+def test_session_bound_upload_review_rolls_back_entities_evidence_and_decision(db, theatre) -> None:
+    production = save(db, Production(name="Hamlet", organization_id=theatre.id, description="Curated"))[0]
+    upload(theatre, HAMLET)
+    case = rows(db, ReconciliationCase)[0]
+    review = production_review(case.id)
+    with Session(db) as session:
+        result = resolve_production_case_in_session(
+            session, case.id, revision=review["revision"], actor_id="test", choices={"description": "incoming"}
+        )
+        assert result == production.id
+        pending = session.get(ReconciliationCase, case.id)
+        assert pending is not None and pending.status == "approved"
+        assert session.exec(select(SCD2History)).all()
+        session.rollback()
+    assert rows(db, Production)[0].description == "Curated"
+    assert rows(db, ReconciliationCase)[0].status == "pending"
+    assert not rows(db, Person)
+    assert not rows(db, Text)
+    assert not rows(db, EntitySource)
+    assert not rows(db, SourceRecord)
+    assert not rows(db, SCD2History)
 
 
 def test_legacy_null_lists_do_not_block_merge(db, theatre) -> None:

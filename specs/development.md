@@ -115,6 +115,8 @@ The **Deploy production** workflow runs on every push to `main` and can also be
 started manually. It tests the selected commit, publishes an amd64/arm64 image
 to GHCR, and deploys its digest to the existing Compose project. The GitHub
 `production` environment records the result and links to the live site.
+The image embeds the tested commit SHA for the sidebar GitHub link, including
+when rolling back to an older image.
 
 ### One-time setup
 

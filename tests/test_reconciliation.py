@@ -31,16 +31,19 @@ from backend.models import (
     Text,
     TextContribution,
     TextLineage,
+    TextTitle,
 )
 from backend.reconciliation import (
     ENTITY_MODELS,
     approve_case,
+    approve_case_in_session,
     canonical_role,
     decide_case,
     discover_duplicates,
     find_candidates,
     list_cases,
     merge_entities,
+    merge_entities_in_session,
     merge_people,
     preview_case,
     preview_entity_merge,
@@ -54,6 +57,7 @@ from backend.reconciliation import (
 )
 from backend.scd2 import SCD2History
 from backend.taxonomy import set_production_tags, sync_vocabulary
+from backend.writes import EntityWriter
 
 CAPTURE = dt.datetime(2026, 6, 7, tzinfo=dt.UTC)
 REVIEW_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "reconciliation.py"
@@ -377,6 +381,17 @@ def test_person_merge_also_merges_matching_author_texts(db, source, merge_path) 
                 SCD2History.operation == "delete",
             )
         ).one().entity_id == str(second.id)
+        models = {
+            "person": Person,
+            "text": Text,
+            "texttitle": TextTitle,
+            "textcontribution": TextContribution,
+            "production": Production,
+        }
+        for history in session.exec(select(SCD2History).where(SCD2History.is_current)):
+            row = session.get(models[history.entity_name], uuid.UUID(history.entity_id))
+            assert row is not None
+            assert history.snapshot == row.model_dump(mode="json")
 
 
 @pytest.mark.parametrize("difference", ["coauthor", "role", "title", "metadata", "unaffected"])
@@ -1041,6 +1056,64 @@ def test_bulk_people_merge_failure_rolls_back_earlier_merges(db, source) -> None
     assert count(db, ReconciliationCase) == 0
     assert count(db, SCD2History) == 0
     assert get_entity_graph(Person, str(left.id))["nationality"] is None
+
+
+@pytest.mark.parametrize("operation", ["review", "selection"])
+def test_session_bound_merge_leaves_graph_history_and_decisions_uncommitted(db, source, operation) -> None:
+    left, right = save(db, Person(name="Same"), Person(name="Same", description="Evidence"))
+    production = save(db, Production(name="Show"))[0]
+    membership = save(db, ProductionMembership(production_id=production.id, person_id=right.id))[0]
+    save(db, EntitySource(entity_type=EntityType.PERSON, entity_id=right.id, source_id=source.id))
+    case = None
+    if operation == "review":
+        case = queue_duplicate(EntityType.PERSON, left.id, right.id, reason="Same person")
+        preview = preview_case(case.id, target_id=left.id)
+    else:
+        preview = preview_entity_merge(EntityType.PERSON, [left.id, right.id], target_id=left.id)
+    with Session(db) as session:
+        if operation == "review":
+            assert case is not None
+            result = approve_case_in_session(
+                session, case.id, revision=preview["revision"], actor_id="test", target_id=left.id
+            )
+        else:
+            result = merge_entities_in_session(
+                session,
+                EntityType.PERSON,
+                [left.id, right.id],
+                target_id=left.id,
+                revision=preview["revision"],
+                actor_id="test",
+            )
+        assert result == left.id
+        assert session.get(Person, right.id) is None
+        moved = session.get(ProductionMembership, membership.id)
+        assert moved is not None and moved.person_id == left.id
+        assert session.exec(select(SCD2History)).all()
+        session.rollback()
+    assert count(db, Person) == 2
+    assert count(db, SourceRecord) == 0
+    assert count(db, EntityRedirect) == 0
+    assert count(db, SCD2History) == 0
+    assert get_entity_graph(Person, str(left.id))["description"] is None
+    with Session(db) as session:
+        original = session.get(ProductionMembership, membership.id)
+        assert original is not None and original.person_id == right.id
+        assert all(row.status == "pending" for row in session.exec(select(ReconciliationCase)))
+
+
+def test_compound_write_returning_to_initial_state_has_no_history(db) -> None:
+    person = save(db, Person(name="Name"))[0]
+    with Session(db) as session:
+        current = session.get(Person, person.id)
+        assert current is not None
+        writes = EntityWriter(session, "test")
+        writes.update(current, {"description": "Temporary"})
+        writes.update(current, {"description": None})
+        writes.finish()
+        session.commit()
+    assert count(db, SCD2History) == 0
+    assert get_entity_graph(Person, str(person.id))["description"] is None
 
 
 @pytest.mark.parametrize("change", ["person", "reference", "source"])

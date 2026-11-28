@@ -1,6 +1,7 @@
 import streamlit as st
 
 from frontend.auth import current_user, login_button
+from frontend.version import render_github_link
 from frontend.views.settings import render_verified_toggle
 
 st.set_page_config(page_title="TheaterDB", layout="wide")
@@ -54,4 +55,6 @@ if nav.url_path in {"", "detail", "theater"}:
     with st.sidebar:
         st.subheader("Einstellungen")
         render_verified_toggle("_sidebar_verified_only")
+with st.sidebar:
+    render_github_link()
 nav.run()
