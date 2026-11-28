@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections import deque
-from collections.abc import Iterable
+from collections import Counter, deque
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any
 
+from sqlalchemy import or_
 from sqlmodel import Session, col, select
 
 from backend.config import ROLE_LABELS
@@ -25,6 +28,198 @@ from backend.models import (
 from backend.reconciliation import audit_event, ensure_credit, normalize, resolve_id, stable_digest
 
 FAMILY_RELATIONS = frozenset({LineageRelation.TRANSLATION, LineageRelation.ADAPTATION})
+LABEL_ROLES = ("author", "translator", "adapter")
+CREDIT_ROLES = ("composer", "author", "lyricist", "translator", "adapter")
+
+
+@dataclass(slots=True)
+class TextFamilyView:
+    """Data needed to render text-family details without UI-layer traversal."""
+
+    member_ids: set[uuid.UUID]
+    is_root: bool
+    labels: dict[str, str]
+    ancestors: set[uuid.UUID]
+    descendants: set[uuid.UUID]
+    children: dict[uuid.UUID, list[tuple[uuid.UUID, LineageRelation]]]
+    productions: dict[uuid.UUID, list[str]]
+    texts: dict[uuid.UUID, Text]
+
+
+def _contributions(
+    session: Session, ids: set[uuid.UUID], roles: tuple[str, ...]
+) -> list[tuple[uuid.UUID, str | None, str]]:
+    return list(
+        session.exec(
+            select(TextContribution.text_id, TextContribution.role, Person.name)
+            .join(Person, col(Person.id) == col(TextContribution.person_id))
+            .where(col(TextContribution.text_id).in_(ids), col(TextContribution.role).in_(roles))
+            .order_by(Person.name)
+        )
+    )
+
+
+def _format_labels(
+    texts: list[Text], roots_by_text: dict[uuid.UUID, list[Text]], credits: Iterable[tuple[uuid.UUID, str | None, str]]
+) -> dict[str, str]:
+    contributions: dict[uuid.UUID, list[str]] = {}
+    for text_id, role, name in credits:
+        if role is None:
+            raise ValueError("Text picker contribution has no role")
+        if role in LABEL_ROLES:
+            contributions.setdefault(text_id, []).append(f"{ROLE_LABELS[role]}: {name}")
+    labels = {}
+    for text in texts:
+        details = [", ".join(text.languages), ", ".join(contributions.get(text.id, []))]
+        roots_label = ", ".join(
+            root.title for root in roots_by_text[text.id] if root.id != text.id and root.title != text.title
+        )
+        if roots_label:
+            details.insert(0, f"Werk: {roots_label}")
+        labels[str(text.id)] = text.title + (" — " + "; ".join(d for d in details if d) if any(details) else "")
+    counts = Counter(labels.values())
+    return {key: f"{label} [{key[:8]}]" if counts[label] > 1 else label for key, label in labels.items()}
+
+
+def labels_for_texts(session: Session, texts: list[Text]) -> dict[str, str]:
+    """Make text choices distinguishable without exposing raw foreign keys."""
+    if not texts:
+        return {}
+    ids = {text.id for text in texts}
+    roots = family_roots_many(session, ids)
+    return _format_labels(texts, roots, _contributions(session, ids, LABEL_ROLES))
+
+
+def _walk_lineage(
+    session: Session, seeds: set[uuid.UUID], relations: Iterable[LineageRelation], *, reverse: bool | None
+) -> tuple[set[uuid.UUID], list[tuple[uuid.UUID, uuid.UUID, LineageRelation]]]:
+    """Fetch one frontier at a time; None follows edges in both directions."""
+    seen, frontier = set(seeds), seeds
+    edges: dict[tuple[uuid.UUID, uuid.UUID, LineageRelation], None] = {}
+    while frontier:
+        outgoing = col(TextLineage.source_text_id).in_(frontier)
+        incoming = col(TextLineage.derived_text_id).in_(frontier)
+        endpoints = outgoing if reverse is False else incoming if reverse is True else or_(outgoing, incoming)
+        rows = session.exec(
+            select(TextLineage.source_text_id, TextLineage.derived_text_id, TextLineage.relation).where(
+                endpoints, col(TextLineage.relation).in_(relations)
+            )
+        ).all()
+        for source, derived, relation in rows:
+            edges[source, derived, LineageRelation(relation)] = None
+        frontier = {item for source, derived, _ in rows for item in (source, derived)} - seen
+        seen.update(frontier)
+    return seen, list(edges)
+
+
+def _roots_by_text(
+    texts: dict[uuid.UUID, Text], edges: list[tuple[uuid.UUID, uuid.UUID, LineageRelation]]
+) -> dict[uuid.UUID, list[Text]]:
+    neighbors: dict[uuid.UUID, set[uuid.UUID]] = {}
+    derived_ids = set()
+    for source, derived, _ in edges:
+        neighbors.setdefault(source, set()).add(derived)
+        neighbors.setdefault(derived, set()).add(source)
+        derived_ids.add(derived)
+    roots_by_text: dict[uuid.UUID, list[Text]] = {}
+    for text_id in texts:
+        if text_id in roots_by_text:
+            continue
+        component, frontier = {text_id}, {text_id}
+        while frontier:
+            frontier = {neighbor for item in frontier for neighbor in neighbors.get(item, ())} - component
+            component.update(frontier)
+        roots = sorted((texts[item] for item in component - derived_ids), key=lambda text: (text.title, text.id))
+        roots_by_text.update(dict.fromkeys(component, roots))
+    return roots_by_text
+
+
+def _detail_credit_line(
+    text: Text,
+    upstream: list[tuple[uuid.UUID, uuid.UUID, LineageRelation]],
+    contributions: Iterable[tuple[uuid.UUID, str | None, str]],
+) -> str:
+    parents: dict[uuid.UUID, set[uuid.UUID]] = {}
+    sources = set()
+    for source, derived, relation in upstream:
+        if relation == LineageRelation.BASED_ON:
+            sources.add(source)
+        else:
+            parents.setdefault(derived, set()).add(source)
+    credits: dict[tuple[uuid.UUID, str | None], set[str]] = {}
+    for text_id, role, name in contributions:
+        credits.setdefault((text_id, role), set()).add(name)
+    parts = []
+    for role in CREDIT_ROLES:
+        names = (
+            _inherited_names(text.id, role, parents, credits)
+            if role in {"composer", "author", "lyricist"}
+            else credits.get((text.id, role), set())
+        )
+        if names:
+            label = "Buch" if role == "author" and text.genre == "musical" else ROLE_LABELS[role]
+            parts.append(f"{label} {', '.join(sorted(names))}")
+    names = {name for source in sources for name in _inherited_names(source, "author", parents, credits)}
+    if names:
+        parts.append(f"nach {', '.join(sorted(names))}")
+    return " · ".join(parts)
+
+
+def _based_on_ancestors(
+    member_ids: set[uuid.UUID], upstream: list[tuple[uuid.UUID, uuid.UUID, LineageRelation]]
+) -> set[uuid.UUID]:
+    parents: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for source, derived, relation in upstream:
+        if relation == LineageRelation.BASED_ON:
+            parents.setdefault(derived, set()).add(source)
+    seen, frontier = set(member_ids), member_ids
+    while frontier:
+        frontier = {parent for item in frontier for parent in parents.get(item, ())} - seen
+        seen.update(frontier)
+    return seen - member_ids
+
+
+def text_family_view(session: Session, text_id: uuid.UUID) -> TextFamilyView:
+    """Load text-family data for management rendering without putting traversal in the UI."""
+    text = session.get(Text, text_id)
+    if text is None:
+        raise ValueError("Text not found")
+    member_ids, family_edges = _walk_lineage(session, {text_id}, FAMILY_RELATIONS, reverse=None)
+    upstream_ids, upstream = _walk_lineage(session, member_ids, LineageRelation, reverse=True)
+    ancestors = _based_on_ancestors(member_ids, upstream)
+    downstream_ids, _ = _walk_lineage(session, member_ids, (LineageRelation.BASED_ON,), reverse=False)
+    descendants = downstream_ids - member_ids
+    relatives = ancestors | descendants
+    label_ids, label_edges = _walk_lineage(session, relatives, FAMILY_RELATIONS, reverse=None)
+    visible_ids = member_ids | relatives
+    text_ids = member_ids | label_ids
+    texts = {
+        item.id: item
+        for item in session.exec(select(Text).where(col(Text.id).in_(text_ids)).order_by(Text.title, col(Text.id)))
+    }
+    roots = _roots_by_text(texts, family_edges + label_edges)
+    credits = _contributions(session, upstream_ids | visible_ids, CREDIT_ROLES)
+    labels = _format_labels([texts[item] for item in visible_ids], roots, credits)
+    productions: dict[uuid.UUID, list[str]] = {}
+    for production_text_id, name in session.exec(
+        select(Production.text_id, Production.name).where(col(Production.text_id).in_(member_ids))
+    ):
+        if production_text_id is not None:
+            productions.setdefault(production_text_id, []).append(name)
+    children: dict[uuid.UUID, list[tuple[uuid.UUID, LineageRelation]]] = {}
+    for source, derived, relation in family_edges:
+        children.setdefault(source, []).append((derived, relation))
+    derived_ids = {derived for _, derived, _ in family_edges}
+    return TextFamilyView(
+        member_ids=member_ids,
+        is_root=text_id not in derived_ids,
+        labels=labels,
+        ancestors=ancestors,
+        descendants=descendants,
+        children=children,
+        productions=productions,
+        texts=texts,
+    )
 
 
 def add_title(session: Session, text: Text, title: str, language: str | None = None) -> TextTitle:
@@ -488,6 +683,114 @@ def resolve_staged_text(
             people.add_credits(result, data.get(f"{role}s", []), role)
         session.add(result)
     return result
+
+
+def _save_credit_review_case(
+    session: Session,
+    result: ReconciliationCase,
+    text_id: uuid.UUID,
+    credit: str,
+    parsed: Mapping[str, Any],
+    language: str | None,
+    source_id: str | None,
+    production_id: str | None,
+    relink: bool,
+) -> ReconciliationCase:
+    if result.status != "pending":
+        raise ValueError("Dieser Prüffall ist nicht offen. Bitte zuerst erneut öffnen.")
+    context = dict(result.context or {})
+    production = session.get(Production, uuid.UUID(production_id)) if production_id else None
+    if production_id and production is None:
+        raise ValueError("Production no longer exists")
+    if production is not None:
+        production_ids = list(context.get("production_ids", []))
+        if context.get("production_id"):
+            production_ids.append(str(context["production_id"]))
+        context["production_ids"] = list(dict.fromkeys([*production_ids, production_id]))
+        text_ids = dict(context.get("production_text_ids", {}))
+        text_ids.setdefault(production_id, str(production.text_id) if production.text_id else None)
+        context["production_text_ids"] = text_ids
+        adapters = dict(context.get("production_adapter_names", {}))
+        adapters[production_id] = list(dict.fromkeys([*adapters.get(production_id, []), *parsed["adapters"]]))
+        context["production_adapter_names"] = adapters
+    inputs = list(context.get("credit_inputs", []))
+    entry = {
+        "text_id": str(text_id),
+        "credit": credit,
+        "parsed": dict(parsed),
+        "language": language,
+        "source_id": source_id,
+        "production_id": production_id,
+        "relink": relink,
+    }
+    if entry not in inputs:
+        inputs.append(entry)
+    context["credit_inputs"] = inputs
+    result.context = context
+    session.add(result)
+    return result
+
+
+def _apply_text_credit(
+    session: Session,
+    result: Text,
+    parsed: Mapping[str, Any],
+    source_id: str | None,
+    production_id: str | None,
+    relink: bool,
+    actor_id: str | None,
+) -> Text:
+    if source_id:
+        roots = family_roots(session, result.id)
+        if len(roots) != 1:
+            raise ValueError("Die Werkfamilie hat mehrere Ursprünge; Vorlage bitte direkt verknüpfen.")
+        add_lineage(session, uuid.UUID(source_id), roots[0].id, LineageRelation.BASED_ON)
+    if production_id:
+        production = session.get(Production, uuid.UUID(production_id))
+        if production is None:
+            raise ValueError("Production no longer exists")
+        people = CreditPeople(session)
+        for name in dict.fromkeys(name.strip() for name in parsed["adapters"] if name.strip()):
+            ensure_credit(session, production, people.person_id(name, "adapter"), "adapter", None, actor_id)
+        if relink:
+            production.text_id = result.id
+            session.add(production)
+    return result
+
+
+def save_text_credit(
+    session: Session,
+    text: Text,
+    credit: str,
+    parsed: Mapping[str, Any],
+    language: str | None,
+    source_id: str | None,
+    production_id: str | None,
+    relink: bool,
+    actor_id: str | None,
+) -> Text | ReconciliationCase:
+    """Apply a reviewed credit and any selected source/production links in the caller's transaction."""
+    title = parsed.get("title") or text.title
+    result = (
+        resolve_staged_text(session, {"title": title, "authors": parsed["authors"]})
+        if parsed["authors"] or parsed.get("title")
+        else text
+    )
+    if not isinstance(result, ReconciliationCase) and parsed["translators"]:
+        result = resolve_staged_text(
+            session,
+            {
+                "title": title,
+                "authors": parsed["authors"],
+                "translators": parsed["translators"],
+                "language": language,
+            },
+        )
+    if isinstance(result, ReconciliationCase):
+        return _save_credit_review_case(
+            session, result, text.id, credit, parsed, language, source_id, production_id, relink
+        )
+    return _apply_text_credit(session, result, parsed, source_id, production_id, relink, actor_id)
 
 
 def fill_text_metadata(session: Session, text: Text, data: dict) -> None:
