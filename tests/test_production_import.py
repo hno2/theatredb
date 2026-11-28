@@ -28,6 +28,7 @@ from backend.models import (
 from backend.production_import import (
     OPERATION,
     TITLE_THRESHOLD,
+    _find_person,
     ingest_records,
     list_production_cases,
     production_review,
@@ -43,6 +44,31 @@ from frontend.management import reconciliation as review_ui
 
 CAPTURE = dt.datetime(2026, 6, 7, tzinfo=dt.UTC)
 REVIEW_APP = Path(__file__).resolve().parents[1] / "frontend" / "management" / "reconciliation.py"
+
+
+def test_equal_namesake_scores_choose_stable_person_id(db, theatre) -> None:
+    people = [Person(name="Same Name"), Person(name="Same Name")]
+    productions = [
+        Production(name=f"Play {index}", organization_id=theatre.id)
+        for index in range(len(people))
+    ]
+    memberships = [
+        ProductionMembership(person_id=person.id, production_id=production.id, role_name="actor")
+        for person, production in zip(people, productions, strict=True)
+    ]
+    save(db, *people, *productions, *memberships)
+
+    with Session(db) as session:
+        found = _find_person(
+            session,
+            {"name": "Same Name", "urls": []},
+            production=None,
+            organization_id=theatre.id,
+            source_id=None,
+        )
+
+    assert found is not None
+    assert found.id == min((person.id for person in people), key=str)
 
 
 def test_shared_staging_year_survives_upload(db, theatre) -> None:
