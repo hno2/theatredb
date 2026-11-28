@@ -139,6 +139,14 @@ def iso_date(value: dt.datetime, precision: DatePrecision) -> str:
     ]
 
 
+def performance_date(value: str) -> str:
+    """Validate a local performance date, with an optional minute-precision time."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?", value):
+        raise ValueError("Performance dates must be local ISO dates or date-times to the minute")
+    parsed, precision = parse_date(value)
+    return iso_date(parsed, precision)
+
+
 def intervals_overlap(
     left: tuple[dt.datetime, dt.datetime | None], right: tuple[dt.datetime, dt.datetime | None]
 ) -> bool:

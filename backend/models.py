@@ -5,9 +5,9 @@ from collections import defaultdict
 from enum import StrEnum
 from graphlib import CycleError, TopologicalSorter
 from itertools import batched
-from typing import Any, ClassVar, Protocol, cast
+from typing import Annotated, Any, ClassVar, Protocol, cast
 
-from pydantic import model_validator
+from pydantic import AfterValidator, model_validator
 from sqlalchemy import JSON, CheckConstraint, Column, DateTime, ForeignKey, Index, Uuid, event, select, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import Text as SQLText
@@ -17,7 +17,9 @@ from sqlalchemy.orm import Session as SASession
 from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint, col
 
-from backend.date_precision import DatePrecision, normalize_dates
+from backend.date_precision import DatePrecision, normalize_dates, performance_date
+
+type PerformanceDate = Annotated[str, AfterValidator(performance_date)]
 
 
 class DomainModel(SQLModel):
@@ -775,6 +777,7 @@ class Production(SourceMixin, DomainModel, table=True):
     description: str | None = None
     premiere: dt.datetime | None = Field(default=None, sa_type=DateTime)
     premiere_precision: DatePrecision | None = None
+    performance_dates: list[PerformanceDate] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
 
     organization_id: uuid.UUID | None = Field(default=None, foreign_key="organization.id", index=True)
     organization: Organization | None = Relationship(back_populates="productions")
@@ -915,6 +918,8 @@ def _normalize_domain_row(_mapper: object, _connection: object, target: DomainMo
         raise TypeError("Expected normalized date fields")
     for key, value in normalized.items():
         setattr(target, key, value)
+    if isinstance(target, Production):
+        target.performance_dates = list(dict.fromkeys(performance_date(value) for value in target.performance_dates))
 
 
 for _model in (Organization, Person, OrganizationMembership, Text, Production, AwardNomination):

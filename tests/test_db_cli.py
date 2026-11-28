@@ -100,6 +100,20 @@ def test_migrations_match_models(postgres) -> None:
     assert db.main(["status"]) == 0
 
 
+def test_performance_dates_migration_preserves_existing_productions(postgres) -> None:
+    with postgres.begin() as connection:
+        config = user_management.alembic_config(connection)
+        command.upgrade(config, "0017")
+        connection.execute(text("INSERT INTO production (id, name) VALUES (gen_random_uuid(), 'Existing')"))
+        command.upgrade(config, "head")
+        assert (
+            connection.execute(text("SELECT performance_dates FROM production WHERE name = 'Existing'")).scalar_one()
+            == []
+        )
+        command.downgrade(config, "0017")
+        assert connection.execute(text("SELECT name FROM production")).scalar_one() == "Existing"
+
+
 def test_orif_migration_rewrites_postgres_enum_payloads_and_downgrades(postgres) -> None:
     with postgres.begin() as connection:
         config = user_management.alembic_config(connection)
