@@ -19,7 +19,7 @@ from yarl import URL
 from backend import user_management
 from backend.config import canonical_role
 from backend.date_precision import DatePrecision
-from backend.entity_management import browse_entities, list_entities
+from backend.entity_management import catalog_page, list_entities
 from backend.import_status import theatre_status
 from backend.ingestion import theapolis
 from backend.ingestion.staging import staging_schema, validate_records
@@ -1651,8 +1651,8 @@ def test_batches_are_visible_and_failed_production_batch_resumes(db, monkeypatch
         if kind == EntityType.PRODUCTION:
             production_batches += 1
             assert len(list_entities(Organization)) == 5
-            assert browse_entities(Person)[1] == 10
-            assert browse_entities(Production)[1] == (production_batches - 1) * 2
+            assert catalog_page(Person, "", [], limit=100)[1] == 10
+            assert catalog_page(Production, "", [], limit=100)[1] == (production_batches - 1) * 2
         original(session, kind, credits, actor_id=actor_id)
         if kind == EntityType.PRODUCTION and production_batches == 2:
             raise ValueError("injected batch failure")

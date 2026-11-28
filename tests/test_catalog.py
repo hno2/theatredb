@@ -71,6 +71,11 @@ def test_catalog_ranks_before_pagination_and_counts_each_production_once(catalog
     assert catalog_suggestions(Text, "Vari", []) == ["Variante", "Z Text"]
 
 
+def test_catalog_name_sort_is_available_for_discovery(catalog_db):
+    rows, _ = catalog_page(Organization, "", [], limit=10, sort_by="name", descending=False)
+    assert [row["name"] for row in rows] == ["A Bühne", "Z Bühne"]
+
+
 def test_text_detail_keeps_catalog_metadata_and_personal_actions(catalog_db):
     with get_session() as session:
         text = session.exec(select(Text).where(Text.title == "Z Text")).one()

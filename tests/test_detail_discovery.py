@@ -14,23 +14,47 @@ from frontend.views import discovery, organization
 DETAIL_PAGE = Path(__file__).resolve().parents[1] / "frontend" / "views" / "detail.py"
 
 
+def discovery_page(model, query: str = "", *, limit: int = 12, offset: int = 0, verified_only: bool = False):
+    return entity_management.catalog_page(
+        model,
+        query,
+        [entity_management.verified_organization_filter()] if verified_only else [],
+        limit=limit,
+        offset=offset,
+        sort_by="premiere" if model is Production else "name",
+        descending=model is Production,
+    )
+
+
 @pytest.fixture
 def directory(monkeypatch) -> Mock:
-    browse = Mock(
+    page = Mock(
         return_value=(
             [{"id": "theatre", "name": "Bühne", "address_locality": "Wien", "address_country": "Österreich"}],
             1,
         )
     )
-    monkeypatch.setattr(discovery, "browse_entities", browse)
-    return browse
+    monkeypatch.setattr(discovery, "catalog_page", page)
+    return page
+
+
+def assert_page_call(page: Mock, model, query: str, offset: int, *, verified: bool = False) -> None:
+    args, kwargs = page.call_args
+    assert args[:2] == (model, query)
+    assert len(args[2]) == int(verified)
+    assert kwargs == {
+        "limit": 12,
+        "offset": offset,
+        "sort_by": "premiere" if model is Production else "name",
+        "descending": model is Production,
+    }
 
 
 def test_detail_entry_shows_links_without_dropdowns_or_open_button(directory) -> None:
     app = AppTest.from_file(DETAIL_PAGE).run()
     assert not app.exception
     assert app.text_input[0].proto.live_debounce_ms == 500
-    directory.assert_called_once_with(Organization, "", limit=12, offset=0, verified_only=True)
+    assert_page_call(directory, Organization, "", 0, verified=True)
     assert not app.selectbox
     assert not app.button
     assert any("?kind=organization&amp;id=theatre" in element.value for element in app.markdown)
@@ -63,7 +87,7 @@ def test_production_directory_has_direct_links_and_theatre_context(directory) ->
     app.query_params["kind"] = "production"
     app.run()
     assert not app.exception
-    directory.assert_called_once_with(Production, "", limit=12, offset=0, verified_only=False)
+    assert_page_call(directory, Production, "", 0)
     html = "\n".join(element.value for element in app.markdown)
     assert "?kind=production&amp;id=production" in html
     assert "?kind=organization&amp;id=theatre" in html
@@ -78,21 +102,21 @@ def test_directory_search_pagination_and_changed_search_reset(directory) -> None
     assert [widget.value for widget in app.pagination] == [1, 1]
     app.pagination[0].set_value(3).run()
     assert not app.exception
-    directory.assert_called_with(Organization, "", limit=12, offset=24, verified_only=True)
+    assert_page_call(directory, Organization, "", 24, verified=True)
     assert [widget.value for widget in app.pagination] == [3, 3]
     app.pagination[1].set_value(2).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=12, verified_only=True)
+    assert_page_call(directory, Organization, "", 12, verified=True)
     assert [widget.value for widget in app.pagination] == [2, 2]
     app.pagination[1].set_value(3).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=24, verified_only=True)
+    assert_page_call(directory, Organization, "", 24, verified=True)
     app.text_input[0].set_value("  Wien  ").run()
-    directory.assert_called_with(Organization, "Wien", limit=12, offset=0, verified_only=True)
+    assert_page_call(directory, Organization, "Wien", 0, verified=True)
     assert [widget.value for widget in app.pagination] == [1, 1]
     app.pagination[0].set_value(3).run()
     directory.return_value = (directory.return_value[0], 1)
     app.run()
     assert not app.exception
-    directory.assert_called_with(Organization, "Wien", limit=12, offset=0, verified_only=True)
+    assert_page_call(directory, Organization, "Wien", 0, verified=True)
     assert not app.pagination
 
 
@@ -104,12 +128,12 @@ def test_large_directory_keeps_pagination_bounded_and_last_page_reachable(direct
     assert all(widget.num_pages == 100 for widget in app.pagination)
     assert all(widget.proto.max_visible_pages == 7 for widget in app.pagination)
     app.pagination[0].set_value(100).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=1188, verified_only=True)
+    assert_page_call(directory, Organization, "", 1188, verified=True)
     assert [widget.value for widget in app.pagination] == [100, 100]
     app.pagination[0].set_value(99).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=1176, verified_only=True)
+    assert_page_call(directory, Organization, "", 1176, verified=True)
     app.pagination[1].set_value(1).run()
-    directory.assert_called_with(Organization, "", limit=12, offset=0, verified_only=True)
+    assert_page_call(directory, Organization, "", 0, verified=True)
     assert [widget.value for widget in app.pagination] == [1, 1]
 
 
@@ -121,7 +145,7 @@ def test_empty_directory_and_search_are_explicit(directory) -> None:
     app.text_input[0].set_value("Hamlet").run()
     assert "Ändere die Suche" in app.info[0].value
     app.radio[0].set_value("person").run()
-    directory.assert_called_with(Person, "", limit=12, offset=0, verified_only=False)
+    assert_page_call(directory, Person, "", 0)
 
 
 def test_direct_theatre_link_respects_filter_without_exposing_quality(monkeypatch, tmp_path) -> None:
@@ -139,7 +163,7 @@ def test_direct_theatre_link_respects_filter_without_exposing_quality(monkeypatc
             theatre.id, "flag_update", actor_id="editor", update_scope=scope, update_reason="Audit note"
         )
     try:
-        rows, total = entity_management.browse_entities(Organization, limit=1, verified_only=True)
+        rows, total = discovery_page(Organization, limit=1, verified_only=True)
         assert total == 1
         assert [row["name"] for row in rows] == [checked.name]
         for theatre in (unchecked, flagged, checked):
@@ -164,7 +188,7 @@ def test_direct_theatre_link_respects_filter_without_exposing_quality(monkeypatc
         engine.dispose()
 
 
-def test_browse_query_is_bounded_searchable_literal_and_detached(monkeypatch) -> None:
+def test_catalog_search_is_bounded_searchable_literal_and_detached(monkeypatch) -> None:
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
@@ -180,25 +204,25 @@ def test_browse_query_is_bounded_searchable_literal_and_detached(monkeypatch) ->
         session.commit()
         newest_id = str(productions[1].id)
     monkeypatch.setattr(entity_management, "get_session", lambda: Session(engine))
-    rows, total = entity_management.browse_entities(Production, "wien", limit=1)
+    rows, total = discovery_page(Production, "wien", limit=1)
     assert total == 2
     assert [row["id"] for row in rows] == [newest_id]
     assert rows[0]["organization"]["address_locality"] == "Wien"
-    rows, total = entity_management.browse_entities(Production, "Bühne", limit=1, offset=1)
+    rows, total = discovery_page(Production, "Bühne", limit=1, offset=1)
     assert total == 2
     assert [row["name"] for row in rows] == ["Old"]
-    rows, total = entity_management.browse_entities(Production, "%_")
+    rows, total = discovery_page(Production, "%_")
     assert total == 1
     assert rows[0]["name"] == "100%_literal"
     assert rows[0]["organization"] is None
-    assert entity_management.browse_entities(Organization, "wien")[1] == 1
-    assert entity_management.browse_entities(Organization, "Österreich")[1] == 1
-    rows, total = entity_management.browse_entities(Person, "Alex")
+    assert discovery_page(Organization, "wien")[1] == 1
+    assert discovery_page(Organization, "Österreich")[1] == 1
+    rows, total = discovery_page(Person, "Alex")
     assert total == 2
     assert len({row["id"] for row in rows}) == 2
-    assert entity_management.browse_entities(Production, "missing") == ([], 0)
-    assert entity_management.browse_entities(Production, offset=100) == ([], 4)
+    assert discovery_page(Production, "missing") == ([], 0)
+    assert discovery_page(Production, offset=100) == ([], 4)
     for limit, offset in ((0, 0), (101, 0), (12, -1)):
         with pytest.raises(ValueError, match="bounds"):
-            entity_management.browse_entities(Production, limit=limit, offset=offset)
+            discovery_page(Production, limit=limit, offset=offset)
     engine.dispose()

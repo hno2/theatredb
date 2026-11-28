@@ -19,7 +19,7 @@ from backend.data_quality import (
     season_label,
 )
 from backend.entity_management import (
-    browse_entities,
+    catalog_page,
     create_entity,
     delete_entity,
     get_organization_profile,
@@ -110,7 +110,7 @@ def test_nested_public_productions_do_not_expose_organization_reviewers(db: Engi
         session.add(ProductionMembership(person_id=person.id, production_id=production.id, role_name="actor"))
         session.commit()
         person_id = str(person.id)
-    discovery, _ = browse_entities(Production)
+    discovery, _ = catalog_page(Production, "", [], limit=100)
     for data in (discovery, get_people_productions([person_id])):
         assert data[0]["organization"]["general_verified_at"]
         assert "general_verified_by" not in data[0]["organization"]

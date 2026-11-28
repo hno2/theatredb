@@ -439,56 +439,6 @@ def get_organization_profile(entity_id: str, *, verified_only: bool = False) -> 
         }
 
 
-def browse_entities(
-    model_cls: type[Organization | Production | Person],
-    query: str = "",
-    *,
-    limit: int = 12,
-    offset: int = 0,
-    verified_only: bool = False,
-) -> tuple[list[dict[str, Any]], int]:
-    """Fetch a bounded discovery page with theatre context and a matching count."""
-    if not 1 <= limit <= 100 or offset < 0:
-        raise ValueError("Invalid discovery page bounds")
-    stmt = select(model_cls)
-    if model_cls is Organization and verified_only:
-        stmt = stmt.where(verified_organization_filter())
-    if model_cls is Production:
-        stmt = stmt.outerjoin(Organization)
-    query = query.strip()
-    if query:
-        filters = [col(model_cls.name).icontains(query, autoescape=True)]
-        if model_cls is Organization:
-            filters.extend(
-                field.icontains(query, autoescape=True)
-                for field in (col(Organization.address_locality), col(Organization.address_country))
-            )
-        elif model_cls is Production:
-            filters.extend(
-                field.icontains(query, autoescape=True)
-                for field in (
-                    col(Organization.name),
-                    col(Organization.address_locality),
-                    col(Organization.address_country),
-                )
-            )
-        stmt = stmt.where(or_(*filters))
-    with get_session() as session:
-        total = session.exec(select(func.count()).select_from(stmt.subquery())).one()
-        if model_cls is Production:
-            stmt = stmt.options(selectinload(cast(InstrumentedAttribute, Production.organization))).order_by(
-                col(Production.premiere).desc().nulls_last()
-            )
-        rows = session.exec(stmt.order_by(col(model_cls.name), col(model_cls.id)).offset(offset).limit(limit)).all()
-        entries = []
-        for row in rows:
-            entry = _public_snapshot(row)
-            if isinstance(row, Production):
-                entry["organization"] = _public_snapshot(row.organization) if row.organization else None
-            entries.append(entry)
-        return entries, total
-
-
 type CatalogModel = type[Organization | Production | Person | Text]
 
 
@@ -548,13 +498,19 @@ def catalog_page(
     counts = select(owner.label("owner"), count.label("count")).where(owner.is_not(None)).group_by(owner).subquery()
     production_count = func.coalesce(counts.c.count, 0)
     matches = stmt.order_by(None).subquery()
+    label = matches.c.title if model is Text else matches.c.name
+    ordering = (
+        (label.desc() if descending else label.asc(), entity_id)
+        if sort_by == "name"
+        else (production_count.desc(), label, entity_id)
+    )
     with get_session() as session:
         total = session.exec(select(func.count()).select_from(matches)).one()
         rows = session.exec(
             select(model, production_count)
             .join(matches, entity_id == matches.c.id)
             .outerjoin(counts, entity_id == counts.c.owner)
-            .order_by(production_count.desc(), matches.c.title if model is Text else matches.c.name, entity_id)
+            .order_by(*ordering)
             .limit(limit)
             .offset(offset)
         ).all()

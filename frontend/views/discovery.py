@@ -1,7 +1,8 @@
 import streamlit as st
 
 from backend.config import DISCOVERY_KINDS
-from backend.entity_management import browse_entities
+from backend.entity_management import catalog_page, verified_organization_filter
+from backend.models import Production
 from frontend.views.helpers import entity_link, theatre_city
 from frontend.views.organization import render_production_card
 from frontend.views.settings import verified_only
@@ -47,8 +48,14 @@ def render_discovery(initial_kind: str = "organization") -> None:
     only_verified = kind == "organization" and verified_only()
     page_key = f"discovery_page_{kind}_{only_verified}_{query}"
     page = st.session_state.get(page_key, 1)
-    entries, total = browse_entities(
-        model, query, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE, verified_only=only_verified
+    entries, total = catalog_page(
+        model,
+        query,
+        [verified_organization_filter()] if only_verified else [],
+        limit=PAGE_SIZE,
+        offset=(page - 1) * PAGE_SIZE,
+        sort_by="premiere" if model is Production else "name",
+        descending=model is Production,
     )
     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     if page > pages:
